@@ -1,0 +1,2 @@
+somepkg==1.2.3
+    # via -r requirements.in

@@ -1,0 +1,997 @@
+// Package installsurface statically analyzes a package's install-time surface:
+// the lifecycle hooks it declares, the files and URLs those hooks reach for, and
+// the capabilities that chain exhibits.
+//
+// ZERO EXECUTION (Decision D-04). Nothing here runs a hook, a shell, or a
+// package manager. It reads text and pattern-matches. The output is FACTS about
+// what the install-time chain *can* touch — judging those facts is the VC-002
+// family's job (Decision D-03).
+//
+// The static ceiling is deliberate and documented: this detects capability and
+// indirection, NOT payload semantics. A hook that base64-decodes and evals a
+// blob is reported as obfuscated+exec — we do not decode and reason about the
+// payload. Detecting the obfuscation IS the finding.
+package installsurface
+
+import (
+	"regexp"
+	"strings"
+)
+
+// Capability is something an install-time chain can do.
+type Capability string
+
+const (
+	CapNetwork     Capability = "network"     // reaches the network
+	CapCredentials Capability = "credentials" // touches NAMED secrets/tokens/credential files
+	CapEnv         Capability = "env"         // reads process env generally (weak signal, very common)
+	CapExec        Capability = "exec"        // spawns processes or evals code
+	CapObfuscation Capability = "obfuscation" // base64/hex decode paired with code execution
+	CapFilesystem  Capability = "filesystem"  // touches shell profiles / persistence locations
+	CapCradle      Capability = "cradle"      // fetches remote code and executes it in one step
+)
+
+// InstallHookNames are the npm lifecycle scripts that run as part of an install.
+// These are the ones that matter pre-install; `prepare` is included because npm
+// runs it for git/dep installs.
+var InstallHookNames = []string{
+	"preinstall", "install", "postinstall",
+	"preprepare", "prepare", "postprepare",
+	"prepublish",
+}
+
+// PyPIInstallHookNames are synthetic hook names for Python install-time entry
+// points. Unlike npm, Python has no declarative hook manifest — setup.py IS the
+// hook. These names label the sections of setup.py that execute at install time.
+var PyPIInstallHookNames = []string{
+	"setup.py:module-level",
+	"setup.py:cmdclass.install",
+	"setup.py:cmdclass.develop",
+	"setup.py:cmdclass.build_ext",
+	"setup.py:cmdclass.egg_info",
+	"pyproject.toml:build-backend",
+	"pth:import",
+}
+
+// IsInstallHook reports whether a script name is an install-time lifecycle hook.
+func IsInstallHook(name string) bool {
+	for _, h := range InstallHookNames {
+		if h == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Artifact is a file or URL an install-time chain reaches for.
+type Artifact struct {
+	Ref      string       // local path (relative to package root) or absolute URL
+	Remote   bool         // true when Ref is a URL
+	Caps     []Capability // capabilities found in this artifact's own source
+	Evidence []string     // human-readable markers that produced Caps
+	Read     bool         // true when the artifact's source was available and scanned
+}
+
+// Sink is a credential/secret destination the chain references.
+type Sink struct {
+	Name     string // e.g. "NPM_TOKEN", "~/.npmrc"
+	Evidence string
+}
+
+// Hook is one lifecycle hook and everything statically reachable from it.
+type Hook struct {
+	Name      string // preinstall, postinstall, ...
+	Command   string // the raw script command
+	Caps      []Capability
+	Evidence  []string
+	Artifacts []Artifact
+	Sinks     []Sink
+}
+
+// HasCap reports whether the hook or any of its artifacts exhibits c.
+func (h Hook) HasCap(c Capability) bool {
+	for _, x := range h.Caps {
+		if x == c {
+			return true
+		}
+	}
+	for _, a := range h.Artifacts {
+		for _, x := range a.Caps {
+			if x == c {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Surface is a package's complete install-time surface.
+type Surface struct {
+	Hooks []Hook
+}
+
+// FileReader returns the contents of a path relative to the package root.
+// ok is false when the file is unavailable (not installed, outside the package,
+// unreadable) — an unavailable file is recorded as unread, never guessed at.
+type FileReader func(relPath string) (content []byte, ok bool)
+
+// ---- pattern tables -------------------------------------------------------
+
+var (
+	urlRe = regexp.MustCompile(`https?://[^\s'"` + "`" + `)\\;|]+`)
+
+	// script file references, e.g. "node setup.mjs", "sh ./install.sh"
+	fileRefRe = regexp.MustCompile(`(?:^|[\s;&|])\.?/?([\w./@-]+\.(?:m?js|cjs|ts|sh|bash|py|ps1))`)
+
+	networkMarkers = []string{
+		"curl ", "wget ", "fetch(", "node-fetch", "axios", "https.get", "http.get",
+		"https.request", "http.request", "XMLHttpRequest", "net.connect",
+		"tls.connect", "dgram", "new WebSocket", "WebSocket(", "undici", "got(",
+		// Python
+		"urllib.request", "urllib2", "http.client", "httplib.", "import httplib",
+		"urlopen(", "urlretrieve(", "requests.get", "requests.post",
+		"httpx.", "aiohttp.Client", "import aiohttp", "ftplib", "smtplib", "socket.connect",
+		// Ruby
+		"Net::HTTP", "open-uri", "URI.open", "Faraday", "HTTParty",
+		"RestClient", "Typhoeus", "Excon", "Net::FTP", "Net::SMTP",
+		// Rust
+		"reqwest::", "hyper::", "ureq::", "surf::", "TcpStream::connect",
+		// PHP
+		"file_get_contents(", "curl_exec(", "fopen(\"http", "fsockopen(",
+		"stream_socket_client(", "guzzle",
+		// PowerShell / .NET
+		"Invoke-WebRequest", "Invoke-RestMethod", "System.Net.WebClient",
+		"HttpClient", "DownloadString", "DownloadFile",
+		// Windows LOLBin download cradles
+		"finger.exe", "certutil", "bitsadmin", "msiexec",
+	}
+
+	// NAMED credential markers only. `process.env` alone is deliberately NOT
+	// here: legitimate native-build hooks (node-gyp / prebuild-install and the
+	// packages that depend on them) routinely read env vars AND fetch prebuilt
+	// binaries. Treating broad env access as "credentials" would flag sharp,
+	// bcrypt, sqlite3 and friends — the exact warning tax that gets a tool
+	// muted (brief §6). Broad env access is recorded as CapEnv instead.
+	credentialMarkers = []string{
+		"NPM_TOKEN", "NODE_AUTH_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN",
+		".npmrc", ".git-credentials", "AWS_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY",
+		".aws/credentials", "KUBECONFIG", ".kube/config", "VAULT_TOKEN",
+		"DOCKER_AUTH_CONFIG", ".docker/config.json", "SSH_PRIVATE_KEY", "id_rsa",
+		".ssh/id_", "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_CLIENT_SECRET",
+		"STRIPE_SECRET", "SLACK_TOKEN", "HF_TOKEN", "OPENAI_API_KEY",
+		// Python
+		".pypirc", "PYPI_TOKEN", "TWINE_PASSWORD", "TWINE_USERNAME",
+		"POETRY_PYPI_TOKEN", "CONDA_TOKEN", ".netrc",
+		// Ruby
+		"GEM_HOST_API_KEY", ".gem/credentials",
+		// Rust
+		"CARGO_REGISTRY_TOKEN", "CRATES_TOKEN",
+		// PHP
+		"COMPOSER_AUTH", "PACKAGIST_TOKEN",
+		// NuGet / .NET
+		"NUGET_API_KEY", "NUGET_AUTH_TOKEN",
+	}
+
+	envMarkers = []string{
+		"process.env", "os.environ", "getenv(",
+		"os.getenv(", "platform.node(", "socket.gethostname(",
+		"getpass.getuser(", "uuid.getnode(",
+		// Ruby
+		"ENV[", "ENV.fetch",
+		// Rust
+		"env::var(", "env::vars(",
+		// PHP
+		"getenv(", "$_ENV[", "$_SERVER[",
+		// PowerShell
+		"$env:", "Get-ChildItem Env:",
+	}
+
+	execMarkers = []string{
+		"child_process", "execSync", "spawnSync", "execFile",
+		"eval(", "new Function(", "vm.runIn", "| sh", "|sh", "| bash", "|bash",
+		"require('child", `require("child`,
+		// Python
+		"os.system(", "os.popen(", "subprocess.", "exec(",
+		"compile(", "__import__(", "ctypes.", "importlib.", "runpy.",
+		// Ruby
+		"system(", "Kernel.exec", "IO.popen", "Open3.", "`",
+		"Kernel.system", "%x{", "%x(",
+		// Rust
+		"Command::new", "process::Command",
+		// PHP
+		"exec(", "shell_exec(", "passthru(", "system(",
+		"proc_open(", "popen(",
+		// PowerShell
+		"Start-Process", "Invoke-Expression", "iex ", "& ",
+		// Windows LOLBins (code execution / app-whitelisting bypass)
+		"mshta", "regsvr32", "cscript", "wscript",
+	}
+
+	// Obfuscation markers are decode-specific. Bare `Buffer.from(` is excluded:
+	// it is ubiquitous in benign code. A base64/hex DECODE is the signal.
+	//
+	// Bare `fromCharCode` was removed (Decision D-25): a single incidental
+	// String.fromCharCode(x) — formatting one byte — is not obfuscation, and it
+	// false-flagged esbuild's installer as VC-002e. Char-code ASSEMBLY (a payload
+	// built from many codes, or via .apply/.map) is detected structurally below.
+	obfuscationMarkers = []string{
+		"atob(", "unescape(", "decodeURIComponent(escape",
+		// Python
+		"codecs.decode(", "binascii.unhexlify(", "marshal.loads(",
+		"pickle.loads(", "zlib.decompress(", "bz2.decompress(",
+		"lzma.decompress(",
+		// Ruby
+		"Base64.decode64", "Marshal.load", "Zlib::Inflate",
+		// PHP
+		"base64_decode(", "gzuncompress(", "gzinflate(", "str_rot13(",
+		"convert_uudecode(",
+		// PowerShell
+		"FromBase64String", "Decompress", "-EncodedCommand",
+	}
+
+	// base64/hex decode idioms, matched structurally rather than by substring.
+	decodeRe = regexp.MustCompile(`(?i)(Buffer\.from\s*\([^)]*['"]base64['"]|from_?base64|b64decode|['"]hex['"]\s*\)|toString\s*\(\s*['"]utf-?8['"]\s*\)|base64\.b64decode|base64\.decodebytes)`)
+
+	// A long unbroken base64-ish run — the classic embedded blob.
+	blobRe = regexp.MustCompile(`[A-Za-z0-9+/=]{160,}`)
+
+	// Char-code ASSEMBLY: String.fromCharCode building a payload rather than
+	// formatting a single byte (Decision D-25). Matches the .apply form
+	// (fromCharCode.apply(null, arr)), three-or-more literal codes
+	// (fromCharCode(0x68, 0x74, ...)), or a map/reduce/forEach over fromCharCode.
+	// A lone fromCharCode(x) — the benign incidental case — matches none of these.
+	charCodeAssemblyRe = regexp.MustCompile(`(?i)(?:fromCharCode\.apply|fromCharCode\s*\([^)]*,[^)]*,|(?:map|reduce|forEach)\s*\([^)]*fromCharCode)`)
+
+	// C-family comments. URLs and capability markers sitting in DOCUMENTATION
+	// must not be read as behavior — the defect that made esbuild's installer
+	// "reach" snapcraft.io and nodejs.org, both of which live in a comment block
+	// explaining the Snap Store (Decision D-25).
+	blockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	lineCommentRe  = regexp.MustCompile(`(?m)(^|[^:])//[^\n]*`)
+
+	// A download CRADLE (Decision D-28): remote code fetched and executed in one
+	// breath. This is deliberately NARROWER than "network + exec" — esbuild
+	// fetches from a known host and runs a *shipped* prebuilt binary, which is
+	// not a cradle. A cradle is the initial-access idiom that legitimate
+	// installers do not use: piping a download straight into an interpreter, or
+	// a living-off-the-land binary used to pull and run code.
+	cradleRe = regexp.MustCompile(`(?i)` +
+		// curl/wget/fetch ... | sh|bash|python|perl|ruby|node|pwsh ...
+		`(?:curl|wget|fetch|lynx|links|iwr|invoke-webrequest)\b[^|\n]*\|\s*(?:sh|bash|zsh|dash|python[0-9.]*|perl|ruby|node|pwsh|powershell|cmd)\b` +
+		// (New-Object Net.WebClient).DownloadString(...) | iex  — and the reverse
+		`|(?:downloadstring|downloaddata|webclient)[^\n]*\|\s*(?:iex|invoke-expression)` +
+		`|(?:iex|invoke-expression)\b[^\n]*(?:downloadstring|downloaddata|webclient|invoke-webrequest)` +
+		// LOLBin download cradles
+		`|certutil\b[^\n]*-(?:urlcache|decode|f)\b` +
+		`|bitsadmin\b[^\n]*/transfer\b`)
+
+	// Caret or single-char separator obfuscation of URL schemes:
+	// h^t^t^p^s, h.t.t.p, h+t+t+p+s, "h"+"t"+"t"+"p", etc.
+	obfuscatedSchemeRe = regexp.MustCompile(`(?i)h[^a-z0-9]{1,3}t[^a-z0-9]{1,3}t[^a-z0-9]{1,3}p(?:[^a-z0-9]{1,3}s)?`)
+
+	// Wildcard-obfuscated executable names (ClickFix-style evasion):
+	// c*u*r*l.e?e, p*ell.exe, p*w*e*r*s*h*e*l*l, c*d.e?e
+	wildcardExeRe = regexp.MustCompile(`(?i)(?:c\*u\*r\*l|p\*(?:ow)?\*?e\*?r?\*?(?:sh)?\*?ell|p\*ell|c\*d\.e|c\*m\*d)`)
+
+	// cmd.exe delayed expansion — enables !var! substitution for evasion.
+	delayedExpansionRe = regexp.MustCompile(`(?i)/v:on\b`)
+
+	filesystemMarkers = []string{
+		".bashrc", ".bash_profile", ".zshrc", ".profile", "/etc/", "os.homedir()",
+		"crontab", "systemd", "AppData\\Roaming", "startup",
+		// Python
+		"site-packages", "sysconfig.", "distutils.",
+		"pathlib.Path.home(", ".pth",
+		// Ruby
+		"Gem.dir", "Gem.path", "spec.extensions",
+		// PHP
+		"vendor/autoload.php",
+		// PowerShell / .NET
+		"$PROFILE", "Microsoft.PowerShell",
+	}
+)
+
+// stripCodeComments removes C-family block and line comments so that URLs and
+// capability markers sitting in documentation are not mistaken for behavior
+// (Decision D-25). It is a heuristic, not a tokenizer: the (^|[^:]) guard
+// protects the "//" inside a URL scheme, and the only residual cost — a "//"
+// inside a string literal — is under-citing a reference, never fabricating one.
+func stripCodeComments(src string) string {
+	src = blockCommentRe.ReplaceAllString(src, " ")
+	src = lineCommentRe.ReplaceAllString(src, "$1")
+	return src
+}
+
+// scanCaps classifies a blob of text (a command line or a file's source).
+func scanCaps(text string) ([]Capability, []string) {
+	var caps []Capability
+	var ev []string
+	add := func(c Capability, marker string) {
+		for _, x := range caps {
+			if x == c {
+				ev = append(ev, marker)
+				return
+			}
+		}
+		caps = append(caps, c)
+		ev = append(ev, marker)
+	}
+
+	lower := strings.ToLower(text)
+	scan := func(markers []string, c Capability) {
+		for _, m := range markers {
+			if strings.Contains(lower, strings.ToLower(m)) {
+				add(c, m)
+			}
+		}
+	}
+	scan(networkMarkers, CapNetwork)
+	scan(credentialMarkers, CapCredentials)
+	scan(envMarkers, CapEnv)
+	scan(execMarkers, CapExec)
+	scan(obfuscationMarkers, CapObfuscation)
+	scan(filesystemMarkers, CapFilesystem)
+
+	// A URL anywhere is a network reach even without a named client.
+	if urlRe.MatchString(text) {
+		add(CapNetwork, "url-literal")
+	}
+	// Structural decode idioms and embedded blobs.
+	if m := decodeRe.FindString(text); m != "" {
+		add(CapObfuscation, "decode:"+strings.TrimSpace(m))
+	}
+	if blobRe.MatchString(text) {
+		add(CapObfuscation, "long-encoded-blob")
+	}
+	// Char-code assembly (payload built from many codes), not incidental use.
+	if m := charCodeAssemblyRe.FindString(text); m != "" {
+		add(CapObfuscation, "charcode-assembly:"+strings.TrimSpace(m))
+	}
+	// Download-and-execute cradle (D-28).
+	if m := cradleRe.FindString(text); m != "" {
+		add(CapCradle, "download-cradle:"+strings.TrimSpace(m))
+	}
+	// Caret/separator-obfuscated URL schemes: h^t^t^p^s, "h"+"t"+"t"+"p", etc.
+	if m := obfuscatedSchemeRe.FindString(text); m != "" {
+		add(CapObfuscation, "obfuscated-scheme:"+m)
+		add(CapNetwork, "obfuscated-scheme:"+m)
+	}
+	// Wildcard-obfuscated executables: c*u*r*l.e?e, p*ell.exe
+	if m := wildcardExeRe.FindString(text); m != "" {
+		add(CapObfuscation, "wildcard-exe:"+m)
+		add(CapExec, "wildcard-exe:"+m)
+	}
+	// cmd delayed expansion: /v:on enables !var! for evasion
+	if delayedExpansionRe.MatchString(text) {
+		add(CapObfuscation, "cmd-delayed-expansion")
+	}
+	return caps, dedupe(ev)
+}
+
+// findSinks extracts credential targets referenced in text.
+func findSinks(text string) []Sink {
+	var out []Sink
+	seen := map[string]bool{}
+	lower := strings.ToLower(text)
+	for _, m := range credentialMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) && !seen[m] {
+			seen[m] = true
+			out = append(out, Sink{Name: m, Evidence: "referenced in install-time source"})
+		}
+	}
+	return out
+}
+
+// Analyze builds the install surface from a package's scripts map. read supplies
+// the source of locally referenced files; it may be nil (then referenced files
+// are recorded as unread rather than guessed at).
+//
+// Traversal depth is bounded at one level (hook -> referenced file). Deeper
+// chains are represented by the first-level artifact; the bound is explicit
+// rather than silent.
+func Analyze(scripts map[string]string, read FileReader) Surface {
+	var s Surface
+	// Deterministic order: iterate the known hook list, not the map.
+	for _, name := range InstallHookNames {
+		cmd, ok := scripts[name]
+		if !ok || strings.TrimSpace(cmd) == "" {
+			continue
+		}
+		h := Hook{Name: name, Command: cmd}
+		h.Caps, h.Evidence = scanCaps(cmd)
+		h.Sinks = findSinks(cmd)
+
+		// Remote artifacts referenced directly by the command.
+		for _, u := range dedupe(urlRe.FindAllString(cmd, -1)) {
+			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true, Read: false})
+		}
+
+		// Local files the command executes.
+		for _, m := range fileRefRe.FindAllStringSubmatch(cmd, -1) {
+			ref := strings.TrimPrefix(m[1], "./")
+			if ref == "" || isKnownBinaryName(ref) {
+				continue
+			}
+			a := Artifact{Ref: ref}
+			if read != nil {
+				if src, ok := read(ref); ok {
+					a.Read = true
+					// Strip comments first: a URL or marker in documentation is
+					// not behavior (Decision D-25).
+					clean := stripCodeComments(string(src))
+					a.Caps, a.Evidence = scanCaps(clean)
+					h.Sinks = append(h.Sinks, findSinks(clean)...)
+					// URLs inside the referenced file become remote artifacts.
+					for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
+						h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+					}
+				}
+			}
+			h.Artifacts = append(h.Artifacts, a)
+		}
+		h.Sinks = dedupeSinks(h.Sinks)
+		s.Hooks = append(s.Hooks, h)
+	}
+	return s
+}
+
+// isKnownBinaryName filters interpreter names that the regex may catch.
+func isKnownBinaryName(ref string) bool {
+	switch ref {
+	case "node.js", "npm.js":
+		return true
+	}
+	return false
+}
+
+func dedupe(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func dedupeSinks(in []Sink) []Sink {
+	seen := map[string]bool{}
+	var out []Sink
+	for _, s := range in {
+		if !seen[s.Name] {
+			seen[s.Name] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ---- Ruby analysis ----------------------------------------------------------
+
+// RubyInstallHookNames are hook names for Ruby gem install-time execution.
+var RubyInstallHookNames = []string{
+	"extconf.rb",
+	"Rakefile:compile",
+}
+
+// AnalyzeRuby builds the install surface from a Ruby gem's build files.
+// extconfRb is the content of extconf.rb (may be empty). gemspec is the
+// content of the .gemspec file (may be empty).
+func AnalyzeRuby(extconfRb, gemspec string) Surface {
+	var s Surface
+	if extconfRb != "" {
+		caps, ev := scanCaps(extconfRb)
+		caps = appendUnique(caps, CapExec)
+		ev = appendStr(ev, "extconf.rb")
+		h := Hook{
+			Name:     "extconf.rb",
+			Command:  truncateStr(extconfRb, 400),
+			Caps:     caps,
+			Evidence: ev,
+			Sinks:    findSinks(extconfRb),
+		}
+		for _, u := range dedupe(urlRe.FindAllString(extconfRb, -1)) {
+			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+		}
+		s.Hooks = append(s.Hooks, h)
+	}
+	if gemspec != "" {
+		if strings.Contains(gemspec, "extensions") && strings.Contains(gemspec, "extconf") {
+			caps, ev := scanCaps(gemspec)
+			if len(caps) > 0 {
+				s.Hooks = append(s.Hooks, Hook{
+					Name:     "gemspec:extensions",
+					Command:  "gemspec declares native extensions",
+					Caps:     caps,
+					Evidence: ev,
+				})
+			}
+		}
+	}
+	return s
+}
+
+// ---- Rust analysis ----------------------------------------------------------
+
+// RustInstallHookNames are hook names for Rust build-time execution.
+var RustInstallHookNames = []string{
+	"build.rs",
+	"proc-macro",
+}
+
+// AnalyzeRust builds the install surface from a Rust crate's build files.
+// buildRs is the content of build.rs (may be empty).
+func AnalyzeRust(buildRs string) Surface {
+	var s Surface
+	if buildRs == "" {
+		return s
+	}
+	caps, ev := scanCaps(buildRs)
+	caps = appendUnique(caps, CapExec)
+	ev = appendStr(ev, "build.rs")
+	h := Hook{
+		Name:     "build.rs",
+		Command:  truncateStr(buildRs, 400),
+		Caps:     caps,
+		Evidence: ev,
+		Sinks:    findSinks(buildRs),
+	}
+	for _, u := range dedupe(urlRe.FindAllString(buildRs, -1)) {
+		h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+	}
+	s.Hooks = append(s.Hooks, h)
+	return s
+}
+
+// ---- PHP/Composer analysis --------------------------------------------------
+
+// ComposerInstallHookNames are lifecycle event names in Composer that execute
+// during install/update.
+var ComposerInstallHookNames = []string{
+	"pre-install-cmd",
+	"post-install-cmd",
+	"pre-update-cmd",
+	"post-update-cmd",
+	"post-autoload-dump",
+	"pre-autoload-dump",
+}
+
+// IsComposerInstallHook reports whether an event name runs at install time.
+func IsComposerInstallHook(name string) bool {
+	for _, h := range ComposerInstallHookNames {
+		if h == name {
+			return true
+		}
+	}
+	return false
+}
+
+// AnalyzePHP builds the install surface from a Composer package's metadata.
+// scripts maps event names to their command strings. pkgType is the package
+// type from composer.json (empty string if unknown). pluginSource is the PHP
+// source of the plugin's declared entrypoint class (empty when the package is
+// not a plugin or the file could not be resolved).
+//
+// A composer-plugin is auto-loaded and its activate() runs on every Composer
+// operation, so the plugin's own PHP is install-time code (Decision D-27). When
+// its source is available it is scanned exactly like any other hook body; the
+// bare-CapExec fallback stands when the source could not be read, so a plugin is
+// never silently downgraded to "unknown".
+func AnalyzePHP(scripts map[string]string, pkgType, pluginSource string) Surface {
+	var s Surface
+
+	if pkgType == "composer-plugin" {
+		h := Hook{
+			Name:     "composer-plugin",
+			Command:  "package type is composer-plugin (auto-loaded at install time)",
+			Caps:     []Capability{CapExec},
+			Evidence: []string{"composer-plugin-type"},
+		}
+		if strings.TrimSpace(pluginSource) != "" {
+			// Comment-strip first (Decision D-25): a URL or marker in PHP
+			// documentation is not behavior.
+			clean := stripCodeComments(pluginSource)
+			pcaps, pev := scanCaps(clean)
+			for _, c := range pcaps {
+				h.Caps = appendUnique(h.Caps, c)
+			}
+			h.Evidence = append(h.Evidence, pev...)
+			h.Sinks = findSinks(clean)
+			for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
+				h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+			}
+		}
+		s.Hooks = append(s.Hooks, h)
+	}
+
+	for _, name := range ComposerInstallHookNames {
+		cmd, ok := scripts[name]
+		if !ok || strings.TrimSpace(cmd) == "" {
+			continue
+		}
+		h := Hook{Name: name, Command: cmd}
+		h.Caps, h.Evidence = scanCaps(cmd)
+		h.Sinks = findSinks(cmd)
+		for _, u := range dedupe(urlRe.FindAllString(cmd, -1)) {
+			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+		}
+		s.Hooks = append(s.Hooks, h)
+	}
+	return s
+}
+
+// ---- NuGet/.NET analysis ----------------------------------------------------
+
+// NuGetInstallHookNames are PowerShell scripts that NuGet packages can include.
+var NuGetInstallHookNames = []string{
+	"install.ps1",
+	"init.ps1",
+	"uninstall.ps1",
+}
+
+// AnalyzeDotNet builds the install surface from a NuGet package's PowerShell
+// install scripts. scripts maps filename to content.
+func AnalyzeDotNet(scripts map[string]string) Surface {
+	var s Surface
+	for _, name := range NuGetInstallHookNames {
+		content, ok := scripts[name]
+		if !ok || strings.TrimSpace(content) == "" {
+			continue
+		}
+		caps, ev := scanCaps(content)
+		caps = appendUnique(caps, CapExec)
+		ev = appendStr(ev, name)
+		h := Hook{
+			Name:     name,
+			Command:  truncateStr(content, 400),
+			Caps:     caps,
+			Evidence: ev,
+			Sinks:    findSinks(content),
+		}
+		for _, u := range dedupe(urlRe.FindAllString(content, -1)) {
+			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+		}
+		s.Hooks = append(s.Hooks, h)
+	}
+	return s
+}
+
+// ---- helpers ----------------------------------------------------------------
+
+func appendUnique(caps []Capability, c Capability) []Capability {
+	for _, x := range caps {
+		if x == c {
+			return caps
+		}
+	}
+	return append(caps, c)
+}
+
+func appendStr(ss []string, s string) []string {
+	for _, x := range ss {
+		if x == s {
+			return ss
+		}
+	}
+	return append(ss, s)
+}
+
+// ---- Python analysis --------------------------------------------------------
+
+// cmdclassRe matches cmdclass dict entries that override install commands.
+var cmdclassRe = regexp.MustCompile(`cmdclass\s*=\s*\{[^}]*\b(install|develop|build_ext|egg_info)\b`)
+
+// cmdclassBlockRe extracts custom command class bodies for capability scanning.
+var cmdclassBlockRe = regexp.MustCompile(`class\s+\w+\s*\([^)]*(?:install|develop|build_ext|egg_info)[^)]*\)\s*:`)
+
+// AnalyzePython builds the install surface from a Python package's install-time
+// files. setupPy is the full text of setup.py (may be empty). pyprojectToml is
+// the full text of pyproject.toml (may be empty). pthFiles maps filename to
+// content for any .pth files found in the distribution.
+func AnalyzePython(setupPy, pyprojectToml string, pthFiles map[string]string) Surface {
+	var s Surface
+
+	if setupPy != "" {
+		s.Hooks = append(s.Hooks, analyzeSetupPy(setupPy)...)
+	}
+	if pyprojectToml != "" {
+		if h, ok := analyzeBuildBackend(pyprojectToml, setupPy != ""); ok {
+			s.Hooks = append(s.Hooks, h)
+		}
+	}
+	for name, content := range pthFiles {
+		if h, ok := analyzePthFile(name, content); ok {
+			s.Hooks = append(s.Hooks, h)
+		}
+	}
+	return s
+}
+
+// analyzeSetupPy extracts install-time hooks from setup.py. It identifies
+// module-level side effects (code that runs before setup()) and custom cmdclass
+// overrides (classes that replace pip's default install behavior).
+func analyzeSetupPy(source string) []Hook {
+	var hooks []Hook
+
+	// Strip ALL URLs before capability scanning. In setup.py, URLs are
+	// overwhelmingly metadata: README badges, homepage, project_urls, license
+	// text, error messages, comments. Real network egress is detected by
+	// function markers (urlopen, requests.get, curl, etc.) which fire
+	// independently of the URL string. Only collect URL artifacts from lines
+	// that also contain a network function call — those are actual targets.
+	cleaned := urlRe.ReplaceAllString(source, "")
+
+	allCaps, allEvidence := scanCaps(cleaned)
+	allSinks := findSinks(cleaned)
+
+	if len(allCaps) > 0 {
+		h := Hook{
+			Name:     "setup.py:module-level",
+			Command:  truncateStr(source, 400),
+			Caps:     allCaps,
+			Evidence: allEvidence,
+			Sinks:    allSinks,
+		}
+		// Only record URL artifacts from lines with network function calls.
+		for _, line := range strings.Split(source, "\n") {
+			if hasNetworkCall(line) {
+				for _, u := range urlRe.FindAllString(line, -1) {
+					h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+				}
+			}
+		}
+		h.Artifacts = dedupeArtifacts(h.Artifacts)
+		hooks = append(hooks, h)
+	}
+
+	// cmdclass overrides: if the file declares custom install/develop/build_ext
+	// commands, each is a distinct hook.
+	if cmdclassRe.MatchString(source) {
+		for _, cmd := range []string{"install", "develop", "build_ext", "egg_info"} {
+			re := regexp.MustCompile(`cmdclass\s*=\s*\{[^}]*\b` + cmd + `\b`)
+			if re.MatchString(source) {
+				h := Hook{
+					Name:    "setup.py:cmdclass." + cmd,
+					Command: "cmdclass override: " + cmd,
+				}
+				// Scan the associated class body if we can find it.
+				classRe := regexp.MustCompile(`class\s+\w+\s*\([^)]*` + cmd + `[^)]*\)\s*:`)
+				if loc := classRe.FindStringIndex(source); loc != nil {
+					body := extractIndentedBlock(source[loc[1]:])
+					h.Caps, h.Evidence = scanCaps(body)
+					h.Sinks = findSinks(body)
+				}
+				hooks = append(hooks, h)
+			}
+		}
+	}
+
+	return hooks
+}
+
+// knownBuildBackends are PEP 517 build backends that are part of the standard
+// Python packaging ecosystem. A package using one of these is not suspicious.
+var knownBuildBackends = []string{
+	"setuptools.build_meta",
+	"flit_core.buildapi",
+	"flit.buildapi",
+	"poetry.core.masonry.api",
+	"poetry.masonry.api",
+	"hatchling.build",
+	"maturin",
+	"scikit_build_core.build",
+	"pdm.backend",
+	"mesonpy",
+	"whey",
+}
+
+// analyzeBuildBackend checks pyproject.toml for non-standard build backends.
+func analyzeBuildBackend(tomlSource string, hasSetupPy bool) (Hook, bool) {
+	backend := ExtractBuildBackend(tomlSource)
+
+	if backend == "" {
+		if hasSetupPy {
+			return Hook{
+				Name:     "pyproject.toml:build-backend",
+				Command:  "no build-backend declared; setup.py runs as legacy build",
+				Caps:     []Capability{CapExec},
+				Evidence: []string{"legacy-setup.py-fallback"},
+			}, true
+		}
+		return Hook{}, false
+	}
+
+	for _, known := range knownBuildBackends {
+		if strings.HasPrefix(backend, known) {
+			return Hook{}, false
+		}
+	}
+
+	return Hook{
+		Name:     "pyproject.toml:build-backend",
+		Command:  "non-standard build backend: " + backend,
+		Caps:     []Capability{CapExec},
+		Evidence: []string{"non-standard-build-backend:" + backend},
+	}, true
+}
+
+// ExtractBuildBackend reads the build-backend value from pyproject.toml without
+// a full TOML parser (D-10). Handles the common single-line form.
+func ExtractBuildBackend(toml string) string {
+	inBuildSystem := false
+	for _, line := range strings.Split(toml, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[build-system]" {
+			inBuildSystem = true
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			inBuildSystem = false
+			continue
+		}
+		if inBuildSystem && strings.HasPrefix(trimmed, "build-backend") {
+			if i := strings.IndexByte(trimmed, '='); i >= 0 {
+				val := strings.TrimSpace(trimmed[i+1:])
+				val = strings.Trim(val, `"'`)
+				return val
+			}
+		}
+	}
+	return ""
+}
+
+// analyzePthFile checks a .pth file for import lines that execute code.
+func analyzePthFile(name, content string) (Hook, bool) {
+	var importLines []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "import\t") {
+			importLines = append(importLines, trimmed)
+		}
+	}
+	if len(importLines) == 0 {
+		return Hook{}, false
+	}
+	combined := strings.Join(importLines, "\n")
+	caps, ev := scanCaps(combined)
+	caps = append(caps, CapExec)
+	ev = append(ev, "pth-import-line")
+	return Hook{
+		Name:     "pth:import",
+		Command:  name + ": " + truncateStr(combined, 300),
+		Caps:     caps,
+		Evidence: ev,
+		Sinks:    findSinks(combined),
+	}, true
+}
+
+// pythonMetadataURLRe matches lines where a URL is assigned to a metadata
+// variable or appears inside a setup() keyword argument. These are data, not
+// code — a homepage URL in __url__ = "https://..." does not mean the hook
+// reaches the network.
+var pythonMetadataURLRe = regexp.MustCompile(
+	`(?i)` +
+		`(?:` +
+		// __homepage__, __url__, __contact__, url =, download_url =, etc.
+		`__\w*(?:url|homepage|contact|repository|tracker|docs)\w*__\s*=` +
+		`|` +
+		// setup() keyword arguments
+		`\b(?:url|download_url|project_urls|author_email|maintainer_email|bugtrack_url|home_page|long_description|description)\s*=` +
+		`|` +
+		// Dict values in project_urls and similar: "Source": "https://..."
+		`["']\w+["']\s*:\s*["']https?://` +
+		`|` +
+		// Dict entries keyed by known metadata names: 'long_description': '...'
+		`["'](?:url|download_url|project_urls|author_email|maintainer_email|bugtrack_url|home_page|long_description|description|license|readme|classifiers)["']\s*:` +
+		`|` +
+		// Classifier strings
+		`pypi\.(?:python\.)?org/pypi\?` +
+		`)`,
+)
+
+// commentLineRe matches lines that are Python comments (optional leading
+// whitespace then #). A URL in a comment is documentation, not network egress.
+var commentLineRe = regexp.MustCompile(`^\s*#`)
+
+// metadataStringKeywordRe matches the start of a multi-line string assignment
+// to a metadata variable (long_description, license, etc.). URLs inside these
+// triple-quoted blocks are README/license content, not network calls.
+var metadataStringKeywordRe = regexp.MustCompile(
+	`(?i)\b(?:long_description|license|description|readme|__doc__|__long_description__|__license__)\s*=\s*(?:"""|\x60\x60\x60|''')`,
+)
+
+// stripPythonMetadataURLs blanks out URLs on lines that are pure metadata
+// assignments, inside comments, or inside multi-line metadata strings so they
+// don't trigger CapNetwork or become artifacts.
+func stripPythonMetadataURLs(source string) string {
+	lines := strings.Split(source, "\n")
+	inMetadataString := false
+	var closer string
+	for i, line := range lines {
+		// Track multi-line metadata string blocks (long_description = """...""").
+		if inMetadataString {
+			lines[i] = urlRe.ReplaceAllString(line, "")
+			if strings.Contains(line, closer) {
+				inMetadataString = false
+			}
+			continue
+		}
+		// Detect opening of a multi-line metadata string.
+		if metadataStringKeywordRe.MatchString(line) {
+			lines[i] = urlRe.ReplaceAllString(line, "")
+			// Determine which triple-quote was used and whether it closes on this line.
+			for _, q := range []string{`"""`, `'''`} {
+				idx := strings.Index(line, q)
+				if idx < 0 {
+					continue
+				}
+				rest := line[idx+3:]
+				if !strings.Contains(rest, q) {
+					inMetadataString = true
+					closer = q
+				}
+			}
+			continue
+		}
+		// Comment lines: URLs here are documentation references.
+		if commentLineRe.MatchString(line) {
+			lines[i] = urlRe.ReplaceAllString(line, "")
+			continue
+		}
+		// Single-line metadata patterns.
+		if pythonMetadataURLRe.MatchString(line) {
+			lines[i] = urlRe.ReplaceAllString(line, "")
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// extractIndentedBlock returns lines following a class/def header that are
+// indented more than the header. Stops at the first unindented line.
+func extractIndentedBlock(source string) string {
+	lines := strings.SplitAfter(source, "\n")
+	var block []string
+	for _, line := range lines {
+		if len(line) == 0 || line == "\n" {
+			block = append(block, line)
+			continue
+		}
+		if line[0] != ' ' && line[0] != '\t' && len(block) > 0 {
+			break
+		}
+		block = append(block, line)
+	}
+	return strings.Join(block, "")
+}
+
+// hasNetworkCall reports whether a line contains a network function call marker.
+func hasNetworkCall(line string) bool {
+	lower := strings.ToLower(line)
+	for _, m := range networkMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
+}
+
+func dedupeArtifacts(in []Artifact) []Artifact {
+	seen := map[string]bool{}
+	var out []Artifact
+	for _, a := range in {
+		if !seen[a.Ref] {
+			seen[a.Ref] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}

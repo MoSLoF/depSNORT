@@ -1,0 +1,10 @@
+{
+  "_meta": {"hash": {"sha256": "abc"}},
+  "default": {
+    "requests": {"version": "==2.19.1", "hashes": ["sha256:x"]},
+    "urllib3":  {"version": "==1.24.1", "hashes": ["sha256:y"]}
+  },
+  "develop": {
+    "pytest": {"version": "==7.4.0", "hashes": ["sha256:z"]}
+  }
+}

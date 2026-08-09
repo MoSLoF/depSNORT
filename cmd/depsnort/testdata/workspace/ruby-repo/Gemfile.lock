@@ -1,0 +1,13 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    nokogiri (1.15.4)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  nokogiri (~> 1.15)
+
+BUNDLED WITH
+   2.3.26

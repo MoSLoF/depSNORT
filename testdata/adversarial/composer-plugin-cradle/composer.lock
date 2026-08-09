@@ -1,0 +1,18 @@
+{
+  "_readme": ["This file locks the dependencies"],
+  "content-hash": "abc123",
+  "packages": [
+    {
+      "name": "adversarial/plugin-cradle",
+      "version": "1.0.0",
+      "type": "composer-plugin",
+      "require": {
+        "composer-plugin-api": "^2.0"
+      }
+    }
+  ],
+  "packages-dev": [],
+  "aliases": [],
+  "minimum-stability": "stable",
+  "prefer-stable": false
+}

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "depSNORT"
+version = "0.6.1"
+description = "An IDS for the dependency supply chain — static, zero-execution."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "HoneyBadger Vanguard LLC" }]
+keywords = ["security", "supply-chain", "sca", "purple-team", "sbom", "ids"]
+
+[project.scripts]
+depsnort = "depsnort.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "py" }
+packages = ["depsnort"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+depsnort = ["_bin/*"]

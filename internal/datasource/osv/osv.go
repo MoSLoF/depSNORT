@@ -1,0 +1,227 @@
+// Package osv is the OSV.dev advisory Source. It queries the batched endpoint
+// (POST /v1/querybatch), classifies malicious-package advisories (MAL-*), and
+// layers an on-disk cache with an offline mode so a scan can run air-gapped.
+//
+// Only package metadata crosses the wire — never a package payload, never an
+// install. This is consistent with the zero-execution ethos (Decision D-04).
+package osv
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"ihbv.io/depsnort/internal/datasource"
+)
+
+// DefaultEndpoint is the OSV.dev API base.
+const DefaultEndpoint = "https://api.osv.dev"
+
+// maxBatch is OSV's querybatch cap.
+const maxBatch = 1000
+
+// Doer is the minimal HTTP surface (http.Client satisfies it). Injectable so
+// tests run without a network.
+type Doer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+// Client is an OSV advisory Source.
+type Client struct {
+	HTTP     Doer
+	Cache    *datasource.Cache
+	Endpoint string
+	Offline  bool
+	// Now is injected for deterministic cache timestamps; defaults to time.Now.
+	Now func() time.Time
+
+	Stats datasource.Stats
+}
+
+// New returns a Client with sensible defaults.
+func New(cache *datasource.Cache, offline bool) *Client {
+	return &Client{
+		HTTP:     &http.Client{Timeout: 20 * time.Second},
+		Cache:    cache,
+		Endpoint: DefaultEndpoint,
+		Offline:  offline,
+		Now:      time.Now,
+	}
+}
+
+// Name implements datasource.Source.
+func (*Client) Name() string { return "osv" }
+
+// ecosystemName maps our internal ecosystem id to OSV's spelling. OSV uses
+// specific casing and naming for each ecosystem; passing our internal id
+// as-is would silently return zero advisories.
+func ecosystemName(eco string) string {
+	switch eco {
+	case "npm":
+		return "npm"
+	case "pypi":
+		return "PyPI"
+	case "gem":
+		return "RubyGems"
+	case "cargo":
+		return "crates.io"
+	case "composer":
+		return "Packagist"
+	case "nuget":
+		return "NuGet"
+	default:
+		return eco
+	}
+}
+
+// ---- OSV wire types ----
+type qbReq struct {
+	Queries []qbQuery `json:"queries"`
+}
+type qbQuery struct {
+	Package qbPkg  `json:"package"`
+	Version string `json:"version"`
+}
+type qbPkg struct {
+	Name      string `json:"name"`
+	Ecosystem string `json:"ecosystem"`
+}
+type qbResp struct {
+	Results []qbResult `json:"results"`
+}
+type qbResult struct {
+	Vulns []qbVuln `json:"vulns"`
+}
+type qbVuln struct {
+	ID       string `json:"id"`
+	Modified string `json:"modified"`
+}
+
+// QueryBatch implements datasource.Source. Cache hits (fresh, or any entry when
+// offline) are served locally; misses are batched to the network unless
+// offline. It updates c.Stats.
+func (c *Client) QueryBatch(ctx context.Context, coords []datasource.Coord) ([][]datasource.Advisory, error) {
+	now := time.Now
+	if c.Now != nil {
+		now = c.Now
+	}
+	out := make([][]datasource.Advisory, len(coords))
+	c.Stats = datasource.Stats{Queried: len(coords), Offline: c.Offline}
+
+	var missIdx []int
+	for i, co := range coords {
+		if adv, fresh, ok := c.Cache.Get(co.Key()); ok && (fresh || c.Offline) {
+			out[i] = adv
+			c.Stats.FromCache++
+			c.tally(adv)
+			continue
+		}
+		if c.Offline {
+			out[i] = nil
+			c.Stats.Gaps++
+			continue
+		}
+		missIdx = append(missIdx, i)
+	}
+
+	// Network fetch for misses, in chunks.
+	for start := 0; start < len(missIdx); start += maxBatch {
+		end := start + maxBatch
+		if end > len(missIdx) {
+			end = len(missIdx)
+		}
+		chunk := missIdx[start:end]
+		results, err := c.postBatch(ctx, coords, chunk)
+		if err != nil {
+			// Mark the rest as gaps and surface the error; the caller decides
+			// how to treat degraded coverage (no silent caps).
+			for _, i := range missIdx[start:] {
+				c.Stats.Gaps++
+				_ = i
+			}
+			return out, err
+		}
+		for j, i := range chunk {
+			adv := results[j]
+			out[i] = adv
+			c.Stats.FromNet++
+			c.tally(adv)
+			_ = c.Cache.Put(coords[i].Key(), adv, now())
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) tally(adv []datasource.Advisory) {
+	c.Stats.Advisories += len(adv)
+	for _, a := range adv {
+		if a.Malicious {
+			c.Stats.Malicious++
+		}
+	}
+}
+
+// postBatch queries OSV for the coords at the given indices and returns
+// advisories aligned to that index slice.
+func (c *Client) postBatch(ctx context.Context, coords []datasource.Coord, idx []int) ([][]datasource.Advisory, error) {
+	body := qbReq{Queries: make([]qbQuery, len(idx))}
+	for k, i := range idx {
+		co := coords[i]
+		body.Queries[k] = qbQuery{
+			Package: qbPkg{Name: co.Name, Ecosystem: ecosystemName(co.Ecosystem)},
+			Version: co.Version,
+		}
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := c.Endpoint
+	if endpoint == "" {
+		endpoint = DefaultEndpoint
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1/querybatch", bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("osv: querybatch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("osv: querybatch status %d: %s", resp.StatusCode, string(snippet))
+	}
+	var parsed qbResp
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, fmt.Errorf("osv: decoding querybatch: %w", err)
+	}
+	if len(parsed.Results) != len(idx) {
+		return nil, fmt.Errorf("osv: expected %d results, got %d", len(idx), len(parsed.Results))
+	}
+
+	out := make([][]datasource.Advisory, len(idx))
+	for k, r := range parsed.Results {
+		adv := make([]datasource.Advisory, 0, len(r.Vulns))
+		for _, v := range r.Vulns {
+			a := datasource.Advisory{
+				ID:        v.ID,
+				Malicious: datasource.ClassifyMalicious(v.ID),
+				Source:    "osv",
+			}
+			if t, err := time.Parse(time.RFC3339, v.Modified); err == nil {
+				a.Modified = t
+			}
+			adv = append(adv, a)
+		}
+		out[k] = adv
+	}
+	return out, nil
+}

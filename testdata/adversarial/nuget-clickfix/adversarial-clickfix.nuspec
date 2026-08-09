@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<package>
+  <metadata>
+    <id>adversarial-clickfix</id>
+    <version>1.0.0</version>
+    <authors>test</authors>
+    <description>Simulates ClickFix evasion in NuGet install.ps1</description>
+  </metadata>
+</package>

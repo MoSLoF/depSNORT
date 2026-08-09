@@ -1,0 +1,467 @@
+// Package composer is the Composer (PHP) ecosystem adapter. It parses
+// composer.lock and builds the dependency graph.
+//
+// Install-time attack vectors:
+//   - composer.json "scripts" section: lifecycle hooks (post-install-cmd,
+//     post-update-cmd, etc.) run arbitrary commands at install time
+//   - Composer plugins (type: "composer-plugin"): auto-loaded and executed
+//     during every Composer operation
+//
+// Nothing here installs or executes anything (Decision D-04).
+package composer
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"ihbv.io/depsnort/internal/graph"
+	"ihbv.io/depsnort/internal/installsurface"
+	"ihbv.io/depsnort/internal/purl"
+)
+
+// Adapter implements ecosystem.Adapter for Composer.
+type Adapter struct{}
+
+// New returns a Composer adapter.
+func New() *Adapter { return &Adapter{} }
+
+// Name implements ecosystem.Adapter.
+func (*Adapter) Name() string { return "composer" }
+
+const composerLockName = "composer.lock"
+
+// Detect implements ecosystem.Adapter.
+func (*Adapter) Detect(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if info.IsDir() {
+		return fileExists(filepath.Join(path, composerLockName))
+	}
+	return filepath.Base(path) == composerLockName
+}
+
+func fileExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
+
+// Resolve implements ecosystem.Adapter.
+func (*Adapter) Resolve(path string) (*graph.Graph, error) {
+	file := path
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("composer: %w", err)
+	}
+	if info.IsDir() {
+		file = filepath.Join(path, composerLockName)
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("composer: reading %s: %w", composerLockName, err)
+	}
+	return parseComposerLock(path, raw)
+}
+
+type composerLock struct {
+	Packages    []composerPkg `json:"packages"`
+	PackagesDev []composerPkg `json:"packages-dev"`
+}
+
+type composerPkg struct {
+	Name    string            `json:"name"`
+	Version string            `json:"version"`
+	Type    string            `json:"type"`
+	Require map[string]string `json:"require"`
+}
+
+func parseComposerLock(path string, raw []byte) (*graph.Graph, error) {
+	var lf composerLock
+	if err := json.Unmarshal(raw, &lf); err != nil {
+		return nil, fmt.Errorf("composer: parsing %s: %w", composerLockName, err)
+	}
+
+	g := graph.New()
+	root := rootNode(g, path)
+
+	byName := map[string]string{} // package name -> node ID
+	addPkgs := func(pkgs []composerPkg, section string) {
+		for _, p := range pkgs {
+			if p.Name == "" || p.Version == "" {
+				continue
+			}
+			version := strings.TrimPrefix(p.Version, "v")
+			id := purl.NewComposer(p.Name, version).String()
+			attr := map[string]string{
+				"composer.source":  composerLockName,
+				"composer.section": section,
+			}
+			if p.Type != "" {
+				attr["composer.type"] = p.Type
+			}
+			g.AddNode(&graph.Node{
+				ID: id, Ecosystem: "composer", Name: p.Name, Version: version,
+				Direct: true, Depth: 1,
+				Attr: attr,
+			})
+			byName[p.Name] = id
+			g.AddEdge(root.ID, id, graph.EdgeDependsOn)
+		}
+	}
+	addPkgs(lf.Packages, "packages")
+	addPkgs(lf.PackagesDev, "packages-dev")
+
+	if g.Len() == 1 {
+		return nil, fmt.Errorf("composer: %s contained no resolved packages", composerLockName)
+	}
+
+	// Build inter-package edges from require sections.
+	allPkgs := append(lf.Packages, lf.PackagesDev...)
+	for _, p := range allPkgs {
+		fromID, ok := byName[p.Name]
+		if !ok {
+			continue
+		}
+		for dep := range p.Require {
+			toID, ok := byName[dep]
+			if !ok || toID == fromID {
+				continue
+			}
+			g.AddEdge(fromID, toID, graph.EdgeDependsOn)
+		}
+	}
+
+	// Re-mark direct: only packages not required by another package are direct.
+	hasInbound := map[string]bool{}
+	for _, e := range g.SortedEdges() {
+		if e.From != root.ID && e.Type == graph.EdgeDependsOn {
+			hasInbound[e.To] = true
+		}
+	}
+	for _, n := range g.SortedNodes() {
+		if n.ID == root.ID {
+			continue
+		}
+		if hasInbound[n.ID] {
+			n.Direct = false
+		}
+	}
+
+	assignDepths(g, root.ID)
+	return g, nil
+}
+
+// composerManifest is the subset of a composer.json we read for install-surface.
+type composerManifest struct {
+	Type    string                     `json:"type"`
+	Scripts map[string]json.RawMessage `json:"scripts"`
+	Extra   struct {
+		Class string `json:"class"`
+	} `json:"extra"`
+	Autoload struct {
+		PSR4 map[string]json.RawMessage `json:"psr-4"`
+	} `json:"autoload"`
+}
+
+// ExtractInstallSurface implements ecosystem.InstallSurfaceExtractor.
+//
+// The ROOT project's composer.json is always read from the project directory —
+// its lifecycle scripts and plugin type are install-time facts that exist in a
+// bare source checkout, independent of whether `composer install` has populated
+// vendor/. (The prior implementation bailed out entirely when vendor/ was
+// absent, so a root project's own post-install cradle went unexamined — the
+// silent all-clear that Decision D-27 closes.)
+//
+// Transitive packages are read from vendor/<pkg>/composer.json only when that
+// directory is present, mirroring npm/pypi: uninstalled dependency source is
+// not on disk and is left unrepresented rather than guessed at.
+//
+// For a composer-plugin, the declared entrypoint class is resolved through the
+// package's PSR-4 autoload map and its PHP source is scanned — a plugin's
+// activate() is install-time code even when no lifecycle script is declared.
+func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
+	rootDir := path
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		rootDir = filepath.Dir(path)
+	}
+	vendorDir := filepath.Join(rootDir, "vendor")
+	vendorPresent := false
+	if info, err := os.Stat(vendorDir); err == nil && info.IsDir() {
+		vendorPresent = true
+	}
+
+	roots := map[string]bool{}
+	for _, r := range g.Roots {
+		roots[r] = true
+	}
+
+	var firstErr error
+	for _, n := range g.SortedNodes() {
+		if n.Kind != graph.KindPackage || n.Ecosystem != "composer" {
+			continue
+		}
+
+		var manifestPath, baseDir string
+		if roots[n.ID] {
+			baseDir = rootDir
+			manifestPath = filepath.Join(rootDir, "composer.json")
+		} else {
+			if !vendorPresent {
+				continue // uninstalled transitive source is not on disk
+			}
+			baseDir = filepath.Join(vendorDir, n.Name)
+			manifestPath = filepath.Join(baseDir, "composer.json")
+		}
+
+		raw, err := os.ReadFile(manifestPath)
+		if err != nil {
+			continue
+		}
+		var manifest composerManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("composer: parsing %s: %w", manifestPath, err)
+			}
+			continue
+		}
+
+		flatScripts := flattenScripts(manifest.Scripts)
+		var pluginSource string
+		if manifest.Type == "composer-plugin" {
+			pluginSource = pluginEntrypointSource(baseDir, manifest)
+		}
+
+		surface := installsurface.AnalyzePHP(flatScripts, manifest.Type, pluginSource)
+		if len(surface.Hooks) > 0 {
+			addSurfaceToGraph(g, n, surface)
+		}
+	}
+	return firstErr
+}
+
+// flattenScripts normalizes composer.json "scripts" values, which may each be a
+// string or an array of strings, into a single command string per event.
+func flattenScripts(scripts map[string]json.RawMessage) map[string]string {
+	flat := map[string]string{}
+	for name, raw := range scripts {
+		var single string
+		if err := json.Unmarshal(raw, &single); err == nil {
+			flat[name] = single
+			continue
+		}
+		var multi []string
+		if err := json.Unmarshal(raw, &multi); err == nil {
+			flat[name] = strings.Join(multi, "; ")
+		}
+	}
+	return flat
+}
+
+// pluginEntrypointSource resolves a composer-plugin's declared class to its PHP
+// source file via the package's PSR-4 autoload map and returns its contents.
+// Returns "" when the class is undeclared or the file cannot be located — the
+// caller treats that as "plugin present, source unread" rather than clean.
+func pluginEntrypointSource(baseDir string, m composerManifest) string {
+	class := strings.TrimSpace(m.Extra.Class)
+	if class == "" {
+		return ""
+	}
+	// FQCN uses backslash separators: Vendor\Package\Plugin.
+	classPath := strings.ReplaceAll(strings.TrimLeft(class, `\`), `\`, "/")
+
+	// PSR-4: namespace prefix -> one or more directories. Longest matching
+	// prefix wins (Composer's own resolution order).
+	type mapping struct {
+		prefix string
+		dirs   []string
+	}
+	var maps []mapping
+	for pfx, rawDirs := range m.Autoload.PSR4 {
+		maps = append(maps, mapping{
+			prefix: strings.ReplaceAll(strings.TrimRight(pfx, `\`), `\`, "/"),
+			dirs:   psr4Dirs(rawDirs),
+		})
+	}
+	sort.Slice(maps, func(i, j int) bool { return len(maps[i].prefix) > len(maps[j].prefix) })
+
+	for _, mp := range maps {
+		if mp.prefix == "" || !strings.HasPrefix(classPath, mp.prefix) {
+			continue
+		}
+		rel := strings.TrimPrefix(strings.TrimPrefix(classPath, mp.prefix), "/")
+		for _, dir := range mp.dirs {
+			file := filepath.Join(baseDir, filepath.FromSlash(dir), filepath.FromSlash(rel)+".php")
+			if b, err := os.ReadFile(file); err == nil {
+				return string(b)
+			}
+		}
+	}
+
+	// Fallback: the conventional src/<ClassBase>.php with no autoload declared.
+	base := classPath
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	for _, guess := range []string{
+		filepath.Join(baseDir, "src", base+".php"),
+		filepath.Join(baseDir, base+".php"),
+	} {
+		if b, err := os.ReadFile(guess); err == nil {
+			return string(b)
+		}
+	}
+	return ""
+}
+
+// psr4Dirs decodes a PSR-4 autoload value, which may be a single directory
+// string or an array of directory strings.
+func psr4Dirs(raw json.RawMessage) []string {
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return []string{single}
+	}
+	var multi []string
+	if err := json.Unmarshal(raw, &multi); err == nil {
+		return multi
+	}
+	return nil
+}
+
+func addSurfaceToGraph(g *graph.Graph, pkg *graph.Node, s installsurface.Surface) {
+	for _, h := range s.Hooks {
+		hookID := "hook:" + pkg.ID + "#" + sanitize(h.Name)
+		hookNode := g.AddNode(&graph.Node{
+			ID:        hookID,
+			Kind:      graph.KindInstallHook,
+			Ecosystem: pkg.Ecosystem,
+			Name:      h.Name,
+			Depth:     pkg.Depth,
+			Attr: map[string]string{
+				"hook.command": truncate(h.Command, 400),
+				"hook.package": pkg.ID,
+			},
+		})
+		setCaps(hookNode, h.Caps)
+		if len(h.Evidence) > 0 {
+			hookNode.Attr["hook.evidence"] = strings.Join(h.Evidence, ",")
+		}
+		g.AddEdge(pkg.ID, hookID, graph.EdgeDeclaresHook)
+
+		for _, a := range h.Artifacts {
+			artID := "artifact:" + pkg.ID + "#" + a.Ref
+			an := g.AddNode(&graph.Node{
+				ID:        artID,
+				Kind:      graph.KindReferencedArtifact,
+				Ecosystem: pkg.Ecosystem,
+				Name:      a.Ref,
+				Depth:     pkg.Depth,
+				Attr: map[string]string{
+					"artifact.remote": boolStr(a.Remote),
+					"artifact.read":   boolStr(a.Read),
+					"hook.package":    pkg.ID,
+				},
+			})
+			setCaps(an, a.Caps)
+			if a.Remote {
+				g.AddEdge(hookID, artID, graph.EdgeHookFetches)
+			} else {
+				g.AddEdge(hookID, artID, graph.EdgeHookExecs)
+			}
+		}
+
+		for _, sk := range h.Sinks {
+			sinkID := "sink:" + pkg.ID + "#" + sk.Name
+			g.AddNode(&graph.Node{
+				ID:        sinkID,
+				Kind:      graph.KindSink,
+				Ecosystem: pkg.Ecosystem,
+				Name:      sk.Name,
+				Depth:     pkg.Depth,
+				Attr: map[string]string{
+					"sink.evidence": sk.Evidence,
+					"hook.package":  pkg.ID,
+				},
+			})
+			g.AddEdge(hookID, sinkID, graph.EdgeHookReadsEnv)
+		}
+	}
+}
+
+func sanitize(s string) string {
+	return strings.ReplaceAll(s, ":", "_")
+}
+
+func setCaps(n *graph.Node, caps []installsurface.Capability) {
+	if n.Attr == nil {
+		n.Attr = map[string]string{}
+	}
+	for _, c := range caps {
+		n.Attr["cap."+string(c)] = "true"
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func rootNode(g *graph.Graph, path string) *graph.Node {
+	name := filepath.Base(strings.TrimSuffix(filepath.Clean(path), string(filepath.Separator)))
+	if name == "." || name == "" || name == composerLockName {
+		name = filepath.Base(filepath.Dir(path))
+	}
+	if name == "." || name == "" {
+		name = "php-project"
+	}
+	id := purl.NewComposer(name, "0.0.0").String()
+	n := g.AddNode(&graph.Node{
+		ID: id, Ecosystem: "composer", Name: name, Version: "0.0.0", Depth: 0,
+	})
+	g.MarkRoot(id)
+	return n
+}
+
+func assignDepths(g *graph.Graph, rootID string) {
+	adj := map[string][]string{}
+	for _, e := range g.Edges {
+		if e.Type == graph.EdgeDependsOn {
+			adj[e.From] = append(adj[e.From], e.To)
+		}
+	}
+	depth := map[string]int{rootID: 0}
+	seen := map[string]bool{rootID: true}
+	queue := []string{rootID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, next := range adj[cur] {
+			if !seen[next] {
+				seen[next] = true
+				depth[next] = depth[cur] + 1
+				queue = append(queue, next)
+			}
+		}
+	}
+	for id, d := range depth {
+		if n := g.Get(id); n != nil {
+			n.Depth = d
+		}
+	}
+	for k := range adj {
+		sort.Strings(adj[k])
+	}
+}

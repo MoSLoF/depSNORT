@@ -1,0 +1,12 @@
+# pinned, with extras and a marker
+Flask_SQLAlchemy[async]==2.5.1 ; python_version >= "3.8"
+    # via -r requirements.in
+requests==2.31.0 --hash=sha256:deadbeef
+    # via
+    #   -r requirements.in
+    #   flask-sqlalchemy
+# unpinned: must NOT be resolved (D-01 — no range solving)
+urllib3>=1.26
+some-package~=2.0
+-e .
+--index-url https://pypi.org/simple

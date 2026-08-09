@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "source": "iHBV IOC ledger (export)",
+  "generated": "2026-08-09T00:00:00Z",
+  "indicators": [
+    {
+      "ecosystem": "npm",
+      "name": "left-pad",
+      "version": "1.3.0",
+      "severity": "critical",
+      "category": "malware",
+      "reference": "INC-2026-014",
+      "note": "credential stealer in postinstall, confirmed 2026-07-30"
+    },
+    {
+      "purl": "pkg:pypi/requests-toolkit@0.9.1",
+      "severity": "high",
+      "category": "compromised-maintainer",
+      "reference": "INC-2026-021"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "@acme/telemetry",
+      "severity": "high",
+      "category": "typosquat",
+      "reference": "INC-2026-030",
+      "note": "any version — impersonates @acme/telementry (internal)"
+    }
+  ]
+}

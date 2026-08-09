@@ -1,0 +1,22 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    actioncable (7.0.4)
+      actionpack (= 7.0.4)
+      nio4r (~> 2.0)
+    actionpack (7.0.4)
+      rack (~> 2.2)
+    nio4r (2.5.9)
+    rack (2.2.8)
+    rails (7.0.4)
+      actioncable (= 7.0.4)
+      actionpack (= 7.0.4)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rails (~> 7.0)
+
+BUNDLED WITH
+   2.3.26
