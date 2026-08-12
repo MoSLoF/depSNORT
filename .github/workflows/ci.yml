@@ -1,0 +1,176 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
+# Every action reference must be an IMMUTABLE commit SHA with the human version
+# kept as a trailing comment (finding R-03). A tag can be repointed by whoever
+# owns the action; a SHA cannot. Dependabot understands this form and keeps the
+# pins current, and the `pinning` job below fails the build on any reference that
+# regresses to a tag — running unpinned third-party code in the workflow that
+# builds and SIGNS our releases is the one supply-chain dependency this project
+# cannot argue away.
+#
+# Run `make pin` (needs an authenticated `gh`) to resolve any remaining tags
+# before pushing a release candidate. The workflows deliberately reference only
+# GitHub first-party `actions/*`; the release publish step uses the preinstalled
+# `gh` CLI rather than a third-party release action, so no external code runs
+# with `contents: write`.
+jobs:
+  pinning:
+    name: actions are pinned to immutable SHAs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: sh scripts/pin-actions.sh --check
+
+  go:
+    name: fmt · vet · test(-race) · build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: '1.24'
+          check-latest: true
+      - name: gofmt (must be clean)
+        run: test -z "$(gofmt -l .)" || { echo 'gofmt needed:'; gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      # -race exercises the whole suite, including the adversarial corpus
+      # (testdata/adversarial), the containment primitive (internal/securefs),
+      # and the coverage-verdict regression tests.
+      - name: go test -race
+        run: go test -race ./...
+      - name: static build
+        run: CGO_ENABLED=0 make build
+      - name: dogfood — zero third-party dependencies (Decision D-10)
+        run: |
+          lines=$(go list -m all | wc -l)
+          test "$lines" -eq 1 || { echo "module graph is not a single line:"; go list -m all; exit 1; }
+
+  wrapper:
+    name: pre-commit exit-code contract (sh · bash)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: sh   scripts/wrapper_test.sh
+      - run: bash scripts/wrapper_test.sh
+
+  fuzz:
+    name: fuzz smoke (parsers · containment · identity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: '1.24'
+      # The committed seed corpora (including the crashers fuzzing already found
+      # in the PURL parser) run as ordinary regression tests on every build via
+      # `go test`. This job additionally fuzzes for a short bounded window per
+      # target, so new mutations get explored on each push without turning CI
+      # into an unbounded soak. Deeper campaigns are run out of band.
+      - name: fuzz each target briefly
+        run: |
+          set -eu
+          fuzz() { echo "== $2"; go test "$1" -run=XXX -fuzz="^$2\$" -fuzztime=25s; }
+          fuzz ./internal/securefs          FuzzReadFileContainment
+          fuzz ./internal/purl              FuzzParse
+          fuzz ./internal/check/builtin     FuzzBoundedMatchesExact
+          fuzz ./internal/ecosystem/npm     FuzzParseLock
+          fuzz ./internal/ecosystem/cargo   FuzzParseCargoLock
+          fuzz ./internal/ecosystem/rubygems FuzzParseGemfileLock
+          fuzz ./internal/ecosystem/composer FuzzParseComposerLock
+          fuzz ./internal/ecosystem/nuget   FuzzParsePackagesLock
+          fuzz ./internal/ecosystem/pypi    FuzzExtractFromTar
+
+  bench:
+    name: benchmarks compile and run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: '1.24'
+      # Shared CI runners are far too noisy to fail a build on timings, so this
+      # guards that the benchmarks still BUILD and RUN. The committed numbers in
+      # docs/PERFORMANCE.md are the baseline; compare locally before claiming a
+      # regression.
+      - run: go test ./cmd/depsnort/ ./internal/ecosystem/npm/ -run=XXX -bench=. -benchmem -benchtime=10x
+
+  sbom:
+    name: SBOM generates and proves zero dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: '1.24'
+      - name: emit and validate SBOM
+        run: |
+          set -eu
+          CGO_ENABLED=0 go build -o /tmp/depsnort ./cmd/depsnort
+          /tmp/depsnort sbom > /tmp/sbom.json
+          python3 -c "import json,sys; d=json.load(open('/tmp/sbom.json')); \
+            assert d['bomFormat']=='CycloneDX', d['bomFormat']; \
+            assert d['specVersion']=='1.5', d['specVersion']; \
+            libs=[c for c in d['components'] if c.get('type')=='library']; \
+            assert not libs, 'zero-dependency invariant (D-10) broken: %s' % libs; \
+            print('SBOM ok: CycloneDX 1.5, 0 third-party components')"
+      - name: SBOM is byte-reproducible (D-13)
+        run: |
+          set -eu
+          /tmp/depsnort sbom | sha256sum > /tmp/a
+          /tmp/depsnort sbom | sha256sum > /tmp/b
+          diff /tmp/a /tmp/b && echo "SBOM is deterministic"
+
+  cross-build:
+    name: cross-platform build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: '1.24'
+      - name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -ldflags "-X main.version=ci" -o /tmp/depsnort-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/depsnort
+
+  wheel:
+    name: wheel tag is platform-specific (F-04)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: '1.24'
+      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
+        with:
+          python-version: '3.12'
+      - name: build wheel
+        run: pip wheel . --no-deps -w dist
+      - name: assert no native binary in an any-platform wheel
+        run: |
+          set -eu
+          whl=$(ls dist/*.whl)
+          echo "built: $whl"
+          case "$whl" in
+            *py3-none-any.whl) echo "ERROR: native binary shipped in a py3-none-any wheel"; exit 1;;
+          esac
+          echo "ok: $whl is platform-specific"

@@ -28,7 +28,6 @@ const (
 	CapExec        Capability = "exec"        // spawns processes or evals code
 	CapObfuscation Capability = "obfuscation" // base64/hex decode paired with code execution
 	CapFilesystem  Capability = "filesystem"  // touches shell profiles / persistence locations
-	CapCradle      Capability = "cradle"      // fetches remote code and executes it in one step
 )
 
 // InstallHookNames are the npm lifecycle scripts that run as part of an install.
@@ -128,7 +127,7 @@ var (
 		"https.request", "http.request", "XMLHttpRequest", "net.connect",
 		"tls.connect", "dgram", "new WebSocket", "WebSocket(", "undici", "got(",
 		// Python
-		"urllib.request", "urllib2", "http.client", "httplib.", "import httplib",
+		"urllib.request", "urllib2", "http.client", "httplib.",  "import httplib",
 		"urlopen(", "urlretrieve(", "requests.get", "requests.post",
 		"httpx.", "aiohttp.Client", "import aiohttp", "ftplib", "smtplib", "socket.connect",
 		// Ruby
@@ -209,13 +208,8 @@ var (
 
 	// Obfuscation markers are decode-specific. Bare `Buffer.from(` is excluded:
 	// it is ubiquitous in benign code. A base64/hex DECODE is the signal.
-	//
-	// Bare `fromCharCode` was removed (Decision D-25): a single incidental
-	// String.fromCharCode(x) — formatting one byte — is not obfuscation, and it
-	// false-flagged esbuild's installer as VC-002e. Char-code ASSEMBLY (a payload
-	// built from many codes, or via .apply/.map) is detected structurally below.
 	obfuscationMarkers = []string{
-		"atob(", "unescape(", "decodeURIComponent(escape",
+		"atob(", "fromCharCode", "unescape(", "decodeURIComponent(escape",
 		// Python
 		"codecs.decode(", "binascii.unhexlify(", "marshal.loads(",
 		"pickle.loads(", "zlib.decompress(", "bz2.decompress(",
@@ -234,36 +228,6 @@ var (
 
 	// A long unbroken base64-ish run — the classic embedded blob.
 	blobRe = regexp.MustCompile(`[A-Za-z0-9+/=]{160,}`)
-
-	// Char-code ASSEMBLY: String.fromCharCode building a payload rather than
-	// formatting a single byte (Decision D-25). Matches the .apply form
-	// (fromCharCode.apply(null, arr)), three-or-more literal codes
-	// (fromCharCode(0x68, 0x74, ...)), or a map/reduce/forEach over fromCharCode.
-	// A lone fromCharCode(x) — the benign incidental case — matches none of these.
-	charCodeAssemblyRe = regexp.MustCompile(`(?i)(?:fromCharCode\.apply|fromCharCode\s*\([^)]*,[^)]*,|(?:map|reduce|forEach)\s*\([^)]*fromCharCode)`)
-
-	// C-family comments. URLs and capability markers sitting in DOCUMENTATION
-	// must not be read as behavior — the defect that made esbuild's installer
-	// "reach" snapcraft.io and nodejs.org, both of which live in a comment block
-	// explaining the Snap Store (Decision D-25).
-	blockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	lineCommentRe  = regexp.MustCompile(`(?m)(^|[^:])//[^\n]*`)
-
-	// A download CRADLE (Decision D-28): remote code fetched and executed in one
-	// breath. This is deliberately NARROWER than "network + exec" — esbuild
-	// fetches from a known host and runs a *shipped* prebuilt binary, which is
-	// not a cradle. A cradle is the initial-access idiom that legitimate
-	// installers do not use: piping a download straight into an interpreter, or
-	// a living-off-the-land binary used to pull and run code.
-	cradleRe = regexp.MustCompile(`(?i)` +
-		// curl/wget/fetch ... | sh|bash|python|perl|ruby|node|pwsh ...
-		`(?:curl|wget|fetch|lynx|links|iwr|invoke-webrequest)\b[^|\n]*\|\s*(?:sh|bash|zsh|dash|python[0-9.]*|perl|ruby|node|pwsh|powershell|cmd)\b` +
-		// (New-Object Net.WebClient).DownloadString(...) | iex  — and the reverse
-		`|(?:downloadstring|downloaddata|webclient)[^\n]*\|\s*(?:iex|invoke-expression)` +
-		`|(?:iex|invoke-expression)\b[^\n]*(?:downloadstring|downloaddata|webclient|invoke-webrequest)` +
-		// LOLBin download cradles
-		`|certutil\b[^\n]*-(?:urlcache|decode|f)\b` +
-		`|bitsadmin\b[^\n]*/transfer\b`)
 
 	// Caret or single-char separator obfuscation of URL schemes:
 	// h^t^t^p^s, h.t.t.p, h+t+t+p+s, "h"+"t"+"t"+"p", etc.
@@ -290,17 +254,6 @@ var (
 		"$PROFILE", "Microsoft.PowerShell",
 	}
 )
-
-// stripCodeComments removes C-family block and line comments so that URLs and
-// capability markers sitting in documentation are not mistaken for behavior
-// (Decision D-25). It is a heuristic, not a tokenizer: the (^|[^:]) guard
-// protects the "//" inside a URL scheme, and the only residual cost — a "//"
-// inside a string literal — is under-citing a reference, never fabricating one.
-func stripCodeComments(src string) string {
-	src = blockCommentRe.ReplaceAllString(src, " ")
-	src = lineCommentRe.ReplaceAllString(src, "$1")
-	return src
-}
 
 // scanCaps classifies a blob of text (a command line or a file's source).
 func scanCaps(text string) ([]Capability, []string) {
@@ -342,14 +295,6 @@ func scanCaps(text string) ([]Capability, []string) {
 	}
 	if blobRe.MatchString(text) {
 		add(CapObfuscation, "long-encoded-blob")
-	}
-	// Char-code assembly (payload built from many codes), not incidental use.
-	if m := charCodeAssemblyRe.FindString(text); m != "" {
-		add(CapObfuscation, "charcode-assembly:"+strings.TrimSpace(m))
-	}
-	// Download-and-execute cradle (D-28).
-	if m := cradleRe.FindString(text); m != "" {
-		add(CapCradle, "download-cradle:"+strings.TrimSpace(m))
 	}
 	// Caret/separator-obfuscated URL schemes: h^t^t^p^s, "h"+"t"+"t"+"p", etc.
 	if m := obfuscatedSchemeRe.FindString(text); m != "" {
@@ -416,13 +361,10 @@ func Analyze(scripts map[string]string, read FileReader) Surface {
 			if read != nil {
 				if src, ok := read(ref); ok {
 					a.Read = true
-					// Strip comments first: a URL or marker in documentation is
-					// not behavior (Decision D-25).
-					clean := stripCodeComments(string(src))
-					a.Caps, a.Evidence = scanCaps(clean)
-					h.Sinks = append(h.Sinks, findSinks(clean)...)
+					a.Caps, a.Evidence = scanCaps(string(src))
+					h.Sinks = append(h.Sinks, findSinks(string(src))...)
 					// URLs inside the referenced file become remote artifacts.
-					for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
+					for _, u := range dedupe(urlRe.FindAllString(string(src), -1)) {
 						h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
 					}
 				}
@@ -570,40 +512,17 @@ func IsComposerInstallHook(name string) bool {
 
 // AnalyzePHP builds the install surface from a Composer package's metadata.
 // scripts maps event names to their command strings. pkgType is the package
-// type from composer.json (empty string if unknown). pluginSource is the PHP
-// source of the plugin's declared entrypoint class (empty when the package is
-// not a plugin or the file could not be resolved).
-//
-// A composer-plugin is auto-loaded and its activate() runs on every Composer
-// operation, so the plugin's own PHP is install-time code (Decision D-27). When
-// its source is available it is scanned exactly like any other hook body; the
-// bare-CapExec fallback stands when the source could not be read, so a plugin is
-// never silently downgraded to "unknown".
-func AnalyzePHP(scripts map[string]string, pkgType, pluginSource string) Surface {
+// type from composer.json (empty string if unknown).
+func AnalyzePHP(scripts map[string]string, pkgType string) Surface {
 	var s Surface
 
 	if pkgType == "composer-plugin" {
-		h := Hook{
+		s.Hooks = append(s.Hooks, Hook{
 			Name:     "composer-plugin",
 			Command:  "package type is composer-plugin (auto-loaded at install time)",
 			Caps:     []Capability{CapExec},
 			Evidence: []string{"composer-plugin-type"},
-		}
-		if strings.TrimSpace(pluginSource) != "" {
-			// Comment-strip first (Decision D-25): a URL or marker in PHP
-			// documentation is not behavior.
-			clean := stripCodeComments(pluginSource)
-			pcaps, pev := scanCaps(clean)
-			for _, c := range pcaps {
-				h.Caps = appendUnique(h.Caps, c)
-			}
-			h.Evidence = append(h.Evidence, pev...)
-			h.Sinks = findSinks(clean)
-			for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
-				h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
-			}
-		}
-		s.Hooks = append(s.Hooks, h)
+		})
 	}
 
 	for _, name := range ComposerInstallHookNames {
@@ -794,9 +713,9 @@ func analyzeBuildBackend(tomlSource string, hasSetupPy bool) (Hook, bool) {
 	if backend == "" {
 		if hasSetupPy {
 			return Hook{
-				Name:     "pyproject.toml:build-backend",
-				Command:  "no build-backend declared; setup.py runs as legacy build",
-				Caps:     []Capability{CapExec},
+				Name:    "pyproject.toml:build-backend",
+				Command: "no build-backend declared; setup.py runs as legacy build",
+				Caps:    []Capability{CapExec},
 				Evidence: []string{"legacy-setup.py-fallback"},
 			}, true
 		}

@@ -24,7 +24,10 @@ it does the thing it claims.
   is to see the tree *before* anything with a `preinstall`/`postinstall` runs.
 - **Dogfooded footprint.** The tool has **zero third-party dependencies** — pure
   Go standard library. A supply-chain-safety tool must pass its own audit. Run
-  `make self-audit` (or `go list -m all`) and confirm the list is one line.
+  `make self-audit` (or `go list -m all`) and confirm the list is one line, or
+  `./depsnort sbom` for the machine-readable version: a CycloneDX SBOM generated
+  from the module graph the linker actually embedded, whose `components` array is
+  empty. CI fails if that ever stops being true.
 - **Sovereign, modular ruleset.** Vector checks are plugins that implement one
   contract. The built-in pack is simply the first pack.
 
@@ -57,6 +60,7 @@ Requires Go 1.24+. No network needed (no external modules to fetch).
 ```
 go build -o depsnort ./cmd/depsnort      # Windows: go build -o depsnort.exe ./cmd/depsnort
 ./depsnort checks                        # list registered vector checks
+./depsnort sbom                          # emit depsnort's OWN CycloneDX SBOM
 ./depsnort scan ./path/to/project        # analyze; emits JSON to stdout
 ./depsnort scan -fail-on-eligible .      # let gate-eligible warnings fail CI
 ./depsnort scan -offline .               # OSV cache only; never touch the network
@@ -65,7 +69,7 @@ go build -o depsnort ./cmd/depsnort      # Windows: go build -o depsnort.exe ./c
 ```
 
 > **Check which build you have.** `./depsnort version` and every report header
-> carry the baked-in version (`v0.6.1`). If a report header or the flag list does
+> carry the baked-in version (`v0.7.3`). If a report header or the flag list does
 > not match what you expect, the source tree on disk is stale — re-extract before
 > debugging anything else.
 
@@ -348,27 +352,62 @@ install-time kinds and edges already exist so that install-surface extraction
 9. 🟡 Fine-tuning: URL-metadata false positives, typosquat corpora for non-npm ecosystems
 10. ⬜ deps.dev manifest resolution + third-party plugin loading
 
+## Verifying a release
+
+A supply-chain security tool that ships unverifiable binaries is arguing against
+itself. Every tagged release carries a SHA-256 checksum, a CycloneDX SBOM, and a
+**signed SLSA provenance attestation** binding the artifact to the exact
+workflow, commit, and runner that built it. Signing is keyless (Sigstore via
+GitHub OIDC), so there is no long-lived private key to steal or expire, and the
+attestation is recorded in the public Rekor transparency log.
+
+```
+# 1. checksum
+sha256sum -c SHA256SUMS --ignore-missing
+
+# 2. provenance — proves THIS binary came from THIS repo's release workflow
+gh attestation verify depsnort-v0.7.3-linux-amd64 --repo MoSLoF/depSNORT
+
+# 3. what it is built from (the components array should be empty)
+./depsnort sbom
+```
+
+Checksums and the SBOM are byte-reproducible: rebuilding the same tag produces
+identical bytes, so two people can independently confirm they got the same
+artifact (D-13).
+
 ## Testing
 
 ```
-go test ./...
+go test ./...            # includes the fuzz seed corpora as regression tests
 go vet ./...
-gofmt -l .        # should print nothing
+gofmt -l .               # should print nothing
+go test -race ./...
 ```
 
-## Disclaimer & intended use
+**Fuzzing.** There are **19** native Go fuzz targets covering the six lockfile
+parsers, the PURL identity layer, semver, the five install-surface analyzers, the
+edit-distance optimization, the sdist archive reader, and path containment. They
+are not decoration — fuzzing found and fixed two real identity bugs in the PURL
+parser (see D-33). The `securefs` target asserts the security invariant directly:
+no generated path may ever return content from outside the scan root.
 
-depSNORT is a defensive tool. It statically inspects dependency metadata and
-**never executes** the code it analyzes. It is provided for legitimate security
-work — auditing your own projects, gating CI, and research — and for education.
+Every seed corpus — including the crashers fuzzing already found — runs as an
+ordinary regression test on `go test`. CI additionally spends a bounded 25s
+actively fuzzing **9** of the 19: the containment primitive, PURL, the
+edit-distance differential, and the six lockfile parsers. Those are the targets
+that consume untrusted input directly or guard an invariant a silent regression
+would hide; the analyzer and semver targets are covered by their seeds in CI and
+by out-of-band campaigns.
 
-The fixtures under `testdata/adversarial/` are **intentionally malicious-shaped
-but inert simulations**, written to prove each vector check fires. They exfiltrate
-nothing: their targets are placeholders (`evil.com`) or publicly-documented IOCs
-from past incidents, and depSNORT reads them statically without ever running them.
-Do not repurpose them against systems you do not own or lack authorization to test.
+```
+go test ./internal/securefs -run=XXX -fuzz=FuzzReadFileContainment -fuzztime=60s
+go test ./internal/purl     -run=XXX -fuzz=FuzzParse                -fuzztime=60s
+```
 
-You are responsible for using this tool in compliance with all applicable laws and
-only against systems you are authorized to assess. The software is provided "as is,"
-without warranty of any kind (see LICENSE). The author accepts no liability for
-misuse or for damage arising from its use.
+**Performance.** Committed baselines and the profiling method live in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+
+```
+go test ./cmd/depsnort/ ./internal/ecosystem/npm/ -run=XXX -bench=. -benchmem
+```

@@ -18,9 +18,11 @@ import (
 	"sort"
 	"strings"
 
+	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/installsurface"
 	"ihbv.io/depsnort/internal/purl"
+	"ihbv.io/depsnort/internal/securefs"
 )
 
 // Adapter implements ecosystem.Adapter for Composer.
@@ -195,12 +197,22 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		vendorPresent = true
 	}
 
+	// Contained reader for every manifest and PSR-4 source read below (F-03).
+	// Transitive baseDirs are built from lockfile package names and PSR-4 dirs
+	// from composer.json — both untrusted — so a name like "../../etc" or a
+	// symlinked vendor entry is refused here rather than followed off-tree.
+	reader, err := securefs.NewReader(rootDir)
+	if err != nil {
+		return fmt.Errorf("composer: %w", err)
+	}
+
 	roots := map[string]bool{}
 	for _, r := range g.Roots {
 		roots[r] = true
 	}
 
-	var firstErr error
+	// Refused reads become typed gaps rather than silent skips (R-01).
+	var gaps instsurf.Gaps
 	for _, n := range g.SortedNodes() {
 		if n.Kind != graph.KindPackage || n.Ecosystem != "composer" {
 			continue
@@ -218,22 +230,28 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			manifestPath = filepath.Join(baseDir, "composer.json")
 		}
 
-		raw, err := os.ReadFile(manifestPath)
+		raw, err := reader.ReadFile(manifestPath)
 		if err != nil {
+			gaps.Add(n.ID, manifestPath, err)
 			continue
 		}
 		var manifest composerManifest
 		if err := json.Unmarshal(raw, &manifest); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("composer: parsing %s: %w", manifestPath, err)
-			}
+			gaps.AddReason(n.ID, manifestPath, instsurf.GapParse, err)
 			continue
 		}
 
 		flatScripts := flattenScripts(manifest.Scripts)
 		var pluginSource string
 		if manifest.Type == "composer-plugin" {
-			pluginSource = pluginEntrypointSource(baseDir, manifest)
+			var perr error
+			pluginSource, perr = pluginEntrypointSource(reader, baseDir, manifest)
+			// A plugin auto-executes on every Composer operation. If its
+			// entrypoint exists but we were refused, that is the single most
+			// important file in the package and its absence must be visible.
+			if perr != nil {
+				gaps.Add(n.ID, baseDir, perr)
+			}
 		}
 
 		surface := installsurface.AnalyzePHP(flatScripts, manifest.Type, pluginSource)
@@ -241,7 +259,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			addSurfaceToGraph(g, n, surface)
 		}
 	}
-	return firstErr
+	return gaps.Err()
 }
 
 // flattenScripts normalizes composer.json "scripts" values, which may each be a
@@ -266,10 +284,25 @@ func flattenScripts(scripts map[string]json.RawMessage) map[string]string {
 // source file via the package's PSR-4 autoload map and returns its contents.
 // Returns "" when the class is undeclared or the file cannot be located — the
 // caller treats that as "plugin present, source unread" rather than clean.
-func pluginEntrypointSource(baseDir string, m composerManifest) string {
+// It returns a non-nil error only when a candidate file EXISTED but could not be
+// read (containment refusal, special file, oversize) — an ordinary "not on disk"
+// is reported as ("", nil), because most plugins are simply not installed in a
+// source checkout (R-01).
+func pluginEntrypointSource(reader *securefs.Reader, baseDir string, m composerManifest) (string, error) {
 	class := strings.TrimSpace(m.Extra.Class)
 	if class == "" {
-		return ""
+		return "", nil
+	}
+	var refusal error
+	try := func(path string) (string, bool) {
+		b, err := reader.ReadFile(path)
+		if err == nil {
+			return string(b), true
+		}
+		if _, isGap := instsurf.Classify(err); isGap && refusal == nil {
+			refusal = err
+		}
+		return "", false
 	}
 	// FQCN uses backslash separators: Vendor\Package\Plugin.
 	classPath := strings.ReplaceAll(strings.TrimLeft(class, `\`), `\`, "/")
@@ -296,8 +329,8 @@ func pluginEntrypointSource(baseDir string, m composerManifest) string {
 		rel := strings.TrimPrefix(strings.TrimPrefix(classPath, mp.prefix), "/")
 		for _, dir := range mp.dirs {
 			file := filepath.Join(baseDir, filepath.FromSlash(dir), filepath.FromSlash(rel)+".php")
-			if b, err := os.ReadFile(file); err == nil {
-				return string(b)
+			if src, ok := try(file); ok {
+				return src, nil
 			}
 		}
 	}
@@ -311,11 +344,11 @@ func pluginEntrypointSource(baseDir string, m composerManifest) string {
 		filepath.Join(baseDir, "src", base+".php"),
 		filepath.Join(baseDir, base+".php"),
 	} {
-		if b, err := os.ReadFile(guess); err == nil {
-			return string(b)
+		if src, ok := try(guess); ok {
+			return src, nil
 		}
 	}
-	return ""
+	return "", refusal
 }
 
 // psr4Dirs decodes a PSR-4 autoload value, which may be a single directory

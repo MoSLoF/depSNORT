@@ -70,9 +70,9 @@ func New(spec Spec, cache *datasource.Cache, offline bool) *Client {
 	}
 }
 
-func (c *Client) Name() string                { return c.Spec.SourceName }
-func (c *Client) Ecosystem() string            { return c.Spec.Eco }
-func (c *Client) GetStats() datasource.Stats   { return c.Stats }
+func (c *Client) Name() string               { return c.Spec.SourceName }
+func (c *Client) Ecosystem() string          { return c.Spec.Eco }
+func (c *Client) GetStats() datasource.Stats { return c.Stats }
 
 func (c *Client) cacheKey(name string) string {
 	return c.Spec.CacheTag + "|" + name + "|versions"

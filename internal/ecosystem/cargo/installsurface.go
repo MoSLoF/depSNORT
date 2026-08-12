@@ -1,12 +1,12 @@
 package cargo
 
 import (
-	"os"
 	"path/filepath"
 
 	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/installsurface"
+	"ihbv.io/depsnort/internal/securefs"
 )
 
 // ExtractInstallSurface implements ecosystem.InstallSurfaceExtractor (Decision
@@ -25,9 +25,21 @@ import (
 // finding; that is the false-positive discipline, not a miss.
 func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	dir := instsurf.ProjectDir(path)
-	buildRs, err := os.ReadFile(filepath.Join(dir, "build.rs"))
-	if err != nil || len(buildRs) == 0 {
-		return nil // no build script on disk; nothing to extract
+	// Contained read (F-03): a build.rs symlinked out of the crate is refused.
+	reader, err := securefs.NewReader(dir)
+	if err != nil {
+		return err
+	}
+	buildRs, err := reader.ReadFile("build.rs")
+	if err != nil {
+		// Absent is the common case (most crates have no build script); a
+		// refusal means one exists and was hidden from us (R-01).
+		var gaps instsurf.Gaps
+		gaps.Add("", filepath.Join(dir, "build.rs"), err)
+		return gaps.Err()
+	}
+	if len(buildRs) == 0 {
+		return nil
 	}
 
 	roots := map[string]bool{}

@@ -157,15 +157,27 @@ func applyRecencyDemotion(findings []finding.Finding) []finding.Finding {
 }
 
 // Evaluate attaches findings to their nodes, computes each node's risk state,
-// and derives the exit code. It mutates the graph's nodes (Risk, Findings),
-// which is the one place that is allowed to (verdict is downstream of all
-// checks).
+// and derives the exit code, using ONLY the graph's own resolution coverage. It
+// is EvaluateWithCoverage with no scan-level gaps folded in — the right entry
+// point for a single-source caller or a test that has only a graph in hand.
 func Evaluate(g *graph.Graph, findings []finding.Finding, pol Policy) Result {
+	return EvaluateWithCoverage(g, findings, g.Coverage(), pol)
+}
+
+// EvaluateWithCoverage is Evaluate with an explicit scan-level coverage. It
+// mutates the graph's nodes (Risk, Findings), which is the one place that is
+// allowed to (verdict is downstream of all checks).
+//
+// The cov argument is the SCAN-level coverage (graph resolution PLUS data-source,
+// install-surface, and workspace gaps), assembled by the caller — the verdict
+// does not recompute it from the graph, because the graph cannot see a failed OSV
+// lookup or an unreadable subtree (finding F-02).
+func EvaluateWithCoverage(g *graph.Graph, findings []finding.Finding, cov graph.Coverage, pol Policy) Result {
 	// Stale temporal findings lose the right to gate before anything is counted.
 	findings = applyRecencyDemotion(findings)
 
 	res := Result{
-		Coverage: g.Coverage(),
+		Coverage: cov,
 		Risk:     make(map[string]finding.RiskState),
 		Findings: findings,
 	}
@@ -226,7 +238,7 @@ func Evaluate(g *graph.Graph, findings []finding.Finding, pol Policy) Result {
 		res.ExitCode = ExitBlock
 	case pol.FailOnEligible && res.Counts.Eligible > 0:
 		res.ExitCode = ExitGate
-	case pol.FailOnIncomplete && res.Coverage.Degraded:
+	case pol.FailOnIncomplete && res.Coverage.Incomplete():
 		res.ExitCode = ExitIncomplete
 	default:
 		res.ExitCode = ExitClean

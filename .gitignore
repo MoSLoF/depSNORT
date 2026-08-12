@@ -1,15 +1,12 @@
-# Binaries (root-anchored so they never match the cmd/depsnort/ SOURCE dir)
+# Binaries
 /depsnort
 /depsnort.exe
 /dist/
 
-# Go coverage output (explicit extensions — NOT coverage.* which eats
-# internal/graph/coverage.go)
-coverage.out
-coverage.html
-coverage.txt
+# Go
 *.out
 *.test
+coverage.*
 
 # Editor / OS
 .idea/
@@ -17,17 +14,7 @@ coverage.txt
 *.swp
 .DS_Store
 Thumbs.db
-
-# Tooling / session scratch
 .claude/
+depsnort
+depsnort.exe
 reports/
-
-# Python build artifacts
-build/
-dist/
-*.egg-info/
-__pycache__/
-*.pyc
-*.whl
-py/depsnort/_bin/
-.security/

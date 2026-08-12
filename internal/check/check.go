@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"ihbv.io/depsnort/internal/datasource"
-	"ihbv.io/depsnort/internal/datasource/ioc"
 	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
 )
@@ -45,12 +44,8 @@ type Context struct {
 	// Releases is publish-time history keyed by node ID — the substrate of the
 	// temporal axis. Empty when the registry source is disabled or offline with
 	// a cold cache; temporal checks then simply do not fire.
-	Releases map[string]*datasource.ReleaseHistory
-	Config   Config
-	// IOC is the operator's indicator ledger, keyed by node ID (canonical PURL).
-	// Populated by the orchestrator when -ioc is set; consumed by VC-003. Empty
-	// when no ledger was supplied, in which case VC-003 simply does not fire.
-	IOC         map[string]ioc.Indicator
+	Releases    map[string]*datasource.ReleaseHistory
+	Config      Config
 	DataSources map[string]any // reserved for future feeds
 }
 

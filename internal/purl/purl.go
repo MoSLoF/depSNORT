@@ -13,6 +13,7 @@ package purl
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -107,21 +108,86 @@ func (p PURL) String() string {
 		b.WriteString(encodeNamespace(p.Namespace))
 		b.WriteByte('/')
 	}
-	b.WriteString(p.Name)
+	b.WriteString(encodeSegment(p.Name))
 	if p.Version != "" {
 		b.WriteByte('@')
-		b.WriteString(p.Version)
+		b.WriteString(encodeSegment(p.Version))
 	}
 	return b.String()
 }
 
-// encodeNamespace percent-encodes the leading "@" (the only reserved char that
-// commonly appears in the namespaces we handle today).
-func encodeNamespace(ns string) string {
-	if strings.HasPrefix(ns, "@") {
-		return "%40" + ns[1:]
+// Structural characters must be percent-encoded inside a component, or a value
+// can forge PURL structure (Decision D-33, found by FuzzParse).
+//
+// Node identity across the whole tool IS the PURL string. A package name
+// containing "@" would otherwise render an extra version separator, so a hostile
+// lockfile could declare a package that collides with — or slips past — another
+// package's identity: `name="lodash@4.17.21", version=""` renders exactly like
+// the real lodash@4.17.21, and an IOC ledger entry keyed on a PURL could be
+// evaded the same way. Encoding "@" (separator), "/" (segment separator), and
+// "%" (so the encoding is reversible) makes every component unambiguous.
+//
+// Legitimate package names contain none of these — npm scopes are carried in
+// Namespace, and Composer vendors are split off — so canonical output for real
+// packages is unchanged.
+func encodeSegment(s string) string {
+	if !strings.ContainsAny(s, "@/%") {
+		return s // fast path: the overwhelmingly common case
 	}
-	return ns
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '@':
+			b.WriteString("%40")
+		case '/':
+			b.WriteString("%2F")
+		case '%':
+			b.WriteString("%25")
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+// decodeSegment reverses encodeSegment. It is a single left-to-right pass so
+// that a literal percent (encoded "%25") cannot be re-decoded into a structural
+// character on a second pass — "%2540" must decode to "%40", never to "@".
+func decodeSegment(s string) string {
+	if !strings.ContainsAny(s, "%") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '%' && i+3 <= len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// encodeNamespace percent-encodes structural characters in a namespace. "/" is
+// deliberately NOT encoded: a namespace may legitimately span several segments
+// and they are joined with "/".
+func encodeNamespace(ns string) string {
+	var b strings.Builder
+	for i := 0; i < len(ns); i++ {
+		switch ns[i] {
+		case '@':
+			b.WriteString("%40")
+		case '%':
+			b.WriteString("%25")
+		default:
+			b.WriteByte(ns[i])
+		}
+	}
+	return b.String()
 }
 
 // Parse parses a canonical PURL string. It is intentionally lenient about the
@@ -133,8 +199,12 @@ func Parse(s string) (PURL, error) {
 	rest := strings.TrimPrefix(s, "pkg:")
 
 	var version string
-	if i := strings.LastIndexByte(rest, '@'); i >= 0 {
-		version = rest[i+1:]
+	// A trailing "@" with nothing after it is NOT a version separator. Consuming
+	// it would drop a character that String() never re-emits, so Parse->String
+	// would lose one "@" per pass and the same package could normalize to two
+	// different identities (Decision D-33, found by FuzzParse).
+	if i := strings.LastIndexByte(rest, '@'); i >= 0 && i+1 < len(rest) {
+		version = decodeSegment(rest[i+1:])
 		rest = rest[:i]
 	}
 
@@ -145,20 +215,37 @@ func Parse(s string) (PURL, error) {
 	p := PURL{Type: parts[0], Version: version}
 	switch len(parts) {
 	case 2:
-		p.Name = parts[1]
+		p.Name = decodeSegment(parts[1])
 	default:
 		p.Namespace = decodeNamespace(strings.Join(parts[1:len(parts)-1], "/"))
-		p.Name = parts[len(parts)-1]
+		p.Name = decodeSegment(parts[len(parts)-1])
 	}
 	if p.Type == "" || p.Name == "" {
 		return PURL{}, fmt.Errorf("purl: empty type or name in %q", s)
 	}
+	// The type is structural: it is read before both the "/" and "@" splits, so a
+	// type carrying either character makes the rest of the parse meaningless and
+	// the result unrenderable (Decision D-33, found by FuzzParse). The spec
+	// restricts it to an ASCII letter followed by letters, digits, ".", "+", "-";
+	// dependaSNORT only ever emits npm/pypi/gem/cargo/composer/nuget.
+	if !validType(p.Type) {
+		return PURL{}, fmt.Errorf("purl: invalid type %q in %q", p.Type, s)
+	}
 	return p, nil
 }
 
-func decodeNamespace(ns string) string {
-	if strings.HasPrefix(ns, "%40") {
-		return "@" + ns[3:]
+// validType reports whether t is a syntactically valid PURL type.
+func validType(t string) bool {
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case i > 0 && (c >= '0' && c <= '9' || c == '.' || c == '+' || c == '-'):
+		default:
+			return false
+		}
 	}
-	return ns
+	return t != ""
 }
+
+func decodeNamespace(ns string) string { return decodeSegment(ns) }

@@ -464,7 +464,7 @@ func TestAttack_ComposerPluginCradle(t *testing.T) {
 	})
 	g.AddEdge(root.ID, dep.ID, graph.EdgeDependsOn)
 
-	surface := installsurface.AnalyzePHP(scripts, "composer-plugin", "")
+	surface := installsurface.AnalyzePHP(scripts, "composer-plugin")
 	for _, h := range surface.Hooks {
 		hookID := "hook:" + dep.ID + "#" + strings.ReplaceAll(h.Name, ":", "_")
 		hookNode := g.AddNode(&graph.Node{

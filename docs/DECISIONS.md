@@ -548,3 +548,341 @@ the wheel, and a `depsnort` console script execs it unchanged. The engine stays
 Go; Python is only a launcher, so there is one implementation, not two. The Go
 toolchain is a build-time requirement — consistent with a project whose whole
 identity is a single dependency-free static binary.
+
+## D-32 — external technical review (v0.6.1): six findings remediated
+
+An independent architecture / security-boundary review of the public v0.6.1
+repository raised six findings (two Critical, three High, one Moderate). All six
+were confirmed against the code and fixed; each fix ships with regression tests
+that fail on the old behavior.
+
+**F-01 (Critical) — the pre-commit gate did not gate.** `depsnort-pre-commit.sh`
+ran the scanner as an `if` condition and read `$?` *after* `fi`. A completed
+if-statement with a false condition and no else returns 0, so a block-class
+finding (scanner exit 1) was captured as 0 and the commit sailed through. Fixed
+with the direct `rc=0; scanner || rc=$?` form the CI gate already used, plus a
+`FAIL_ON_INCOMPLETE` pass-through. `scripts/wrapper_test.sh` stubs the scanner at
+each exit code (0/1/2/3/64/70) and asserts the block-vs-pass mapping on sh, bash,
+and dash.
+
+**F-02 (Critical) — incomplete-coverage gated on graph facts only.** The verdict
+received `graph.Coverage()`, whose `Degraded` flag is derived solely from
+unresolved dependencies and orphaned nodes. An empty OSV cache, a failed
+registry source, an unreadable install surface, or a workspace project that never
+resolved were all warned to stderr and dropped — none could reach exit 3, so
+`-fail-on-incomplete` could still return a clean 0 over a scan that barely
+looked. That directly contradicted the README's own guarantee. Fixed by
+extending `graph.Coverage` with scan-level gap fields
+(`DataSourceGaps`/`ExtractorGaps`/`FailedProjects`) and an `Incomplete()` method
+that folds them in with graph resolution; the CLI populates them and calls the
+new `verdict.EvaluateWithCoverage`, which gates on `Incomplete()`. Precedence is
+unchanged and central: block > gate-eligible > incomplete. The PDF verdict banner
+and the stderr warning now report every gap class, so reports and exit codes
+agree. Proven end-to-end: an offline empty OSV cache returns exit 0 with a
+warning by default and exit 3 under `-fail-on-incomplete`.
+
+**F-03 (High) — local reads could cross the repository boundary.** The npm
+adapter did lexical `..`/absolute containment but never resolved symlinks;
+Composer built `vendor/` and PSR-4 paths from untrusted lockfile / composer.json
+content with no canonical check; the other adapters read via bare path joins. A
+hostile checkout could steer a read out of the scan root through a symlink or a
+crafted name. Fixed with one primitive, `internal/securefs`: it rejects absolute
+and traversal inputs, resolves symlinks and re-checks containment on the
+canonical path, refuses non-regular files, and caps per-file size. Every
+ecosystem's install-surface read (npm, PyPI, RubyGems, Cargo, Composer, NuGet)
+now routes through it. Regression fixtures cover `..` escapes, absolute paths,
+and file/directory symlink escapes — rejected — while contained symlinks and
+legitimate in-tree reads still succeed.
+
+**F-04 (High) — the wheel was mislabeled platform-independent.** `setup.py`
+compiles an OS/arch-specific Go binary into the wheel but declared no native
+code, so setuptools produced a `py3-none-any` wheel that an index would offer to
+incompatible platforms. Fixed with a `bdist_wheel` override that marks the
+distribution impure and pins the platform tag while keeping the Python tag broad
+(`py3-none-<platform>`) — the launcher is interpreter-agnostic, the binary is
+not. Verified: the built wheel is `...-py3-none-linux_x86_64.whl`,
+`Root-Is-Purelib: false`, and the embedded binary runs.
+
+**F-05 (High) — sdist processing lacked cumulative hostile-input controls.** The
+PyPI sdist path capped compressed size and per-file size but did not verify the
+PyPI-declared SHA-256, cap total decompressed bytes, cap tar entry count, or cap
+retained `.pth` count/size, and it returned partial extraction as success on a
+malformed tar. Fixed: the artifact is read once and its SHA-256 verified before
+any byte is trusted; decompressed-total, entry-count, and `.pth` count/size caps
+are enforced; a truncated or corrupt tar is now a returned error (a coverage gap
+via F-02), never a clean partial. Redirect destinations are constrained to PyPI
+content hosts. Fixtures cover bomb, entry-flood, truncation, digest mismatch, and
+the `.pth` caps.
+
+**F-06 (Moderate) — CI, versioning, and disclosure maturity.** Added
+`.github/workflows/ci.yml` (gofmt, vet, `go test -race`, static build, the
+zero-dependency dogfood check, the pre-commit wrapper contract on sh+bash,
+cross-platform build matrix, and a wheel-tag assertion) and `release.yml`
+(checksummed cross-platform binaries on a tag). Actions are patch-pinned and
+tracked by `.github/dependabot.yml`. The version is single-sourced from
+`pyproject.toml` — the Makefile and `setup.py` read it and inject it via
+`-ldflags`, and `main.version` defaults to `dev` so an un-injected build never
+claims a release number. `SECURITY.md` now documents a private disclosure
+channel (GitHub private vulnerability reporting) and response expectations.
+
+Remaining, by the reviewer's own sequencing (production-adoption tail, needs
+operator decisions): signed provenance / Sigstore attestation, a published SBOM,
+parser fuzzing, and performance baselines.
+
+## D-33 — closing the production-adoption tail: fuzzing, baselines, SBOM, provenance
+
+The v0.6.1 review (D-32) left a 60–90 day tail — parser fuzzing, performance
+baselines, a published SBOM, and signed provenance. Taken together they are the
+difference between "the tests we thought to write pass" and "we went looking for
+what we did not think of." Two of the four found real defects, which is the
+argument for doing them rather than deferring them again.
+
+**Fuzzing found two identity bugs.** Sixteen native Go fuzz targets now cover all
+six lockfile parsers, the PURL identity layer, semver, the five install-surface
+analyzers, the sdist tar reader, and path containment. Two genuine defects
+surfaced in `internal/purl`, which matters more than it first sounds: node
+identity across the entire tool IS the PURL string — the graph dedupes on it,
+IOC ledger entries key on it, and cross-repo blast radius is computed by merging
+equal ones.
+
+  1. *Normalization drifted.* `Parse` consumed a trailing `@` as a version
+     separator even with no version after it, and `String` never re-emitted it,
+     so `pkg:npm/@@@@@@@` lost one character per round trip. A value that is
+     supposed to be a stable identity was not a fixed point.
+  2. *A crafted name could forge structure.* Because `@` was written raw, a
+     package literally named `lodash@4.17.21` with no version rendered the exact
+     PURL of the real `lodash@4.17.21` — an identity collision a hostile lockfile
+     could mint deliberately, and equally a way to slip past an IOC ledger entry
+     keyed on a PURL. `/` could likewise forge a namespace segment, and an
+     invalid type (`pkg:0@/@`) produced a PURL that would not re-parse at all.
+
+  Fixed by percent-encoding the structural characters (`@`, `/`, `%`) within each
+  component, decoding on parse in a single left-to-right pass so `%2540` decodes
+  to `%40` and never to `@`, refusing to treat a trailing `@` as a separator, and
+  validating the type against the spec's charset. Canonical output for real
+  packages is unchanged — npm scopes live in the namespace and Composer vendors
+  are split off, so no legitimate name contains these characters — and the
+  existing round-trip and scope tests still pass untouched. `TestCraftedName*`
+  pins the injection cases.
+
+  The containment fuzzer is the one worth keeping honest about: it asserts a
+  security property, not the absence of a panic. A sentinel file and a symlink to
+  it are planted outside the scan root, and any input that causes a read to
+  return that sentinel fails the test. 1.2M executions clean.
+
+**Performance baselines found the hot spot.** `docs/PERFORMANCE.md` records
+committed numbers for parse, checks, verdict, and every emitter, measured against
+synthesized graphs at 100/1000/5000 packages, because benchmarking against a
+69-line fixture measures nothing real. Profiling put `osaDistance` — the edit
+distance behind typosquat detection — at ~71% of the entire check pipeline's CPU.
+VC-006 compares every package name against the whole popular-name corpus but only
+ever acts on distance 1 or 2, so a full matrix was computed and thrown away for
+nearly every comparison. (Its doc comment had claimed a "bounded early-exit" that
+was never implemented — the comment was aspirational.)
+
+  `osaDistanceBounded` takes a ceiling and exploits the fact that each edit
+  changes length by at most one, so two names whose lengths differ by more than
+  the ceiling cannot be within it — decided without allocating a matrix or even a
+  rune slice. The row-minimum early exit deliberately requires TWO consecutive
+  rows above the ceiling, because an OSA transposition advances two rows at once
+  and can skip one; checking a single row would be unsound. Result: the check
+  pipeline is **1.74x faster** with 46% less memory, and an end-to-end scan
+  **1.71x faster**. Behavior-preservation is tested, not asserted:
+  `FuzzBoundedMatchesExact` is a differential target holding the optimized form
+  against the reference one (1.18M executions clean).
+
+**The SBOM is self-describing.** `depsnort sbom` emits CycloneDX 1.5 built from
+`runtime/debug.BuildInfo` — the module graph the linker actually embedded — so it
+cannot drift from the binary the way a maintained manifest would. It is also the
+machine-checkable form of the dogfood invariant (D-10): the `components` array is
+empty, and CI fails if a third-party dependency ever appears. No timestamp and a
+name-based UUIDv5 serial keep it byte-reproducible per D-13, so two people can
+independently rebuild a tag and diff the result.
+
+**Provenance is keyless.** Releases are signed with Sigstore through the
+workflow's GitHub OIDC identity and attested with SLSA build provenance, binding
+each artifact digest to the repository, workflow, and commit that produced it.
+There is no long-lived key for a solo maintainer to protect or rotate, and the
+attestation lands in the public Rekor transparency log; consumers verify with
+`gh attestation verify`. The release workflow also refuses to publish a tag whose
+version disagrees with `pyproject.toml`, which is the drift F-06 warned about
+made impossible rather than merely discouraged.
+
+Version single-sourcing is now complete: `pyproject.toml` is the one place, and
+the Makefile, `setup.py`, the Go binary, the wheel tag, the SBOM, and
+`py/depsnort/__init__.py` (via installed distribution metadata) all derive from
+it. Released as v0.7.0 — the `sbom` command is new surface, and D-32's exit-3
+behavior plus this PURL canonicalization are behavior changes that a patch bump
+would have understated.
+
+## D-34 — follow-up review: refusals and caps must fail closed
+
+The follow-up review of the v0.7.0 candidate confirmed F-01 through F-04 closed
+and F-06 substantially addressed, and raised three residual findings. Two were
+the same defect wearing different clothes, and it is the defect this project
+exists to prevent: **a safety mechanism that protects the process while quietly
+discarding evidence.**
+
+A correction to D-32's framing first, because the reviewer was right to call it
+out: that entry read as though the remediation was complete. It was not. F-05 was
+partial — the bounds were added, but several of them failed OPEN — and F-03
+closed the filesystem boundary without closing the accounting behind it. The
+disposition below is the accurate one.
+
+**R-01 — a containment refusal was indistinguishable from an absent file.** The
+adapters consumed securefs errors with the same `if err == nil` they use for a
+file that is legitimately not on disk. So the refusal was correct and invisible:
+the unsafe read did not happen, and neither did any record of it. Reproduced end
+to end before fixing — an npm package whose directory is a symlink pointing out
+of the repo, containing a `curl … | sh` plus `.npmrc` read, produced
+`complete: true`, zero findings, **exit 0 under -fail-on-incomplete**, and a
+silent stderr. That is attacker-triggerable invisibility: an attacker who cannot
+make depsnort read outside the scan root can instead make the evidence
+unreadable, and be rewarded with a clean bill of health.
+
+  Fixed with typed gaps (`internal/ecosystem/instsurf/gaps.go`). `os.ErrNotExist`
+  remains an ordinary absence — a pre-install tree has no `node_modules` and most
+  crates ship no `build.rs`, so gating on that would make the signal worthless.
+  Everything else (`ErrOutsideRoot`, `ErrNotRegular`, `ErrTooLarge`, parse
+  failure, other I/O) becomes a `Gap` carrying package, path, and reason. All six
+  adapters record them; the CLI counts each one, summarizes by reason, and
+  carries a bounded detail sample into the report — the COUNT is never capped,
+  only the per-item list. The same fixture now exits 3 and says
+  `containment-refusal x1` with the path.
+
+**R-02 — hostile-input caps converted attacks into clean partial results.** Most
+serious was the per-file read: `io.LimitReader(tr, maxFileSize)` returns exactly
+the cap with NO error, so an oversized `setup.py` was silently truncated. Pad
+2 MiB of comments, put the payload after the cut, and the analyzer scans a clean
+prefix and reports nothing — a direct detection bypass. Now the reader takes
+`maxFileSize+1` and fails on overflow. Alongside it: the sdist origin URL comes
+from index metadata and was fetched unchecked (only redirects were validated), an
+absent digest DISABLED verification rather than failing, `.pth` content past the
+retention caps was silently dropped, and a final oversized entry escaped the
+decompression guard through EOF. All five now fail closed as coverage gaps.
+
+**R-03 — release trust metadata.** Actions are moving to immutable commit SHAs
+with the version kept as a trailing comment; `scripts/pin-actions.sh` resolves
+them through the GitHub API (never a hardcoded table, which would go stale) and
+`--check` fails CI if any reference regresses to a mutable tag. The release SBOM
+is now generated with `sbom -release`, which omits host-specific GOOS/GOARCH and
+declares its scope: only one of five platform binaries can be executed to produce
+an SBOM, so stamping its platform onto a document that accompanies the other four
+was a misstatement. The dependency graph is identical across targets, and that is
+what the document now describes.
+
+**On the tests themselves.** The reviewer noted the F-02 coverage tests injected
+a prebuilt `graph.Coverage` and asserted the exit code — which proves the policy
+but not the plumbing, and therefore could never have caught R-01. There are now
+end-to-end tests that build real hostile checkouts on disk, run the real CLI, and
+assert the process exit code and emitted JSON: symlink escape, special file,
+oversize manifest, and unparseable manifest each reach `complete: false` and exit
+3, an absent optional package stays clean at exit 0, a gap is reported but does
+not gate without opt-in, and a block still outranks a gap.
+
+Counts corrected while here: there are **19** fuzz targets, not the 16 D-33
+claimed, and CI actively fuzzes **9** of them; the performance baseline is
+labelled v0.7.0.
+
+## D-35 — the last fail-open path, and fewer things to trust
+
+Third review pass. R-01 confirmed closed; R-02 and R-03 partially. Both residuals
+were the same shape one more time, which is worth naming: **every remaining
+defect in this project has been a bound that protected the process while quietly
+discarding evidence.** Not one has been a missing check. They have all been
+checks that, on failing, returned something that looked like good news.
+
+**The declared-oversize sdist.** `findSdistURL` selected an sdist only when its
+metadata size was at or below the cap. An sdist that existed but declared a
+larger size was skipped, the loop fell through to the wheel-only return, and
+`Fetch` recorded `WheelOnly=true` — an ordinary, expected, entirely benign state
+— then CACHED it and reported no gap. An attacker did not even need to publish a
+large file; declaring a large size in index metadata was enough to make their
+install surface invisible behind a clean result.
+
+  "No sdist exists" and "an sdist exists but we declined to fetch it" are
+  different facts and no longer collapse. If every candidate exceeds the cap the
+  fetch returns `ErrSdistTooLarge`, which the adapter aggregates as a gap and the
+  CLI turns into exit 3. A package that genuinely publishes only wheels still
+  reports wheel-only and stays clean, and a listing containing both an oversized
+  and a usable sdist still analyzes the usable one — tested, because a fix that
+  gates on ordinary wheel-only packages would be worse than the bug.
+
+**Cache semantics are versioned.** The sdist cache key now carries a semantics
+version. Records written by an earlier build were produced under fail-open rules
+— a silently truncated `setup.py`, `.pth` content dropped past the retention cap,
+an unverified digest, an oversized sdist stored as wheel-only — and reusing them
+after an upgrade would let the old weaker analysis survive as a cached clean
+result. The bump invalidates them wholesale. It is bumped whenever a change
+alters what a cached record is allowed to MEAN, not merely its shape.
+
+**Fewer things to trust, rather than more things labelled trusted.** The action
+pinning finding had an answer better than pinning: the release publish step now
+uses the preinstalled `gh` CLI instead of a third-party action, so no external
+code runs with `contents: write` in the workflow that builds and signs releases.
+There is nothing left to pin there because there is nothing left. Every remaining
+reference is GitHub first-party `actions/*`, `make pin` resolves them through the
+GitHub API, and CI fails on any that regress to a mutable tag.
+
+Two SHAs were resolved and applied here (`actions/checkout`,
+`actions/setup-python`); `actions/setup-go` and `actions/attest-build-provenance`
+were left as tags because the API could not be reached to verify them at the time
+of writing. That is deliberate: a plausible-looking but unverified SHA in the
+workflow that signs releases is worse than an honest tag, because it manufactures
+confidence instead of stating a gap. `make pin` closes it in one command against
+the live API.
+
+**Refusal tests now cover every adapter, not just npm.** The end-to-end CLI
+fixtures remain npm-focused; each other ecosystem gets an adapter-level pair —
+a planted symlink where its install-time file belongs must produce a
+containment gap, and an ordinary absence must not. Writing them immediately paid
+for itself: the new containment check on RubyGems' `ext/` enumeration treated a
+NONEXISTENT `ext/` as a refusal, which would have gated every clean Ruby project.
+The absence-vs-refusal distinction is easy to state and easy to get backwards,
+which is exactly why both halves are asserted per ecosystem.
+
+## D-36 — R-03 closed: every action pinned, and a drift guard so it stays that way
+
+The fourth review pass accepted the R-01/R-02 remediation outright and left a
+single blocker: two workflow actions (`setup-go`, `attest-build-provenance`) were
+still mutable tags, so the repository's own `pin-check` failed. This closes it.
+
+All four workflow actions are now pinned to immutable commit SHAs with version
+comments:
+
+  - `actions/checkout@11bd719…` (v4.2.2)
+  - `actions/setup-go@0a12ed9…` (v5.0.2)
+  - `actions/setup-python@f67713…` (v5.2.0)
+  - `actions/attest-build-provenance@1c608d1…` (v1.4.3)
+
+A note on how those SHAs were obtained, because the principle running through
+this whole engagement is *never put an unverified SHA in the workflow that signs
+releases*: the container's egress to GitHub's API was rate-limited, so rather
+than pin from memory — which manufactures confidence — each SHA was resolved
+against GitHub's own `git/ref` API (with a Gitea mirror as an independent
+cross-check for setup-go, which agreed byte-for-byte). `make pin` re-resolves
+them against the authenticated API on any maintainer's machine, and a wrong SHA
+would fail the workflow loudly on first run rather than silently. There is also
+no third-party publisher left to trust: the release step uses the runner's `gh`
+CLI, so nothing external runs with `contents: write`.
+
+The pin invariant is now enforced two ways that cannot drift apart (R-03 P2):
+`scripts/pin-actions.sh --check` runs as a CI job, and
+`internal/ciactions/pin_test.go` runs in `go test ./...` — it parses every
+workflow, asserts each action reference is a 40-char SHA with a `# vX` comment,
+and fails vacuously-empty matches. Writing it immediately earned its place by
+pointing at the one remaining tag before it was fixed.
+
+Two more P2 items landed. The adapter refusal matrix now covers three securefs
+reasons per ecosystem, not just symlink escape: `TestAdapterNonRegularInstallFileIsAGap`
+plants a directory where each adapter expects its install-time file and asserts a
+`not-a-regular-file` gap, and the JSON adapters get a parse-failure gap case — an
+adapter could plausibly handle one refusal reason and swallow another, so each is
+asserted independently. And `docs/RELEASING.md` writes the release sequence down,
+including the rule that is easiest to forget because it has no immediate symptom:
+bump `sdistSemantics` whenever a change alters what a cached extraction record is
+allowed to MEAN.
+
+Released as v0.7.3 — the completed hardened release. Every original finding
+(F-01…F-06) and every residual (R-01…R-03) is closed and covered by a test that
+fails if it regresses.

@@ -2,13 +2,14 @@ package pypi
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/installsurface"
+	"ihbv.io/depsnort/internal/securefs"
 )
 
 // ExtractInstallSurface implements ecosystem.InstallSurfaceExtractor.
@@ -32,7 +33,7 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	}
 
 	ctx := context.Background()
-	var firstErr error
+	var gaps instsurf.Gaps
 
 	for _, n := range g.SortedNodes() {
 		if n.Kind != graph.KindPackage {
@@ -45,7 +46,7 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		if roots[n.ID] {
 			// Root project: read setup.py/pyproject.toml from the local
 			// project directory rather than fetching from PyPI.
-			extractLocalPython(projectDir, g, n)
+			extractLocalPython(projectDir, g, n, &gaps)
 			continue
 		}
 
@@ -58,9 +59,10 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 
 		files, err := a.Sdist.Fetch(ctx, n.Name, n.Version)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("pypi install-surface: %s@%s: %w", n.Name, n.Version, err)
-			}
+			// Every sdist failure — network, integrity, or a hostile-input
+			// bound — is a gap: the package's install surface went unexamined
+			// (R-01 / R-02).
+			gaps.AddReason(n.ID, n.Name+"@"+n.Version, instsurf.GapUnreadable, err)
 			continue
 		}
 
@@ -77,15 +79,31 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			addPySurfaceToGraph(g, n, surface)
 		}
 	}
-	return firstErr
+	return gaps.Err()
 }
 
 // extractLocalPython reads setup.py and pyproject.toml from the local project
 // directory and analyzes them for install-time capabilities. This handles the
 // root project, which isn't published on PyPI and can't be fetched via sdist.
-func extractLocalPython(dir string, g *graph.Graph, n *graph.Node) {
-	setupPy, _ := os.ReadFile(filepath.Join(dir, "setup.py"))
-	pyprojectToml, _ := os.ReadFile(filepath.Join(dir, "pyproject.toml"))
+func extractLocalPython(dir string, g *graph.Graph, n *graph.Node, gaps *instsurf.Gaps) {
+	// Contained reads (F-03): a setup.py or pyproject.toml symlinked out of the
+	// project is refused rather than followed — and that refusal is recorded as
+	// a gap rather than silently read as "this project has no setup.py" (R-01).
+	reader, err := securefs.NewReader(dir)
+	if err != nil {
+		gaps.Add(n.ID, dir, err)
+		return
+	}
+	read := func(name string) []byte {
+		b, err := reader.ReadFile(name)
+		if err != nil {
+			gaps.Add(n.ID, filepath.Join(dir, name), err)
+			return nil
+		}
+		return b
+	}
+	setupPy := read("setup.py")
+	pyprojectToml := read("pyproject.toml")
 
 	if len(setupPy) == 0 && len(pyprojectToml) == 0 {
 		return

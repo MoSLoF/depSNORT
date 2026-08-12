@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Keep pinned GitHub Actions current (finding F-06). Dependabot will bump the
+  # pins — and, if you convert them to commit SHAs, maintain those too.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  # The Go module has zero third-party dependencies by design (Decision D-10),
+  # so this only tracks the Go toolchain directive in go.mod.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly

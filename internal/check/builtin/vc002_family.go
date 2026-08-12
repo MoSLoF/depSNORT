@@ -109,8 +109,8 @@ func (HookNetwork) Meta() check.Meta {
 func (HookNetwork) Run(ctx *check.Context) []finding.Finding {
 	var out []finding.Finding
 	for _, v := range collectHooks(ctx.Graph) {
-		if !v.Caps["network"] || v.Caps["credentials"] || v.Caps["cradle"] {
-			continue // credential case is VC-002d's, cradle is VC-002f's — don't double-report
+		if !v.Caps["network"] || v.Caps["credentials"] {
+			continue // credential case is VC-002d's, don't double-report
 		}
 		ev := fmt.Sprintf("%s hook has network egress", v.Hook.Name)
 		if len(v.Remotes) > 0 {
@@ -239,47 +239,6 @@ func (HookObfuscated) Run(ctx *check.Context) []finding.Finding {
 			Evidence: fmt.Sprintf("obfuscation + exec in the install chain; markers: %s",
 				strings.Join(dedupeStrings(v.Evidence), ", ")),
 			Remediation: "inspect the decoded payload manually before installing",
-		})
-	}
-	return out
-}
-
-// ---- VC-002f: download-and-execute cradle ---------------------------------
-
-// HookDownloadCradle (VC-002f) reports an install hook that fetches remote code
-// and executes it in one step — `curl … | sh`, `iex (DownloadString …)`, a
-// certutil/bitsadmin LOLBin pull. This is the initial-access primitive, and
-// unlike a prebuilt-binary download from a known host (esbuild), it is defined
-// by the fetch-and-run idiom that legitimate installers do not use. It is
-// block-class (Decision D-28): running code you just pulled off the network at
-// install time is not a warning, it is the compromise.
-type HookDownloadCradle struct{}
-
-func (HookDownloadCradle) Meta() check.Meta {
-	return check.Meta{
-		ID: "VC-002f", Axis: finding.AxisKnownCompromise,
-		DefaultSeverity: finding.SevCritical, DefaultGate: finding.GateBlock,
-		Description: "install hook fetches and executes remote code (download cradle)",
-	}
-}
-
-func (HookDownloadCradle) Run(ctx *check.Context) []finding.Finding {
-	var out []finding.Finding
-	for _, v := range collectHooks(ctx.Graph) {
-		if !v.Caps["cradle"] {
-			continue
-		}
-		ev := fmt.Sprintf("%s hook fetches remote code and executes it in one step", v.Hook.Name)
-		if len(v.Remotes) > 0 {
-			ev += "; source: " + strings.Join(v.Remotes, ", ")
-		}
-		out = append(out, finding.Finding{
-			CheckID: "VC-002f", Axis: finding.AxisKnownCompromise,
-			Severity: finding.SevCritical, GateClass: finding.GateBlock,
-			Confidence: 0.9, NodeID: v.Pkg.ID,
-			Title:       fmt.Sprintf("install hook (%s) is a download cradle", v.Hook.Name),
-			Evidence:    ev,
-			Remediation: "do not install; an install hook has no legitimate reason to pull and run code from the network",
 		})
 	}
 	return out

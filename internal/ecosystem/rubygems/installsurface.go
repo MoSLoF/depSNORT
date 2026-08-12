@@ -7,6 +7,7 @@ import (
 	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/installsurface"
+	"ihbv.io/depsnort/internal/securefs"
 )
 
 // ExtractInstallSurface implements ecosystem.InstallSurfaceExtractor (Decision
@@ -24,10 +25,13 @@ import (
 // finding — false-positive discipline, not a miss.
 func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	dir := instsurf.ProjectDir(path)
-	extconf := findExtconf(dir)
-	gemspec := readFirstGemspec(dir)
+	// Refused reads become typed gaps rather than looking like "no native
+	// extension here" (R-01).
+	var gaps instsurf.Gaps
+	extconf := findExtconf(dir, &gaps)
+	gemspec := readFirstGemspec(dir, &gaps)
 	if extconf == "" && gemspec == "" {
-		return nil
+		return gaps.Err()
 	}
 
 	roots := map[string]bool{}
@@ -43,31 +47,53 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			instsurf.AddToGraph(g, n, surface)
 		}
 	}
-	return nil
+	return gaps.Err()
 }
 
 // findExtconf looks for extconf.rb at the gem root and under ext/ (the
 // conventional home for native-extension build scripts), bounded to a shallow
 // walk so a large repo is not traversed wholesale.
-func findExtconf(dir string) string {
-	candidates := []string{
-		filepath.Join(dir, "extconf.rb"),
-		filepath.Join(dir, "ext", "extconf.rb"),
+func findExtconf(dir string, gaps *instsurf.Gaps) string {
+	// Contained reads (F-03): a build script symlinked out of the gem is refused.
+	reader, err := securefs.NewReader(dir)
+	if err != nil {
+		gaps.Add("", dir, err)
+		return ""
 	}
-	for _, c := range candidates {
-		if b, err := os.ReadFile(c); err == nil && len(b) > 0 {
-			return string(b)
+	read := func(rel string) (string, bool) {
+		b, err := reader.ReadFile(rel)
+		if err != nil {
+			gaps.Add("", filepath.Join(dir, rel), err)
+			return "", false
+		}
+		return string(b), len(b) > 0
+	}
+	for _, c := range []string{"extconf.rb", filepath.Join("ext", "extconf.rb")} {
+		if s, ok := read(c); ok {
+			return s
 		}
 	}
 	// ext/<name>/extconf.rb — one directory level under ext/.
+	//
+	// Enumeration is containment-checked BEFORE listing (R-03 P2): if ext/ is a
+	// symlink pointing out of the gem, the per-file reads below would each be
+	// refused anyway, but we would still have enumerated an out-of-tree
+	// directory's names and leaked them into gap paths. Refuse up front instead.
 	extRoot := filepath.Join(dir, "ext")
+	// Only an ext/ that EXISTS but is not contained is a refusal. Most gems ship
+	// no ext/ at all, and treating that absence as a gap would gate every clean
+	// Ruby project — the same absence-vs-refusal distinction R-01 turns on.
+	if _, statErr := os.Lstat(extRoot); statErr == nil && !reader.Contains(extRoot) {
+		gaps.AddReason("", extRoot, instsurf.GapContainment, nil)
+		return ""
+	}
 	if entries, err := os.ReadDir(extRoot); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
 			}
-			if b, err := os.ReadFile(filepath.Join(extRoot, e.Name(), "extconf.rb")); err == nil && len(b) > 0 {
-				return string(b)
+			if s, ok := read(filepath.Join("ext", e.Name(), "extconf.rb")); ok {
+				return s
 			}
 		}
 	}
@@ -75,7 +101,12 @@ func findExtconf(dir string) string {
 }
 
 // readFirstGemspec returns the contents of the first *.gemspec in dir.
-func readFirstGemspec(dir string) string {
+func readFirstGemspec(dir string, gaps *instsurf.Gaps) string {
+	reader, err := securefs.NewReader(dir)
+	if err != nil {
+		gaps.Add("", dir, err)
+		return ""
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
@@ -84,9 +115,14 @@ func readFirstGemspec(dir string) string {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".gemspec" {
 			continue
 		}
-		if b, err := os.ReadFile(filepath.Join(dir, e.Name())); err == nil {
-			return string(b)
+		b, err := reader.ReadFile(e.Name())
+		if err != nil {
+			// The gemspec is listed in the directory, so it exists; being
+			// unable to read it is a gap, not an absence.
+			gaps.Add("", filepath.Join(dir, e.Name()), err)
+			continue
 		}
+		return string(b)
 	}
 	return ""
 }
