@@ -38,6 +38,39 @@ func TestByNameCoversAllFormats(t *testing.T) {
 	}
 }
 
+// Golden determinism (Decision D-13, report §6 / validation Stage 2). Two scans
+// of identical data must produce byte-identical output, or a report tree cannot
+// be diffed across runs and a golden fixture cannot pin expected output. The test
+// REBUILDS the graph fresh on every render rather than re-emitting one in-memory
+// graph — that is what surfaces map-iteration nondeterminism in graph
+// construction or emission, which re-emitting the same object would mask.
+func TestEmittersAreByteDeterministic(t *testing.T) {
+	for _, format := range Formats() {
+		em := ByName(format)
+		if em == nil {
+			t.Fatalf("no emitter for %q", format)
+		}
+		render := func() []byte {
+			g, res := sampleGraph()
+			var buf bytes.Buffer
+			if err := em.Emit(&buf, g, res, RunInfo{}); err != nil {
+				t.Fatalf("%s: emit: %v", format, err)
+			}
+			return buf.Bytes()
+		}
+		first := render()
+		if len(first) == 0 {
+			t.Errorf("%s: emitted nothing", format)
+		}
+		// Several rebuilds, because map-order nondeterminism is probabilistic.
+		for i := 0; i < 8; i++ {
+			if got := render(); !bytes.Equal(first, got) {
+				t.Fatalf("%s: output differs across identical rebuilds (run %d) — D-13 determinism broken", format, i)
+			}
+		}
+	}
+}
+
 func TestDOTEmitsStyledGraph(t *testing.T) {
 	g, res := sampleGraph()
 	var b bytes.Buffer

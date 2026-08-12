@@ -53,7 +53,13 @@ type discovered struct {
 // matches first rather than being scanned twice. Unreadable subtrees are skipped
 // rather than aborting the walk — a workspace usually contains at least one
 // directory the current user cannot read, and that should not fail the scan.
-func discoverProjects(root string, reg *ecosystem.Registry) ([]discovered, error) {
+//
+// extraSkip adds operator-supplied directory names to the built-in skip set
+// (the -exclude flag). This is how a caller gets a PRODUCTION-only scan of a tree
+// that also carries test fixtures — for example `-exclude testdata` on depSNORT's
+// own repo, whose adversarial corpus is meant to be found in a full-tree scan but
+// not in a dependency audit of the shipped code (report §3.7 / §6).
+func discoverProjects(root string, reg *ecosystem.Registry, extraSkip map[string]bool) ([]discovered, error) {
 	rootClean := filepath.Clean(root)
 	rootDepth := strings.Count(rootClean, string(os.PathSeparator))
 
@@ -71,7 +77,7 @@ func discoverProjects(root string, reg *ecosystem.Registry) ([]discovered, error
 		}
 		name := d.Name()
 		if path != rootClean {
-			if skipDirs[name] || strings.HasPrefix(name, ".") && name != "." {
+			if skipDirs[name] || extraSkip[name] || strings.HasPrefix(name, ".") && name != "." {
 				return fs.SkipDir
 			}
 		}

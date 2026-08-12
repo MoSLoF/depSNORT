@@ -886,3 +886,34 @@ allowed to MEAN.
 Released as v0.7.3 — the completed hardened release. Every original finding
 (F-01…F-06) and every residual (R-01…R-03) is closed and covered by a test that
 fails if it regresses.
+
+## D-37 — portfolio-validation prep: exclude semantics, golden determinism, self-scan profiles
+
+Groundwork for using the MoSLoF repo portfolio as depSNORT's real-world
+integration corpus (the follow-up validation plan). Three report items, all
+depSNORT-side and staging-free, landed ahead of the portfolio work so validation
+Stages 1–2 are unblocked.
+
+**`-exclude` gives ignore semantics without moving the defaults.** Recursive
+discovery already skips `node_modules`, `vendor`, `.git`, `venv`, `target`, and
+kin. `-exclude name1,name2` adds names to that set for a single run, so an
+operator can carve `testdata`/fixtures out of a scan of a tree that also ships
+them — the "production-only" view — without changing safe defaults or hiding a
+real dependency by default. Excluding a directory removes it and everything
+beneath.
+
+**Self-scanning is documented as two distinct questions.** A `go.mod`-only /
+`sbom` scan is the zero-third-party negative control (must be clean). A full-tree
+recursive scan is EXPECTED to flag `testdata/adversarial/` — that is the corpus
+proving the checks fire, not evidence the shipped tool is compromised. The README
+now states both profiles plainly, with `-exclude testdata` as the production-only
+lens, so a full-tree self-scan can never be misread as a compromise (report §3.7
+acceptance: self-scan distinguishes production deps from test fixtures).
+
+**Determinism is now an asserted golden test, not just a claim.** D-13 promised
+byte-reproducible output; `TestEmittersAreByteDeterministic` proves it across
+JSON, SARIF, DOT, Cypher, and PDF by REBUILDING the graph fresh on each render
+and comparing bytes over several rounds. Re-emitting one in-memory graph would
+have masked map-iteration nondeterminism in construction or emission; rebuilding
+is what actually catches it. This is validation Stage 2's schema-stability
+property, enforced in `go test`.

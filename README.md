@@ -276,6 +276,39 @@ unreadable subtrees rather than aborting. Two checkouts declaring the same
 explicitly rather than leaving a gap between the discovered count and the root
 count.
 
+`-exclude name1,name2` adds directory names to that skip set for a single run —
+so you can carve test fixtures or any noisy subtree out of a recursive scan
+without touching the defaults:
+
+```
+./depsnort scan -recursive -exclude testdata,fixtures /path/to/repo
+```
+
+### Scanning depSNORT itself (two profiles)
+
+Self-scanning is deliberately **two different questions**, and they must not be
+conflated:
+
+- **Production dogfood** — audit only the code that ships. depSNORT's own module
+  has zero third-party dependencies (Decision D-10), so a manifest-only scan of
+  `go.mod` is the negative control: it must come back clean.
+
+  ```
+  ./depsnort sbom            # the machine-readable zero-dependency proof
+  ```
+
+- **Full-tree ground truth** — a recursive scan of the whole repo **is expected
+  to fire**, because `testdata/adversarial/` contains intentionally
+  malicious-shaped fixtures (that is what proves the checks work). A non-empty
+  result here is the corpus doing its job, **not** evidence that the shipped tool
+  is compromised. To audit the tree as if those fixtures were not there, exclude
+  them:
+
+  ```
+  ./depsnort scan -recursive .                    # fixtures SHOULD be flagged
+  ./depsnort scan -recursive -exclude testdata .  # production-only view
+  ```
+
 ### Output files
 
 By default output goes to stdout so it stays pipeable. Pass `-o` (or `-out`) to

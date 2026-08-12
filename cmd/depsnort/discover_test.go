@@ -12,7 +12,7 @@ const wsRoot = "testdata/workspace"
 
 func TestDiscoverFindsEveryProject(t *testing.T) {
 	adapters := adapterRegistry(true)
-	found, err := discoverProjects(wsRoot, adapters)
+	found, err := discoverProjects(wsRoot, adapters, nil)
 	if err != nil {
 		t.Fatalf("discoverProjects: %v", err)
 	}
@@ -47,12 +47,37 @@ func TestDiscoverFindsEveryProject(t *testing.T) {
 	}
 }
 
+// The -exclude flag adds operator-supplied directory names to the skip set, so a
+// caller can carve test fixtures (or any noisy subtree) out of a recursive scan —
+// e.g. `-exclude testdata` for a production-only audit of a repo that also ships
+// fixtures (report §6). Excluding a directory removes it and everything beneath.
+func TestExcludeDropsNamedDirs(t *testing.T) {
+	adapters := adapterRegistry(true)
+
+	base, err := discoverProjects(wsRoot, adapters, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := discoverProjects(wsRoot, adapters, map[string]bool{"py-repo": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(base)-1 {
+		t.Fatalf("exclude py-repo: found %d, want %d", len(got), len(base)-1)
+	}
+	for _, f := range got {
+		if strings.Contains(filepath.ToSlash(f.Path), "/py-repo") {
+			t.Errorf("py-repo was excluded but still discovered: %s", f.Path)
+		}
+	}
+}
+
 // The decoy lockfile inside node_modules must never be discovered. Walking
 // node_modules would resolve vendored copies as first-class projects and, on a
 // real workspace, take effectively forever.
 func TestDiscoverSkipsNodeModules(t *testing.T) {
 	adapters := adapterRegistry(true)
-	found, err := discoverProjects(wsRoot, adapters)
+	found, err := discoverProjects(wsRoot, adapters, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +92,7 @@ func TestDiscoverIsDeterministic(t *testing.T) {
 	adapters := adapterRegistry(true)
 	var first []string
 	for i := 0; i < 6; i++ {
-		found, err := discoverProjects(wsRoot, adapters)
+		found, err := discoverProjects(wsRoot, adapters, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +116,7 @@ func TestDiscoverIsDeterministic(t *testing.T) {
 // repos is ONE node, and both repos appear as roots.
 func TestMergeDedupesSharedDependencies(t *testing.T) {
 	adapters := adapterRegistry(true)
-	found, err := discoverProjects(wsRoot, adapters)
+	found, err := discoverProjects(wsRoot, adapters, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +166,7 @@ func TestMergeDedupesSharedDependencies(t *testing.T) {
 
 func TestMergeIsIdempotent(t *testing.T) {
 	adapters := adapterRegistry(true)
-	found, _ := discoverProjects(wsRoot, adapters)
+	found, _ := discoverProjects(wsRoot, adapters, nil)
 	g := graph.New()
 	for i := 0; i < 2; i++ { // merge everything twice
 		for _, p := range found {
