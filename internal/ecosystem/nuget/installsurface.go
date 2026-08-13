@@ -17,8 +17,9 @@ import (
 // A NuGet package can ship:
 //   - PowerShell that runs on install (install.ps1) or when the solution opens
 //     (init.ps1).
-//   - MSBuild .targets/.props files in build/ or buildTransitive/ that execute
-//     arbitrary targets at build time.
+//   - MSBuild .targets/.props files in build/, buildTransitive/,
+//     buildMultiTargeting/, or buildCrossTargeting/ that execute arbitrary
+//     targets at build time.
 //
 // Two scopes are checked:
 //
@@ -83,9 +84,11 @@ func readPowerShellHooks(reader *securefs.Reader, nodeID string, gaps *instsurf.
 	return scripts
 }
 
-// scanMSBuildDirs enumerates build/ and buildTransitive/ within the reader's
-// root, returning a map of relative-path to file content for .targets and
-// .props files. TFM-specific subdirectories (e.g. build/net8.0/) are included.
+// scanMSBuildDirs enumerates the documented NuGet MSBuild directories (build/,
+// buildTransitive/, buildMultiTargeting/, buildCrossTargeting/) within the
+// reader's root, returning a map of relative-path to file content for .targets
+// and .props files. TFM-specific subdirectories (e.g. build/net8.0/) are
+// included.
 func scanMSBuildDirs(reader *securefs.Reader, nodeID string, gaps *instsurf.Gaps) map[string]string {
 	out := map[string]string{}
 	for _, msbDir := range installsurface.NuGetMSBuildDirs {
@@ -162,6 +165,9 @@ func scanDependencyPkg(g *graph.Graph, n *graph.Node, pkgDirs []string, gaps *in
 	}
 	pkgDir := findNuGetPkgDir(pkgDirs, n.Name, n.Version)
 	if pkgDir == "" {
+		if len(pkgDirs) > 0 {
+			gaps.AddReason(n.ID, n.Name+"@"+n.Version, instsurf.GapUnavailable, nil)
+		}
 		return
 	}
 	pkgReader, err := securefs.NewReader(pkgDir)

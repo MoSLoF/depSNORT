@@ -44,6 +44,11 @@ const (
 	GapTooLarge GapReason = "file-too-large"
 	// GapParse means the file was read but could not be understood.
 	GapParse GapReason = "parse-error"
+	// GapUnavailable means the dependency's source was expected but could not be
+	// located (not vendored, not cached). Unlike ErrNotExist on a single file,
+	// this is the entire package being absent — the scan cannot judge what is not
+	// there.
+	GapUnavailable GapReason = "source-unavailable"
 	// GapUnreadable is any other I/O failure (permissions, I/O error).
 	GapUnreadable GapReason = "unreadable"
 )

@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 )
 
@@ -168,8 +169,12 @@ func TestNestedMSBuildTargetsProduceHook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if err := a.ExtractInstallSurface("testdata/msbuild-nested", g); err != nil {
-		t.Fatalf("ExtractInstallSurface: %v", err)
+	err = a.ExtractInstallSurface("testdata/msbuild-nested", g)
+	if err != nil {
+		gaps := instsurf.GapsOf(err)
+		if len(gaps) == 0 {
+			t.Fatalf("ExtractInstallSurface: %v", err)
+		}
 	}
 
 	var hookFound bool
@@ -238,6 +243,39 @@ func TestDependencyMSBuildHookAttribution(t *testing.T) {
 		if n.Kind == graph.KindInstallHook && n.Attr["hook.package"] == rootID {
 			t.Error("project root should not own the dependency's hook")
 		}
+	}
+}
+
+// AV-03: buildMultiTargeting MSBuild payloads must produce install-hook nodes.
+func TestBuildMultiTargetingProducesHook(t *testing.T) {
+	a := New()
+	g, err := a.Resolve("testdata/msbuild-multitargeting")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	err = a.ExtractInstallSurface("testdata/msbuild-multitargeting", g)
+	if err != nil {
+		gaps := instsurf.GapsOf(err)
+		if len(gaps) == 0 {
+			t.Fatalf("ExtractInstallSurface: %v", err)
+		}
+	}
+
+	var hookFound bool
+	for _, n := range g.SortedNodes() {
+		if n.Kind == graph.KindInstallHook {
+			hookFound = true
+			if n.Attr["cap.exec"] != "true" {
+				t.Errorf("hook %q missing cap.exec", n.Name)
+			}
+			break
+		}
+	}
+	if !hookFound {
+		for _, n := range g.SortedNodes() {
+			t.Logf("  node: %s kind=%s name=%s", n.ID, n.Kind, n.Name)
+		}
+		t.Error("buildMultiTargeting/evil.targets should produce an install-hook node")
 	}
 }
 

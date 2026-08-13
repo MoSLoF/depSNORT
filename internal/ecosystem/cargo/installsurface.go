@@ -91,7 +91,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		if n.Kind != graph.KindPackage || n.Ecosystem != "cargo" || roots[n.ID] {
 			continue
 		}
-		scanCargoDependency(g, n, dir, &gaps)
+		scanCargoDependency(g, n, dir, reader, &gaps)
 	}
 
 	return gaps.Err()
@@ -99,12 +99,17 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 
 // scanCargoDependency checks a dependency crate's vendored or cached source
 // for build.rs and proc-macro status, attributing hooks to the dependency node.
-func scanCargoDependency(g *graph.Graph, n *graph.Node, projectDir string, gaps *instsurf.Gaps) {
+func scanCargoDependency(g *graph.Graph, n *graph.Node, projectDir string, projectReader *securefs.Reader, gaps *instsurf.Gaps) {
 	if !isCleanCrateName(n.Name) || !isCleanCrateName(n.Version) {
 		return
 	}
-	depDir := findCargoDependencyDir(projectDir, n.Name, n.Version)
+	depDir, vendorRel := findCargoDependencyDir(projectDir, n.Name, n.Version)
 	if depDir == "" {
+		gaps.AddReason(n.ID, n.Name+"@"+n.Version, instsurf.GapUnavailable, nil)
+		return
+	}
+	if vendorRel != "" && !projectReader.Contains(vendorRel) {
+		gaps.Add(n.ID, vendorRel, securefs.ErrOutsideRoot)
 		return
 	}
 	depReader, err := securefs.NewReader(depDir)
@@ -146,12 +151,21 @@ func scanCargoDependency(g *graph.Graph, n *graph.Node, projectDir string, gaps 
 
 // findCargoDependencyDir locates a dependency crate's source directory.
 // It checks, in order:
-//  1. vendor/<name>/ (Cargo vendor output, inside project)
-//  2. CARGO_HOME/registry/src/<index>/<name>-<version>/ (registry cache)
-func findCargoDependencyDir(projectDir, name, version string) string {
-	vendorDir := filepath.Join(projectDir, "vendor", name)
-	if info, err := os.Stat(vendorDir); err == nil && info.IsDir() {
-		return vendorDir
+//  1. vendor/<name>/ (Cargo vendor default, inside project)
+//  2. vendor/<name>-<version>/ (Cargo vendor --versioned-dirs, inside project)
+//  3. CARGO_HOME/registry/src/<index>/<name>-<version>/ (registry cache)
+//
+// Returns (absoluteDir, vendorRelative). When the directory is inside vendor/,
+// vendorRelative is the path relative to projectDir (e.g. "vendor/serde") for
+// containment checking against the project securefs reader. For external
+// registry cache hits, vendorRelative is empty.
+func findCargoDependencyDir(projectDir, name, version string) (string, string) {
+	for _, sub := range []string{name, name + "-" + version} {
+		rel := filepath.Join("vendor", sub)
+		full := filepath.Join(projectDir, rel)
+		if info, err := os.Stat(full); err == nil && info.IsDir() {
+			return full, rel
+		}
 	}
 
 	cargoHome := os.Getenv("CARGO_HOME")
@@ -168,13 +182,13 @@ func findCargoDependencyDir(projectDir, name, version string) string {
 				if entry.IsDir() {
 					crateDir := filepath.Join(registrySrc, entry.Name(), name+"-"+version)
 					if info, err := os.Stat(crateDir); err == nil && info.IsDir() {
-						return crateDir
+						return crateDir, ""
 					}
 				}
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // isCleanCrateName rejects names containing path separators or traversal
