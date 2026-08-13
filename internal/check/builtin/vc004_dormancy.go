@@ -76,14 +76,30 @@ func (Dormancy) Run(ctx *check.Context) []finding.Finding {
 		if idx < 1 {
 			continue // first-ever release has no dormancy to measure
 		}
-		published := h.Releases[idx].Published
-		gap := published.Sub(h.Releases[idx-1].Published)
+
+		// Walk backward through a cluster of rapid releases to find the
+		// boundary where the dormancy gap actually lives. Without this,
+		// an attacker who publishes v1.0.1, v1.0.2, v1.0.3 in quick
+		// succession after years of silence defeats the check when the
+		// user pins v1.0.3, because idx-1 is v1.0.2, not the dormant
+		// boundary.
+		clusterStart := idx
+		for clusterStart > 1 {
+			prev := h.Releases[clusterStart-1].Published
+			cur := h.Releases[clusterStart].Published
+			if cur.Sub(prev) >= dormancyThreshold {
+				break
+			}
+			clusterStart--
+		}
+		gap := h.Releases[clusterStart].Published.Sub(h.Releases[clusterStart-1].Published)
 		if gap < dormancyThreshold {
 			continue
 		}
+		clusterPub := h.Releases[clusterStart].Published
 
 		// The awakening must still be recent enough to count as weather.
-		decay := datasource.Decay(now.Sub(published), datasource.DefaultHalfLife)
+		decay := datasource.Decay(now.Sub(clusterPub), datasource.DefaultHalfLife)
 		if decay < dormancyMinDecay {
 			continue
 		}
@@ -99,6 +115,10 @@ func (Dormancy) Run(ctx *check.Context) []finding.Finding {
 			note = "; the awakening release also declares an install hook"
 		}
 
+		beforeVer := h.Releases[clusterStart-1].Version
+		beforePub := h.Releases[clusterStart-1].Published
+		afterVer := h.Releases[clusterStart].Version
+
 		out = append(out, finding.Finding{
 			CheckID:      "VC-004",
 			Axis:         finding.AxisWeather,
@@ -108,10 +128,10 @@ func (Dormancy) Run(ctx *check.Context) []finding.Finding {
 			RecencyDecay: decay,
 			NodeID:       n.ID,
 			Title:        fmt.Sprintf("%s published after %s of dormancy", n.Version, roundDuration(gap)),
-			Evidence: fmt.Sprintf("previous release %s was %s earlier (%s -> %s)%s",
-				h.Releases[idx-1].Version, roundDuration(gap),
-				h.Releases[idx-1].Published.UTC().Format("2006-01-02"),
-				published.UTC().Format("2006-01-02"), note),
+			Evidence: fmt.Sprintf("dormancy gap: %s -> %s (%s, %s -> %s)%s",
+				beforeVer, afterVer, roundDuration(gap),
+				beforePub.UTC().Format("2006-01-02"),
+				clusterPub.UTC().Format("2006-01-02"), note),
 			Remediation: "verify the publishing account and confirm the release corresponds to reviewed source changes",
 		})
 	}

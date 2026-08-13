@@ -132,6 +132,30 @@ func TestDormancyAdvisoryByDefaultEscalatesWithHook(t *testing.T) {
 	}
 }
 
+// AV-01: a three-release bridge after prolonged dormancy must fire VC-004 for
+// the last pinned release. The gap is measured from the cluster boundary (the
+// first release in the burst), not from the immediate predecessor.
+func TestDormancyClusterBoundaryGap(t *testing.T) {
+	id := "pkg:npm/hijacked@1.0.3"
+	base := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	h := &datasource.ReleaseHistory{Releases: []datasource.Release{
+		rel("1.0.0", time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)), // 3.5y dormancy before burst
+		rel("1.0.1", base),                      // cluster start
+		rel("1.0.2", base.Add(30*time.Minute)),   // bridge release
+		rel("1.0.3", base.Add(60*time.Minute)),   // pinned version
+	}}
+	h.Sort()
+	hist := map[string]*datasource.ReleaseHistory{id: h}
+	g := nodeGraph(id, "hijacked", "1.0.3", nil)
+	fs := (Dormancy{}).Run(&check.Context{Graph: g, Now: nowRef, Releases: hist})
+	if len(fs) != 1 {
+		t.Fatalf("VC-004 findings = %d, want 1 (cluster boundary gap should fire)", len(fs))
+	}
+	if fs[0].GateClass != finding.GateAdvisory {
+		t.Errorf("gate class = %s, want advisory (no install hook)", fs[0].GateClass)
+	}
+}
+
 func TestDormancyQuietForActivePackage(t *testing.T) {
 	id := "pkg:npm/active@1.0.2"
 	h := &datasource.ReleaseHistory{Releases: []datasource.Release{
