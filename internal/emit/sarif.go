@@ -85,7 +85,7 @@ func sarifLevel(f finding.Finding) string {
 func (SARIF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) error {
 	run := sarifRun{
 		Tool: sarifTool{Driver: sarifDriver{
-			Name:           "dependaSNORT",
+			Name:           "depSNORT",
 			Version:        Version,
 			InformationURI: "https://ihbv.io",
 		}},

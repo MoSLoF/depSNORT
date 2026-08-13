@@ -1,5 +1,5 @@
 // Package purl implements the minimal subset of the package-url (PURL) spec
-// that dependaSNORT needs to canonically name a package@version node.
+// that depSNORT needs to canonically name a package@version node.
 //
 // Canonical form: pkg:<type>/<namespace>/<name>@<version>
 // The namespace segment is omitted when empty. For npm scoped packages the
@@ -17,7 +17,7 @@ import (
 	"strings"
 )
 
-// PURL is a parsed package URL. Only the fields dependaSNORT uses are modeled.
+// PURL is a parsed package URL. Only the fields depSNORT uses are modeled.
 type PURL struct {
 	Type      string // e.g. "npm", "pypi"
 	Namespace string // e.g. "@scope" for npm (stored WITH the leading @)
@@ -191,7 +191,7 @@ func encodeNamespace(ns string) string {
 }
 
 // Parse parses a canonical PURL string. It is intentionally lenient about the
-// subset of the spec dependaSNORT emits.
+// subset of the spec depSNORT emits.
 func Parse(s string) (PURL, error) {
 	if !strings.HasPrefix(s, "pkg:") {
 		return PURL{}, fmt.Errorf("purl: missing 'pkg:' scheme in %q", s)
@@ -227,7 +227,7 @@ func Parse(s string) (PURL, error) {
 	// type carrying either character makes the rest of the parse meaningless and
 	// the result unrenderable (Decision D-33, found by FuzzParse). The spec
 	// restricts it to an ASCII letter followed by letters, digits, ".", "+", "-";
-	// dependaSNORT only ever emits npm/pypi/gem/cargo/composer/nuget.
+	// depSNORT only ever emits npm/pypi/gem/cargo/composer/nuget.
 	if !validType(p.Type) {
 		return PURL{}, fmt.Errorf("purl: invalid type %q in %q", p.Type, s)
 	}

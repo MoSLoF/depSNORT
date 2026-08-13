@@ -90,7 +90,7 @@ func TestPDFContainsVerdictAndFinding(t *testing.T) {
 	}
 	out := b.String()
 	// Content streams are uncompressed, so report text is directly searchable.
-	for _, want := range []string{"dependaSNORT", "BLOCKED", "VC-002d", "PACKAGE RISK", "FINDINGS"} {
+	for _, want := range []string{"depSNORT", "BLOCKED", "VC-002d", "PACKAGE RISK", "FINDINGS"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report missing %q", want)
 		}

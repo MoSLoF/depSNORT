@@ -47,7 +47,7 @@ type jsonReport struct {
 // Emit implements Emitter.
 func (JSON) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) error {
 	var rep jsonReport
-	rep.Tool = "dependaSNORT"
+	rep.Tool = "depSNORT"
 	rep.Version = Version
 	rep.Summary.Nodes = g.Len()
 	rep.Summary.Edges = len(g.Edges)

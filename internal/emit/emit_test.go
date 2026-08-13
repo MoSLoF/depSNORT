@@ -45,7 +45,7 @@ func TestDOTEmitsStyledGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := b.String()
-	for _, want := range []string{"digraph dependaSNORT", "pkg:npm/evil@1.0.0", "declares-hook", "rankdir=LR"} {
+	for _, want := range []string{"digraph depSNORT", "pkg:npm/evil@1.0.0", "declares-hook", "rankdir=LR"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("DOT output missing %q", want)
 		}

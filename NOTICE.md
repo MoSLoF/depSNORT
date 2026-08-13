@@ -1,6 +1,6 @@
 # NOTICE
 
-**dependaSNORT** — an IDS for the dependency supply chain.
+**depSNORT** — an IDS for the dependency supply chain.
 
 © 2026 HoneyBadger Vanguard LLC (ihbv.io). Released under the MIT License; see
 [`LICENSE`](LICENSE).

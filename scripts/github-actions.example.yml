@@ -1,4 +1,4 @@
-# dependaSNORT supply-chain gate for GitHub Actions (Decision D-30).
+# depSNORT supply-chain gate for GitHub Actions (Decision D-30).
 # Drop into .github/workflows/. Static, zero-execution: it resolves lockfiles
 # and never runs `npm install` / `pip install` / a lifecycle hook.
 name: supply-chain-gate

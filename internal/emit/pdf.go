@@ -119,7 +119,7 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 	d := newPDFDoc()
 
 	// ---- header -----------------------------------------------------------
-	d.text("dependaSNORT", fontBold, 24, colInk, 0, 27)
+	d.text("depSNORT", fontBold, 24, colInk, 0, 27)
 	d.text("Dependency supply-chain scan report", fontRegular, 11, colMuted, 0, 15)
 	d.text(fmt.Sprintf("%s  -  static, zero-execution analysis", Version),
 		fontRegular, 8.5, colFaint, 0, 12)
@@ -461,7 +461,7 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 	// ---- footer note ------------------------------------------------------
 	d.gap(10)
 	d.rule(colRule, 0.8, 0, 10)
-	d.wrapped("dependaSNORT performs static analysis only: it parses manifests and lockfiles and never "+
+	d.wrapped("depSNORT performs static analysis only: it parses manifests and lockfiles and never "+
 		"runs a package manager or executes a lifecycle hook. It detects capability and indirection, not "+
 		"payload semantics. Advisory findings never affect the exit code; gate-eligible findings do so "+
 		"only when the run opts in; block findings always fail.",
@@ -469,6 +469,6 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 	d.text("Report output is deterministic (no embedded timestamp).",
 		fontRegular, 7.5, colFaint, 0, 10)
 
-	_, err := w.Write(d.render("dependaSNORT scan report"))
+	_, err := w.Write(d.render("depSNORT scan report"))
 	return err
 }

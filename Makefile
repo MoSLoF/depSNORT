@@ -1,4 +1,4 @@
-# dependaSNORT — developer tasks. (Unix shells / WSL / Git Bash. On Windows
+# depSNORT — developer tasks. (Unix shells / WSL / Git Bash. On Windows
 # PowerShell, use the plain `go` commands from the README.)
 
 BINARY  := depsnort
@@ -8,7 +8,7 @@ PKG     := ./cmd/depsnort
 VERSION ?= v$(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
 LDFLAGS := -X main.version=$(VERSION)
 
-# CGO is disabled: dependaSNORT is a single static binary with no libc linkage
+# CGO is disabled: depSNORT is a single static binary with no libc linkage
 # (Decision D-10). This also avoids the missing-C-headers trap on minimal Linux.
 export CGO_ENABLED := 0
 

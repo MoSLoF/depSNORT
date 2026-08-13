@@ -1,7 +1,7 @@
 // Package semver is a minimal semantic-version parser — just enough to tell a
 // patch release from a minor or major one, and to order releases.
 //
-// It is deliberately not a full semver range solver: dependaSNORT resolves from
+// It is deliberately not a full semver range solver: depSNORT resolves from
 // lockfiles and does not evaluate ranges (Decision D-01).
 package semver
 

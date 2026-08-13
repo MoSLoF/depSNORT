@@ -47,7 +47,7 @@ func TestSBOMIsDeterministic(t *testing.T) {
 	}
 }
 
-// D-10, made machine-checkable. dependaSNORT claims zero third-party
+// D-10, made machine-checkable. depSNORT claims zero third-party
 // dependencies; the SBOM is generated from the module graph the linker actually
 // embedded, so if that claim ever stops being true, this test fails rather than
 // the README quietly becoming a lie.
