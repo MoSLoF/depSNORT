@@ -49,6 +49,9 @@ const (
 	// this is the entire package being absent — the scan cannot judge what is not
 	// there.
 	GapUnavailable GapReason = "source-unavailable"
+	// GapIdentityMismatch means a candidate source directory exists but its
+	// manifest declares a different package name or version than requested.
+	GapIdentityMismatch GapReason = "identity-mismatch"
 	// GapUnreadable is any other I/O failure (permissions, I/O error).
 	GapUnreadable GapReason = "unreadable"
 )

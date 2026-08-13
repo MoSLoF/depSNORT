@@ -103,13 +103,8 @@ func scanCargoDependency(g *graph.Graph, n *graph.Node, projectDir string, proje
 	if !isCleanCrateName(n.Name) || !isCleanCrateName(n.Version) {
 		return
 	}
-	depDir, vendorRel := findCargoDependencyDir(projectDir, n.Name, n.Version)
+	depDir, _ := findCargoDependencyDir(projectDir, projectReader, n.Name, n.Version, gaps, n.ID)
 	if depDir == "" {
-		gaps.AddReason(n.ID, n.Name+"@"+n.Version, instsurf.GapUnavailable, nil)
-		return
-	}
-	if vendorRel != "" && !projectReader.Contains(vendorRel) {
-		gaps.Add(n.ID, vendorRel, securefs.ErrOutsideRoot)
 		return
 	}
 	depReader, err := securefs.NewReader(depDir)
@@ -149,23 +144,62 @@ func scanCargoDependency(g *graph.Graph, n *graph.Node, projectDir string, proje
 	}
 }
 
-// findCargoDependencyDir locates a dependency crate's source directory.
-// It checks, in order:
-//  1. vendor/<name>/ (Cargo vendor default, inside project)
-//  2. vendor/<name>-<version>/ (Cargo vendor --versioned-dirs, inside project)
-//  3. CARGO_HOME/registry/src/<index>/<name>-<version>/ (registry cache)
+type vendorCandidate struct {
+	dir string // absolute path
+	rel string // relative to projectDir (for containment check)
+}
+
+// findCargoDependencyDir locates a dependency crate's source directory and
+// validates its manifest identity. It checks, in order:
 //
-// Returns (absoluteDir, vendorRelative). When the directory is inside vendor/,
-// vendorRelative is the path relative to projectDir (e.g. "vendor/serde") for
-// containment checking against the project securefs reader. For external
-// registry cache hits, vendorRelative is empty.
-func findCargoDependencyDir(projectDir, name, version string) (string, string) {
+//  1. vendor/<name>/ and vendor/<name>-<version>/ — both are enumerated, each
+//     candidate's Cargo.toml is parsed, and only a manifest whose [package]
+//     name and version match the requested dependency is accepted. When both
+//     exist and match, the versioned directory wins (it is unambiguous).
+//  2. CARGO_HOME/registry/src/<index>/<name>-<version>/ — registry cache,
+//     already version-qualified by directory name.
+//
+// Returns (absoluteDir, vendorRelative). vendorRelative is non-empty for
+// vendor/ hits (subject to containment checks). Emits typed gaps for identity
+// mismatches and unavailable source directly.
+func findCargoDependencyDir(projectDir string, projectReader *securefs.Reader, name, version string, gaps *instsurf.Gaps, nodeID string) (string, string) {
+	candidates := []vendorCandidate{}
 	for _, sub := range []string{name, name + "-" + version} {
 		rel := filepath.Join("vendor", sub)
 		full := filepath.Join(projectDir, rel)
 		if info, err := os.Stat(full); err == nil && info.IsDir() {
-			return full, rel
+			candidates = append(candidates, vendorCandidate{dir: full, rel: rel})
 		}
+	}
+
+	var matched []vendorCandidate
+	for _, c := range candidates {
+		if !projectReader.Contains(c.rel) {
+			gaps.Add(nodeID, c.rel, securefs.ErrOutsideRoot)
+			continue
+		}
+		tomlPath := filepath.Join(c.dir, "Cargo.toml")
+		b, err := os.ReadFile(tomlPath)
+		if err != nil {
+			gaps.Add(nodeID, tomlPath, err)
+			continue
+		}
+		mName, mVersion := extractManifestIdentity(string(b))
+		if mName == name && mVersion == version {
+			matched = append(matched, c)
+		} else {
+			gaps.AddReason(nodeID, c.rel, instsurf.GapIdentityMismatch, nil)
+		}
+	}
+
+	if len(matched) > 0 {
+		best := matched[0]
+		for _, c := range matched[1:] {
+			if strings.HasSuffix(filepath.Base(c.rel), "-"+version) {
+				best = c
+			}
+		}
+		return best.dir, best.rel
 	}
 
 	cargoHome := os.Getenv("CARGO_HOME")
@@ -188,7 +222,40 @@ func findCargoDependencyDir(projectDir, name, version string) (string, string) {
 			}
 		}
 	}
+
+	if len(candidates) == 0 {
+		gaps.AddReason(nodeID, name+"@"+version, instsurf.GapUnavailable, nil)
+	}
 	return "", ""
+}
+
+// extractManifestIdentity reads the [package] name and version from a
+// Cargo.toml without a full TOML parser.
+func extractManifestIdentity(toml string) (string, string) {
+	var name, version string
+	inPackage := false
+	for _, line := range strings.Split(toml, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[package]" {
+			inPackage = true
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			inPackage = false
+			continue
+		}
+		if !inPackage {
+			continue
+		}
+		key := strings.TrimSpace(strings.SplitN(trimmed, "=", 2)[0])
+		switch key {
+		case "name":
+			name = extractTOMLString(trimmed)
+		case "version":
+			version = extractTOMLString(trimmed)
+		}
+	}
+	return name, version
 }
 
 // isCleanCrateName rejects names containing path separators or traversal

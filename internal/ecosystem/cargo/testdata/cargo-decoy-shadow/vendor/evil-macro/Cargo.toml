@@ -1,0 +1,6 @@
+[package]
+name = "evil-macro"
+version = "1.0.0"
+
+[lib]
+proc-macro = true
