@@ -235,6 +235,85 @@ func TestNonProcMacroCrateNoHook(t *testing.T) {
 	}
 }
 
+// AV-04: a vendored dependency crate declared as proc-macro must produce a
+// hook node with capabilities from its src/lib.rs.
+func TestDependencyProcMacroDetection(t *testing.T) {
+	a := New()
+	g, err := a.Resolve("testdata/cargo-dep-procmacro")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := a.ExtractInstallSurface("testdata/cargo-dep-procmacro", g); err != nil {
+		t.Fatalf("ExtractInstallSurface: %v", err)
+	}
+
+	maliciousID := "pkg:cargo/malicious-derive@1.0.0"
+	var hookFound bool
+	for _, n := range g.SortedNodes() {
+		if n.Kind == graph.KindInstallHook && n.Attr["hook.package"] == maliciousID {
+			hookFound = true
+			if n.Attr["cap.exec"] != "true" {
+				t.Error("hook missing cap.exec")
+			}
+			if n.Attr["cap.network"] != "true" {
+				t.Error("hook missing cap.network (TcpStream::connect in lib.rs)")
+			}
+			if n.Attr["cap.credentials"] != "true" {
+				t.Error("hook missing cap.credentials (CARGO_REGISTRY_TOKEN in lib.rs)")
+			}
+			break
+		}
+	}
+	if !hookFound {
+		for _, n := range g.SortedNodes() {
+			t.Logf("  node: %s kind=%s name=%s hook.package=%s", n.ID, n.Kind, n.Name, n.Attr["hook.package"])
+		}
+		t.Error("dependency proc-macro malicious-derive should produce a hook node")
+	}
+
+	// Root crate is NOT a proc-macro; it must not have a proc-macro hook.
+	rootID := g.Roots[0]
+	for _, n := range g.SortedNodes() {
+		if n.Kind == graph.KindInstallHook && n.Name == "proc-macro" && n.Attr["hook.package"] == rootID {
+			t.Error("root crate should not have a proc-macro hook (it is not a proc-macro)")
+		}
+	}
+}
+
+// AV-04: a benign vendored proc-macro dependency must get bare CapExec only —
+// no cap.network or cap.credentials.
+func TestBenignDependencyProcMacroNoExtraCaps(t *testing.T) {
+	a := New()
+	g, err := a.Resolve("testdata/cargo-dep-procmacro")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := a.ExtractInstallSurface("testdata/cargo-dep-procmacro", g); err != nil {
+		t.Fatalf("ExtractInstallSurface: %v", err)
+	}
+
+	benignID := "pkg:cargo/benign-derive@1.0.0"
+	var hookFound bool
+	for _, n := range g.SortedNodes() {
+		if n.Kind == graph.KindInstallHook && n.Attr["hook.package"] == benignID {
+			hookFound = true
+			if n.Attr["cap.network"] == "true" {
+				t.Error("benign dependency proc-macro should not have cap.network")
+			}
+			if n.Attr["cap.credentials"] == "true" {
+				t.Error("benign dependency proc-macro should not have cap.credentials")
+			}
+			break
+		}
+	}
+	if !hookFound {
+		for _, n := range g.SortedNodes() {
+			t.Logf("  node: %s kind=%s name=%s", n.ID, n.Kind, n.Name)
+		}
+		t.Error("benign dependency proc-macro should produce a hook node (with bare cap.exec)")
+	}
+}
+
 func TestExtractTOMLString(t *testing.T) {
 	tests := []struct {
 		input string
