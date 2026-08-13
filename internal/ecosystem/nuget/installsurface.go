@@ -47,7 +47,8 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		}
 	}
 
-	// MSBuild .targets/.props from build/ and buildTransitive/.
+	// MSBuild .targets/.props from build/ and buildTransitive/, including
+	// TFM-specific subdirectories (e.g. build/net8.0/pkg.targets).
 	msbuildScripts := map[string]string{}
 	for _, msbDir := range installsurface.NuGetMSBuildDirs {
 		entries, err := reader.ReadDir(msbDir)
@@ -57,6 +58,30 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		}
 		for _, entry := range entries {
 			name := entry.Name()
+			if entry.IsDir() {
+				subDir := filepath.Join(msbDir, name)
+				subEntries, err := reader.ReadDir(subDir)
+				if err != nil {
+					gaps.Add("", subDir, err)
+					continue
+				}
+				for _, sub := range subEntries {
+					ext := strings.ToLower(filepath.Ext(sub.Name()))
+					if ext != ".targets" && ext != ".props" {
+						continue
+					}
+					relPath := filepath.Join(subDir, sub.Name())
+					b, err := reader.ReadFile(relPath)
+					if err != nil {
+						gaps.Add("", relPath, err)
+						continue
+					}
+					if len(b) > 0 {
+						msbuildScripts[relPath] = string(b)
+					}
+				}
+				continue
+			}
 			ext := strings.ToLower(filepath.Ext(name))
 			if ext != ".targets" && ext != ".props" {
 				continue

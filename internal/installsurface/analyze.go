@@ -694,18 +694,32 @@ func AnalyzeMSBuild(scripts map[string]string) Surface {
 }
 
 // AnalyzeProcMacro returns a surface for a Rust proc-macro crate. A proc-macro
-// executes arbitrary code at compile time — it IS the hook. Since the macro's
-// source is not scanned here (the lib.rs may or may not be on disk), the
-// surface records the structural fact with CapExec.
-func AnalyzeProcMacro() Surface {
-	return Surface{
-		Hooks: []Hook{{
-			Name:     "proc-macro",
-			Command:  "crate is a proc-macro (executes at compile time)",
-			Caps:     []Capability{CapExec},
-			Evidence: []string{"proc-macro"},
-		}},
+// executes arbitrary code at compile time — it IS the hook. When the macro's
+// source is available it is scanned for capabilities (network, credentials,
+// obfuscation, etc.) so the VC-002 family can judge the risk. When the source
+// is unavailable the surface records the structural fact with bare CapExec,
+// which no VC-002 check gates on — the same false-positive discipline as
+// composer-plugins.
+func AnalyzeProcMacro(source string) Surface {
+	h := Hook{
+		Name:     "proc-macro",
+		Command:  "crate is a proc-macro (executes at compile time)",
+		Caps:     []Capability{CapExec},
+		Evidence: []string{"proc-macro"},
 	}
+	if strings.TrimSpace(source) != "" {
+		clean := stripCodeComments(source)
+		caps, ev := scanCaps(clean)
+		for _, c := range caps {
+			h.Caps = appendUnique(h.Caps, c)
+		}
+		h.Evidence = append(h.Evidence, ev...)
+		h.Sinks = findSinks(clean)
+		for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
+			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+		}
+	}
+	return Surface{Hooks: []Hook{h}}
 }
 
 // ---- helpers ----------------------------------------------------------------

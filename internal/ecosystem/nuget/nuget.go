@@ -162,10 +162,29 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 		return nil, fmt.Errorf("nuget: %s contained no resolved packages", packagesLockName)
 	}
 
+	// Per-TFM index: which node was resolved for each package name within
+	// each TFM. Used as the deterministic fallback when a dependency value
+	// is a version range rather than an exact resolved version.
+	tfmNameNode := make(map[string]map[string]string, len(tfms))
+	for _, tfm := range tfms {
+		idx := make(map[string]string, len(lf.Dependencies[tfm]))
+		for name, entry := range lf.Dependencies[tfm] {
+			if entry.Resolved == "" {
+				continue
+			}
+			key := nameVer{strings.ToLower(name), entry.Resolved}
+			if id, ok := byNameVer[key]; ok {
+				idx[strings.ToLower(name)] = id
+			}
+		}
+		tfmNameNode[tfm] = idx
+	}
+
 	// Build inter-package edges from dependency maps. A dependency spec in
 	// packages.lock.json names only the package and a version; we resolve
 	// the target by looking up (lowered dep name, dep version) first, falling
-	// back to any version of that name when the lock entry carries a range.
+	// back to the version resolved within the SAME TFM when the lock entry
+	// carries a range.
 	for _, tfm := range tfms {
 		pkgs := lf.Dependencies[tfm]
 		for name, entry := range pkgs {
@@ -178,14 +197,7 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 				lowerDep := strings.ToLower(dep)
 				toID, ok := byNameVer[nameVer{lowerDep, depVer}]
 				if !ok {
-					// Fall back: find any version of this dependency.
-					for k, id := range byNameVer {
-						if k.name == lowerDep {
-							toID = id
-							ok = true
-							break
-						}
-					}
+					toID, ok = tfmNameNode[tfm][lowerDep]
 				}
 				if !ok || toID == fromID {
 					continue

