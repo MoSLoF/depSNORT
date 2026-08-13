@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// CycloneDX 1.5 SBOM generation for dependaSNORT itself.
+// CycloneDX 1.5 SBOM generation for depSNORT itself.
 //
 // A tool that audits other projects' dependency trees should be able to hand you
 // its own, and the only honest source for that is the build itself. This reads
@@ -84,7 +84,7 @@ func golangPURL(path, ver string) string {
 // stableSerial derives a name-based UUID (RFC 4122 v5) from the main module
 // coordinate, so the serial is deterministic across rebuilds of the same source.
 func stableSerial(name string) string {
-	// A fixed namespace UUID for dependaSNORT SBOMs.
+	// A fixed namespace UUID for depSNORT SBOMs.
 	ns := [16]byte{0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1,
 		0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8}
 	h := sha1.New()

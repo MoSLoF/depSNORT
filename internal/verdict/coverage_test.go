@@ -8,7 +8,7 @@ import (
 )
 
 // Decision D-24. Observed on a real target: redtiger-tools declares 33
-// dependencies in an unpinned requirements.txt. dependaSNORT resolved exactly
+// dependencies in an unpinned requirements.txt. depSNORT resolved exactly
 // one node — the root — ran zero checks, and reported exit 0 with a PASSED
 // banner. The extraction layer recorded the gap honestly; the verdict layer
 // threw it away.

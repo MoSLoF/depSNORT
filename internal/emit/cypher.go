@@ -65,7 +65,7 @@ func cq(s string) string {
 func (Cypher) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) error {
 	var b strings.Builder
 
-	b.WriteString("// dependaSNORT graph load script\n")
+	b.WriteString("// depSNORT graph load script\n")
 	b.WriteString(fmt.Sprintf("// nodes=%d edges=%d exit=%d block=%d gate-eligible=%d advisory=%d\n\n",
 		g.Len(), len(g.Edges), res.ExitCode, res.Counts.Block, res.Counts.Eligible, res.Counts.Advisory))
 

@@ -1,6 +1,6 @@
 # Security Policy
 
-dependaSNORT is a **static, zero-execution** analyzer: it parses manifests and
+depSNORT is a **static, zero-execution** analyzer: it parses manifests and
 lockfiles and never runs a package manager or a lifecycle hook.
 
 ## Reporting a vulnerability

@@ -8,7 +8,7 @@ import (
 
 // A minimal PDF 1.4 writer, standard library only.
 //
-// Generating PDFs normally means pulling in a library, but dependaSNORT ships
+// Generating PDFs normally means pulling in a library, but depSNORT ships
 // zero third-party dependencies on purpose (Decision D-10) — buying a PDF
 // package to print a supply-chain report would undercut the tool's own thesis.
 // PDF's text-and-operators core is small enough to write directly, so this
@@ -319,7 +319,7 @@ func (d *pdfDoc) render(title string) []byte {
 	}
 	// No /CreationDate: a timestamp would make output non-reproducible (D-13).
 	fmt.Fprintf(&out,
-		"trailer\n<< /Size %d /Root 1 0 R /Info << /Title (%s) /Producer (dependaSNORT) >> >>\nstartxref\n%d\n%%%%EOF\n",
+		"trailer\n<< /Size %d /Root 1 0 R /Info << /Title (%s) /Producer (depSNORT) >> >>\nstartxref\n%d\n%%%%EOF\n",
 		len(objects)+1, escapePDF(title), xref)
 	return out.Bytes()
 }

@@ -1,7 +1,7 @@
-# dependaSNORT
+# depSNORT
 
 **An IDS for the dependency supply chain.** Dependabot tells you what's outdated;
-Snort matches traffic against a rule pack. dependaSNORT does the second thing to
+Snort matches traffic against a rule pack. depSNORT does the second thing to
 your dependency tree: it statically resolves everything a repo pulls in, then
 runs it against a modular pack of vector checks — **before a single package is
 installed.**
@@ -19,7 +19,7 @@ it does the thing it claims.
 
 ## Ethos (non-negotiable)
 
-- **Zero execution.** dependaSNORT never runs a package manager and never fires a
+- **Zero execution.** depSNORT never runs a package manager and never fires a
   lifecycle hook. It parses lockfiles and manifests statically. The whole point
   is to see the tree *before* anything with a `preinstall`/`postinstall` runs.
 - **Dogfooded footprint.** The tool has **zero third-party dependencies** — pure
@@ -73,7 +73,7 @@ go build -o depsnort ./cmd/depsnort      # Windows: go build -o depsnort.exe ./c
 > not match what you expect, the source tree on disk is stale — re-extract before
 > debugging anything else.
 
-> **Build with CGO disabled.** dependaSNORT is pure Go; build it as a static
+> **Build with CGO disabled.** depSNORT is pure Go; build it as a static
 > binary (`CGO_ENABLED=0`, already set in the Makefile). One-time for manual
 > builds: `go env -w CGO_ENABLED=0`. This yields a no-libc static binary
 > (Decision D-10) and sidesteps the missing-C-headers trap on minimal Linux/WSL.

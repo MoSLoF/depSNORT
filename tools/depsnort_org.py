@@ -44,7 +44,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Files dependaSNORT's adapters actually RESOLVE (npm/pypi/rubygems/cargo/
+# Files depSNORT's adapters actually RESOLVE (npm/pypi/rubygems/cargo/
 # composer/nuget). It is a static lockfile IDS -- a bare package.json with no
 # lockfile is unresolvable, so we scan lockfile-bearing dirs only.
 LOCKFILES = (
@@ -183,7 +183,7 @@ def resolve_targets(target: str, args) -> list[dict]:
 def find_project_roots(base: Path) -> tuple[list[Path], list[Path]]:
     """Return (scan_roots, unmeasured).
 
-    scan_roots  : dirs with a lockfile dependaSNORT can resolve -- one root = one scan.
+    scan_roots  : dirs with a lockfile depSNORT can resolve -- one root = one scan.
     unmeasured  : dirs with a source manifest but NO lockfile -- reported, not scanned.
     """
     scan_roots: list[Path] = []
@@ -215,7 +215,7 @@ def clone(url: str, dest: Path, depth: int) -> bool:
 def scan_root(depsnort: str, scan_args: list[str], root: Path) -> dict | None:
     cmd = [depsnort, *scan_args, str(root)]
     r = subprocess.run(cmd, capture_output=True, text=True)
-    # dependaSNORT exit codes: 0 clean, 1 block, 2 gate-eligible, 3 incomplete
+    # depSNORT exit codes: 0 clean, 1 block, 2 gate-eligible, 3 incomplete
     # coverage -- ALL emit a full report. 64 usage, 70 internal are real failures.
     if r.returncode >= 64:
         log(f"  scan error ({r.returncode}) on {root}: {r.stderr.strip()[:200]}")

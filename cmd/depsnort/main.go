@@ -1,4 +1,4 @@
-// Command depsnort is the dependaSNORT CLI — the primitive that the CI gate and
+// Command depsnort is the depSNORT CLI — the primitive that the CI gate and
 // pre-commit hook are thin wrappers over (Decision D-09).
 //
 // Exit codes:
@@ -10,7 +10,7 @@
 //	64  usage error
 //	70  internal/operational error
 //
-// dependaSNORT is STATIC and never installs or executes a dependency
+// depSNORT is STATIC and never installs or executes a dependency
 // (Decision D-04). `scan` reads lockfiles; it does not run npm.
 package main
 
@@ -98,7 +98,7 @@ func run(args []string) int {
 		return 0
 	case "version", "--version", "-v":
 		fmt.Fprint(os.Stdout, banner(os.Stdout))
-		fmt.Println("dependaSNORT", version)
+		fmt.Println("depSNORT", version)
 		return 0
 	case "help", "-h", "--help":
 		usage()
@@ -111,7 +111,7 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `dependaSNORT — an IDS for the dependency supply chain (static, zero-execution)
+	fmt.Fprint(os.Stderr, `depSNORT — an IDS for the dependency supply chain (static, zero-execution)
 
 usage:
   depsnort scan [flags] [path]     resolve and analyze a project (default path ".")

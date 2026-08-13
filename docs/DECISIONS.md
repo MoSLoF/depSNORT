@@ -1,4 +1,4 @@
-# dependaSNORT — Decision Log
+# depSNORT — Decision Log
 
 Mirrors the project design brief. Each decision is
 load-bearing; the code is annotated with the `D-0x` tags below so the rationale
@@ -315,7 +315,7 @@ specific, and wrong, and checking it cost one script.
 ## D-24 — resolution coverage is a first-class verdict axis
 
 `redtiger-tools` declares 33 dependencies in an unpinned `requirements.txt`.
-dependaSNORT resolved one node — the root — ran zero checks against zero
+depSNORT resolved one node — the root — ran zero checks against zero
 packages, and printed **`PASSED`, exit 0, zero findings**. The PyPI adapter had
 recorded the gap honestly in a node attribute; the verdict layer never read it.
 

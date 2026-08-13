@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-depsnort_priority.py  --  CI/CD-aware REMEDIATION-priority overlay for dependaSNORT.
+depsnort_priority.py  --  CI/CD-aware REMEDIATION-priority overlay for depSNORT.
 
-Consumes real dependaSNORT JSON reports (schema: internal/emit/json.go). Findings
+Consumes real depSNORT JSON reports (schema: internal/emit/json.go). Findings
 live at verdict.findings; each identifies its package by node_id (a PURL) which is
 JOINED against nodes[] for the human name. This overlay does NOT re-score severity
 -- the tool already computes gate_class, confidence, recency_decay and a composed
@@ -131,8 +131,8 @@ def rank(report: dict, repo_dir: Path | None) -> tuple[list[dict], str | None]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="CI/CD-aware remediation-priority overlay for dependaSNORT.")
-    ap.add_argument("scans", nargs="+", help="dependaSNORT JSON report(s) or globs")
+    ap = argparse.ArgumentParser(description="CI/CD-aware remediation-priority overlay for depSNORT.")
+    ap.add_argument("scans", nargs="+", help="depSNORT JSON report(s) or globs")
     ap.add_argument("-o", "--out", default="priority.json", help="write ranked JSON here")
     ap.add_argument("--repo-dir", default=None,
                     help="project dir for CI/CD detection (single-report use; "

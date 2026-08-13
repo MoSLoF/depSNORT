@@ -97,12 +97,12 @@ func dotLabel(n *graph.Node) string {
 // Emit implements Emitter.
 func (DOT) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) error {
 	var b strings.Builder
-	b.WriteString("digraph dependaSNORT {\n")
+	b.WriteString("digraph depSNORT {\n")
 	b.WriteString("  rankdir=LR;\n")
 	b.WriteString(`  bgcolor="#080d1a";` + "\n")
 	b.WriteString(`  node [style="filled,rounded", fontname="Helvetica", fontsize=11, penwidth=1.6];` + "\n")
 	b.WriteString(`  edge [fontname="Helvetica", fontsize=9];` + "\n")
-	b.WriteString(fmt.Sprintf("  label=\"dependaSNORT — %d nodes, %d edges · block=%d gate-eligible=%d advisory=%d · exit %d\";\n",
+	b.WriteString(fmt.Sprintf("  label=\"depSNORT — %d nodes, %d edges · block=%d gate-eligible=%d advisory=%d · exit %d\";\n",
 		g.Len(), len(g.Edges), res.Counts.Block, res.Counts.Eligible, res.Counts.Advisory, res.ExitCode))
 	b.WriteString(`  labelloc="t"; fontcolor="#c8d4ec"; fontname="Helvetica"; fontsize=13;` + "\n\n")
 
