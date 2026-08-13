@@ -34,6 +34,11 @@ const (
 	// meaningful. Raised from 8 to 10 after `commands`/`commander` and
 	// `password`/`passport` — unrelated words two edits apart.
 	typosquatDist2MinLen = 10
+	// typosquatMaxDist is the largest edit distance that can produce a finding
+	// below (distance 2, and only for a long enough name). It is the ceiling
+	// handed to the bounded distance function so farther comparisons abandon
+	// early instead of computing a full matrix nobody reads (D-33).
+	typosquatMaxDist = 2
 )
 
 // Meta implements check.Check.
@@ -131,9 +136,13 @@ func (Typosquat) Run(ctx *check.Context) []finding.Finding {
 			continue
 		}
 
+		// Only distance 1 and 2 below produce a finding, so comparisons are
+		// bounded at 2: anything farther is reported as "farther than 2" without
+		// finishing the matrix (D-33). `best` and `nearest` are identical to the
+		// unbounded search for every case that emits a finding.
 		best, nearest := 99, ""
 		for _, pop := range corpus {
-			d := osaDistance(bare, pop)
+			d := osaDistanceBounded(bare, pop, typosquatMaxDist)
 			if d < best {
 				best, nearest = d, pop
 			}

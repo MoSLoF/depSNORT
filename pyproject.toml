@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=64", "wheel", "tomli; python_version < '3.11'"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "depSNORT"
-version = "0.6.1"
+version = "0.7.3"
 description = "An IDS for the dependency supply chain — static, zero-execution."
 readme = "README.md"
 requires-python = ">=3.8"

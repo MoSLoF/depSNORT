@@ -62,6 +62,34 @@ func gateLabel(g finding.GateClass) string {
 // scan that resolved nothing has no business printing the word CLEAN: "we found
 // nothing" and "we could not look" must never render the same way, because the
 // first invites trust and only one of them has earned it.
+// coverageReason renders the human-readable "why is this incomplete" phrase,
+// folding every gap class the scan can carry — unresolved dependencies, orphans,
+// failed workspace projects, partial install-surface extraction, and degraded
+// data sources — so the banner never says "we could not look" without saying
+// what it could not look at (finding F-02).
+func coverageReason(cov graph.Coverage) string {
+	var parts []string
+	if cov.Unresolved > 0 {
+		parts = append(parts, fmt.Sprintf("%d declared dependenc(ies) never resolved", cov.Unresolved))
+	}
+	if cov.Orphans > 0 {
+		parts = append(parts, fmt.Sprintf("%d orphaned package(s)", cov.Orphans))
+	}
+	if cov.FailedProjects > 0 {
+		parts = append(parts, fmt.Sprintf("%d project(s) failed to resolve", cov.FailedProjects))
+	}
+	if cov.ExtractorGaps > 0 {
+		parts = append(parts, fmt.Sprintf("%d partial install-surface extraction(s)", cov.ExtractorGaps))
+	}
+	if len(cov.DataSourceGaps) > 0 {
+		parts = append(parts, fmt.Sprintf("degraded data source(s): %s", strings.Join(cov.DataSourceGaps, ", ")))
+	}
+	if len(parts) == 0 {
+		return "coverage is incomplete"
+	}
+	return strings.Join(parts, "; ")
+}
+
 func verdictLine(res verdict.Result) (string, rgb) {
 	cov := res.Coverage
 	switch {
@@ -71,14 +99,14 @@ func verdictLine(res verdict.Result) (string, rgb) {
 	case res.ExitCode == verdict.ExitGate:
 		return fmt.Sprintf("GATED - %d gate-eligible finding(s) with policy opted in. Exit %d.",
 			res.Counts.Eligible, res.ExitCode), colGate
-	case cov.Degraded && res.Counts.Total == 0:
+	case cov.Incomplete() && res.Counts.Total == 0:
 		return fmt.Sprintf(
-			"INCOMPLETE - no findings, but %d declared dependenc(ies) were never resolved. "+
-				"This is NOT an all-clear. Exit %d.", cov.Unresolved, res.ExitCode), colGate
-	case cov.Degraded:
+			"INCOMPLETE - no findings, but %s. This is NOT an all-clear. Exit %d.",
+			coverageReason(cov), res.ExitCode), colGate
+	case cov.Incomplete():
 		return fmt.Sprintf(
-			"INCOMPLETE - %d finding(s), nothing block-class, but %d declared dependenc(ies) "+
-				"were never resolved. Exit %d.", res.Counts.Total, cov.Unresolved, res.ExitCode), colGate
+			"INCOMPLETE - %d finding(s), nothing block-class, but %s. Exit %d.",
+			res.Counts.Total, coverageReason(cov), res.ExitCode), colGate
 	case res.Counts.Total > 0:
 		return fmt.Sprintf("PASSED with findings - nothing block-class. Exit %d.", res.ExitCode), colClean
 	default:
@@ -160,6 +188,24 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 					"structure is unavailable for them and the depth column below should not be read "+
 					"as a dependency tree.", strings.Join(cov.FlatEcosystems, ", ")),
 				fontRegular, 8.5, colMuted, 0, 11)
+		}
+		if cov.FailedProjects > 0 {
+			d.wrapped(fmt.Sprintf(
+				"%d workspace project(s) failed to resolve; their dependency subtree is entirely "+
+					"absent from this report, not cleared by it.", cov.FailedProjects),
+				fontRegular, 8.5, colGate, 0, 11)
+		}
+		if cov.ExtractorGaps > 0 {
+			d.wrapped(fmt.Sprintf(
+				"%d install-surface extraction(s) were partial; the install-time subgraph for those "+
+					"projects is a lower bound, so a hook that was not read is not the same as a hook "+
+					"that is not there.", cov.ExtractorGaps), fontRegular, 8.5, colGate, 0, 11)
+		}
+		if len(cov.DataSourceGaps) > 0 {
+			d.wrapped(fmt.Sprintf(
+				"Data source(s) degraded (%s): advisories or release history were unavailable for some "+
+					"coordinates, so vulnerability and temporal checks are a lower bound over them.",
+				strings.Join(cov.DataSourceGaps, ", ")), fontRegular, 8.5, colGate, 0, 11)
 		}
 		d.gap(2)
 	}

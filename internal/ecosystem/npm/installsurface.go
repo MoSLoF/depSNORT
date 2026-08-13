@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/installsurface"
+	"ihbv.io/depsnort/internal/securefs"
 )
 
 // pkgManifest is the subset of a package's own package.json we read.
@@ -38,9 +40,19 @@ func rootDir(path string) string {
 func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	root := rootDir(path)
 
-	absRoot, _ := filepath.Abs(root)
+	// One contained reader for the whole project tree (finding F-03): every read
+	// below is checked for traversal, absolute escape, and symlinks pointing out
+	// of root, and is refused if the target is not a regular file or is oversized.
+	reader, err := securefs.NewReader(root)
+	if err != nil {
+		return fmt.Errorf("npm: %w", err)
+	}
+	absRoot := reader.Root()
 
-	var firstErr error
+	// Refused reads are recorded as typed gaps, not swallowed (R-01): a symlink
+	// planted where a package directory belongs must make the scan incomplete,
+	// or an attacker can hide an install hook simply by making it unreadable.
+	var gaps instsurf.Gaps
 	for _, n := range g.SortedNodes() {
 		if n.Kind != graph.KindPackage {
 			continue
@@ -50,38 +62,48 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			continue
 		}
 		pkgDir := filepath.Join(root, filepath.FromSlash(relDir))
-		// Guard: the resolved pkgDir must stay within the project root.
-		// A crafted lockfile with a packages key containing ".." could
-		// otherwise escape the project tree via filepath.Join resolution.
+		// Cheap lexical pre-check that the package dir stays under root; the
+		// reader repeats the containment check (and adds symlink resolution) on
+		// every read, so this is just an early skip for a crafted "npm.path".
 		absPkgDir, err := filepath.Abs(pkgDir)
 		if err != nil || !isUnderDir(absPkgDir, absRoot) {
+			// A lockfile path that escapes the root is itself a planted signal.
+			gaps.AddReason(n.ID, pkgDir, instsurf.GapContainment, err)
 			continue
 		}
-		manifestPath := filepath.Join(pkgDir, "package.json")
+		manifestPath := filepath.Join(absPkgDir, "package.json")
 
-		raw, err := os.ReadFile(manifestPath)
+		raw, err := reader.ReadFile(manifestPath)
 		if err != nil {
-			continue // not installed on disk; nothing to extract statically
+			// Absent (no node_modules) is normal; refused is not.
+			gaps.Add(n.ID, manifestPath, err)
+			continue
 		}
 		var m pkgManifest
 		if err := json.Unmarshal(raw, &m); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("npm: parsing %s: %w", manifestPath, err)
-			}
+			gaps.AddReason(n.ID, manifestPath, instsurf.GapParse, err)
 			continue
 		}
 		if len(m.Scripts) == 0 {
 			continue
 		}
 
-		// Reader scoped to this package directory; refuses to escape it.
+		// Reader scoped to this package directory; the contained reader enforces
+		// root containment and symlink safety, this closure keeps it within the
+		// package subtree and rejects absolute / traversal script refs up front.
 		read := func(rel string) ([]byte, bool) {
 			clean := filepath.Clean(filepath.FromSlash(rel))
 			if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+				gaps.AddReason(n.ID, rel, instsurf.GapContainment, nil)
 				return nil, false
 			}
-			b, err := os.ReadFile(filepath.Join(pkgDir, clean))
+			p := filepath.Join(absPkgDir, clean)
+			b, err := reader.ReadFile(p)
 			if err != nil {
+				// A hook referencing a script we cannot read means the chain is
+				// only partly known — the unread file is where the payload
+				// would be.
+				gaps.Add(n.ID, p, err)
 				return nil, false
 			}
 			return b, true
@@ -90,7 +112,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		surface := installsurface.Analyze(m.Scripts, read)
 		addSurfaceToGraph(g, n, surface)
 	}
-	return firstErr
+	return gaps.Err()
 }
 
 // addSurfaceToGraph materializes a Surface as install-time nodes and edges

@@ -3,7 +3,9 @@
 
 BINARY  := depsnort
 PKG     := ./cmd/depsnort
-VERSION ?= v0.6.1
+# Single-source the version from pyproject.toml (finding F-06): bump it in ONE
+# place and the Go binary, the wheel, and `depsnort version` all follow.
+VERSION ?= v$(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
 LDFLAGS := -X main.version=$(VERSION)
 
 # CGO is disabled: dependaSNORT is a single static binary with no libc linkage
@@ -11,7 +13,7 @@ LDFLAGS := -X main.version=$(VERSION)
 export CGO_ENABLED := 0
 
 .PHONY: build test vet fmt fmtcheck run checks self-audit clean \
-       org-scan priority
+       org-scan priority pin pin-check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) $(PKG)
@@ -51,6 +53,15 @@ checks: build
 self-audit:
 	@echo "module dependency graph (want exactly one line):"
 	@go list -m all
+
+# Resolve every GitHub Action reference to an immutable commit SHA (R-03).
+# Requires an authenticated `gh`. Run this before pushing a release candidate —
+# CI's `pinning` job fails on any reference still using a mutable tag.
+pin:
+	sh scripts/pin-actions.sh
+
+pin-check:
+	sh scripts/pin-actions.sh --check
 
 # --- Python tooling (stdlib only, no pip install) ---
 

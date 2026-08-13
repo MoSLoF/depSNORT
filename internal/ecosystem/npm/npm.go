@@ -102,6 +102,14 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 	if err != nil {
 		return nil, fmt.Errorf("npm: reading lockfile: %w", err)
 	}
+	return parseLock(raw)
+}
+
+// parseLock turns package-lock.json bytes into a graph. Split out from Resolve
+// so parsing is reachable without touching the filesystem — which is what the
+// fuzz target drives (D-33), and mirrors the parseX(path, raw) seam the other
+// five adapters already expose.
+func parseLock(raw []byte) (*graph.Graph, error) {
 	var lf lockfile
 	if err := json.Unmarshal(raw, &lf); err != nil {
 		return nil, fmt.Errorf("npm: parsing %s: %w", lockName, err)

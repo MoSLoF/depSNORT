@@ -65,6 +65,50 @@ type Coverage struct {
 	Orphans int `json:"orphans"`
 	// Roots carries the per-root detail, sorted by node ID for determinism.
 	Roots []RootCoverage `json:"roots,omitempty"`
+
+	// --- Scan-level gaps (Decision D-32 / finding F-02) --------------------
+	// These are NOT derivable from the graph alone: they come from stages the
+	// graph never sees — data-source lookups, install-surface extraction, and
+	// multi-project workspace resolution. The CLI populates them AFTER those
+	// stages and before calling the verdict. Before they existed, only the
+	// graph-level Degraded flag above could reach the exit code, so an empty
+	// OSV cache, a failed registry source, an unreadable install surface, or a
+	// workspace project that never resolved could all still return a clean 0
+	// under -fail-on-incomplete. Incomplete() folds them in.
+
+	// DataSourceGaps names the data sources (OSV, per-ecosystem registries)
+	// that errored or returned no data for coordinates that were queried.
+	DataSourceGaps []string `json:"data_source_gaps,omitempty"`
+	// ExtractorGaps counts install-surface material that was NOT examined for a
+	// resolved project (the install-time subgraph for it is a lower bound).
+	ExtractorGaps int `json:"install_surface_gaps,omitempty"`
+	// ExtractorGapReasons summarizes those gaps by reason, e.g.
+	// "containment-refusal x3". A containment refusal is not just a gap, it is
+	// an ACTIVE signal — an ordinary package does not symlink its manifest out
+	// of the tree — so the reason has to survive into the report rather than
+	// being flattened into a count (finding R-01).
+	ExtractorGapReasons []string `json:"install_surface_gap_reasons,omitempty"`
+	// ExtractorGapDetails is a bounded sample of individual gaps, for the human
+	// report. Capped so a tree with thousands of planted symlinks does not
+	// produce a thousand-line report; the count above is never capped.
+	ExtractorGapDetails []string `json:"install_surface_gap_details,omitempty"`
+	// FailedProjects counts workspace projects (under -recursive) that did not
+	// resolve at all, so their whole subtree is missing from the graph.
+	FailedProjects int `json:"failed_projects,omitempty"`
+}
+
+// Incomplete reports whether coverage is degraded for ANY reason — graph
+// resolution OR a scan-level gap. This is the single fact the verdict gates on
+// under -fail-on-incomplete (finding F-02). Keeping the graph-only Degraded flag
+// distinct preserves its specific meaning for reporting ("N unresolved
+// dependencies across M roots"), while Incomplete() is the honest answer to the
+// only question a gate actually asks: "is this an all-clear, or could we not
+// look?".
+func (c Coverage) Incomplete() bool {
+	return c.Degraded ||
+		len(c.DataSourceGaps) > 0 ||
+		c.ExtractorGaps > 0 ||
+		c.FailedProjects > 0
 }
 
 // Coverage computes the resolution-coverage facts recorded on the graph.

@@ -140,14 +140,9 @@ func boolStr(b bool) string {
 }
 
 func runChecks(g *graph.Graph) []finding.Finding {
-	reg := check.NewRegistry(
-		builtin.HookPresent{},
-		builtin.HookNetwork{},
-		builtin.HookCredentials{},
-		builtin.HookExfilCapable{},
-		builtin.HookObfuscated{},
-	)
-	return reg.RunAll(&check.Context{Graph: g})
+	// The corpus runs the SAME pack the binary runs (Decision D-37). A
+	// hand-rolled subset here once hid a cradle miss behind an unregistered check.
+	return builtin.Default().RunAll(&check.Context{Graph: g})
 }
 
 func hasCheck(findings []finding.Finding, checkID string) bool {
@@ -486,8 +481,19 @@ func TestAttack_ComposerPluginCradle(t *testing.T) {
 
 	findings := runChecks(g)
 
-	if !hasCheck(findings, "VC-002b") {
-		t.Error("MISS: VC-002b (network egress) not detected — certutil is a LOLBin download cradle")
+	// D-28: a download cradle BLOCKS. VC-002b deliberately stands down when the
+	// cradle capability is set, so asserting VC-002b here asserted the absence of
+	// a deferral — it could only ever pass if the cradle went undetected.
+	if !hasCheck(findings, "VC-002f") {
+		t.Error("MISS: VC-002f (download cradle) not detected — certutil -urlcache -split -f is a LOLBin cradle")
+	}
+	for _, f := range findingsForCheck(findings, "VC-002f") {
+		if f.GateClass != finding.GateBlock {
+			t.Errorf("VC-002f must be block-class per D-28; got %s", f.GateClass)
+		}
+	}
+	if hasCheck(findings, "VC-002b") {
+		t.Error("VC-002b must defer to VC-002f when the cradle capability is set (double-report)")
 	}
 
 	t.Logf("Findings: %d", len(findings))

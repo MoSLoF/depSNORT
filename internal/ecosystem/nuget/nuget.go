@@ -87,8 +87,8 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 //	  }
 //	}
 type nugetLockFile struct {
-	Version      int                                       `json:"version"`
-	Dependencies map[string]map[string]nugetPackageEntry   `json:"dependencies"`
+	Version      int                                     `json:"version"`
+	Dependencies map[string]map[string]nugetPackageEntry `json:"dependencies"`
 }
 
 type nugetPackageEntry struct {

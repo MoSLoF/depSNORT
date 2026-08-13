@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"ihbv.io/depsnort/internal/ecosystem"
 	"ihbv.io/depsnort/internal/ecosystem/cargo"
 	"ihbv.io/depsnort/internal/ecosystem/composer"
+	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/ecosystem/npm"
 	"ihbv.io/depsnort/internal/ecosystem/nuget"
 	"ihbv.io/depsnort/internal/ecosystem/pypi"
@@ -44,12 +46,13 @@ import (
 	"ihbv.io/depsnort/internal/verdict"
 )
 
-// version is the tool version. It is baked in with a REAL value rather than a
-// placeholder so that a plain `go build` still produces an identifiable binary:
-// every report header carries this string, which is the fastest way to tell
-// which source tree a given report came from. Bump it whenever the source
-// changes meaningfully. `make build` overrides it via -ldflags.
-var version = "v0.6.1"
+// version is the tool version. The SINGLE SOURCE of the release version is
+// pyproject.toml (finding F-06); `make build`, setup.py, and the release
+// workflow all read it from there and inject it via -ldflags "-X main.version".
+// This default is deliberately "dev" so an un-injected `go build` never claims a
+// release number it may have drifted from — an unmarked source build reads as
+// dev, which is the honest answer.
+var version = "dev"
 
 const (
 	exitUsage    = 64
@@ -75,6 +78,24 @@ func run(args []string) int {
 	case "banner":
 		fmt.Fprint(os.Stdout, banner(os.Stdout))
 		return 0
+	case "sbom":
+		// -release omits host-specific build settings so one document can
+		// honestly describe every platform artifact of a release (R-03).
+		releaseScope := false
+		for _, a := range args[1:] {
+			switch a {
+			case "-release", "--release":
+				releaseScope = true
+			default:
+				fmt.Fprintf(os.Stderr, "depsnort: sbom: unknown flag %q\n", a)
+				return exitUsage
+			}
+		}
+		if err := emitSBOM(os.Stdout, releaseScope); err != nil {
+			fmt.Fprintf(os.Stderr, "depsnort: sbom: %v\n", err)
+			return exitInternal
+		}
+		return 0
 	case "version", "--version", "-v":
 		fmt.Fprint(os.Stdout, banner(os.Stdout))
 		fmt.Println("dependaSNORT", version)
@@ -96,6 +117,8 @@ usage:
   depsnort scan [flags] [path]     resolve and analyze a project (default path ".")
                                    with -recursive, a workspace of projects
   depsnort checks                  list the registered vector checks
+  depsnort sbom [-release]         emit this binary's own CycloneDX SBOM
+                                   (-release: platform-neutral, for release artifacts)
   depsnort version                 print version
 
 scan flags:
@@ -128,24 +151,32 @@ exit codes:
 `)
 }
 
+// maxGapDetails bounds how many individual extraction gaps are carried into the
+// report. The COUNT is never capped — only the per-item detail list, so a tree
+// with thousands of planted symlinks stays readable without understating what
+// happened (R-01). Exceeding the cap is disclosed by summarizeReasons.
+const maxGapDetails = 25
+
+// summarizeReasons renders gap reason counts deterministically, e.g.
+// ["containment-refusal x3", "file-too-large x1"].
+func summarizeReasons(counts map[string]int) []string {
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(counts))
+	for reason, n := range counts {
+		out = append(out, fmt.Sprintf("%s x%d", reason, n))
+	}
+	sort.Strings(out) // determinism (D-13)
+	return out
+}
+
 // checkRegistry returns the check registry. Separated from adapter construction
 // so callers that only need checks (e.g. `depsnort checks`) can avoid scan config.
 func checkRegistry() *check.Registry {
-	return check.NewRegistry(
-		builtin.MaliciousVersion{},    // VC-001
-		builtin.HookPresent{},         // VC-002a
-		builtin.HookNetwork{},         // VC-002b
-		builtin.HookCredentials{},     // VC-002c
-		builtin.HookExfilCapable{},    // VC-002d
-		builtin.HookObfuscated{},      // VC-002e
-		builtin.HookDownloadCradle{},  // VC-002f
-		builtin.IOCMatch{},            // VC-003
-		builtin.Dormancy{},            // VC-004
-		builtin.PatchBurst{},          // VC-005
-		builtin.Typosquat{},           // VC-006
-		builtin.DependencyConfusion{}, // VC-007
-		builtin.KnownVuln{},           // VC-008
-	)
+	// Single registration point, shared with the adversarial corpus so the two
+	// can never drift apart (Decision D-37).
+	return builtin.Default()
 }
 
 // adapterRegistry builds the ecosystem adapter registry with the given scan
@@ -425,7 +456,9 @@ func cmdScan(args []string) int {
 	// at the same version in two repos becomes ONE node, so shared dependencies
 	// collapse and a flagged package shows its blast radius across the workspace.
 	g := graph.New()
-	var resolveFailures int
+	var resolveFailures, extractorGaps int
+	gapReasonCounts := map[string]int{}
+	var gapDetails []string
 	for _, p := range projects {
 		sub, err := p.Adapter.Resolve(p.Path)
 		if err != nil {
@@ -440,7 +473,25 @@ func cmdScan(args []string) int {
 		if !*noInstallSurface {
 			if ex, ok := p.Adapter.(ecosystem.InstallSurfaceExtractor); ok {
 				if err := ex.ExtractInstallSurface(p.Path, sub); err != nil {
-					fmt.Fprintf(os.Stderr, "depsnort: warning: install-surface extraction partial for %s: %v\n", p.Path, err)
+					// Typed gaps (R-01) carry one entry per unexamined file, so
+					// count them individually and keep their reasons; anything
+					// else is one opaque partial extraction.
+					if gs := instsurf.GapsOf(err); len(gs) > 0 {
+						extractorGaps += len(gs)
+						for _, gp := range gs {
+							gapReasonCounts[string(gp.Reason)]++
+							if len(gapDetails) < maxGapDetails {
+								gapDetails = append(gapDetails, p.Path+": "+gp.String())
+							}
+						}
+					} else {
+						extractorGaps++
+						gapReasonCounts["extraction-error"]++
+						if len(gapDetails) < maxGapDetails {
+							gapDetails = append(gapDetails, p.Path+": "+err.Error())
+						}
+					}
+					fmt.Fprintf(os.Stderr, "depsnort: warning: install surface not fully examined for %s: %v\n", p.Path, err)
 				}
 			}
 		}
@@ -473,6 +524,7 @@ func cmdScan(args []string) int {
 		InternalNames:  splitCSV(*internalNames),
 	}}
 	var info emit.RunInfo
+	var dataSourceGaps []string // sources that errored or returned no data (F-02)
 	for _, m := range checks.Metas() {
 		info.Rules = append(info.Rules, emit.RuleInfo{
 			ID: m.ID, Axis: string(m.Axis), Severity: string(m.DefaultSeverity),
@@ -487,6 +539,12 @@ func cmdScan(args []string) int {
 		if qErr != nil {
 			cov.Error = qErr.Error()
 			fmt.Fprintf(os.Stderr, "depsnort: warning: OSV coverage degraded: %v\n", qErr)
+		}
+		// A source that errored, or returned no data for coordinates it was
+		// asked about (an offline miss / empty cache), is a coverage gap (F-02).
+		// NotFound (a 404 for a private/unpublished package) is NOT a gap.
+		if cov.Error != "" || cov.Stats.Gaps > 0 {
+			dataSourceGaps = append(dataSourceGaps, client.Name())
 		}
 		info.DataSources = append(info.DataSources, cov)
 	}
@@ -506,6 +564,9 @@ func cmdScan(args []string) int {
 			if rErr != nil {
 				cov.Error = rErr.Error()
 				fmt.Fprintf(os.Stderr, "depsnort: warning: %s coverage degraded: %v\n", src.Name(), rErr)
+			}
+			if cov.Error != "" || cov.Stats.Gaps > 0 {
+				dataSourceGaps = append(dataSourceGaps, src.Name())
 			}
 			info.DataSources = append(info.DataSources, cov)
 		}
@@ -537,18 +598,38 @@ func cmdScan(args []string) int {
 
 	findings := checks.RunAll(ctx)
 
-	res := verdict.Evaluate(g, findings, verdict.Policy{
+	// Assemble scan-level coverage: the graph's own resolution facts PLUS the
+	// gaps the graph cannot see — failed data sources, partial install-surface
+	// extraction, and workspace projects that never resolved (finding F-02).
+	// Without this, -fail-on-incomplete could still return a clean 0 over an
+	// empty OSV cache, a dead registry, or an unreadable subtree.
+	cov := g.Coverage()
+	cov.DataSourceGaps = dataSourceGaps
+	cov.ExtractorGaps = extractorGaps
+	cov.ExtractorGapReasons = summarizeReasons(gapReasonCounts)
+	cov.ExtractorGapDetails = gapDetails
+	cov.FailedProjects = resolveFailures
+	cov.Complete = !cov.Incomplete() && len(cov.FlatEcosystems) == 0
+
+	res := verdict.EvaluateWithCoverage(g, findings, cov, verdict.Policy{
 		FailOnEligible:   *failEligible,
 		FailOnIncomplete: *failIncomplete,
 	})
-	// Degraded coverage is announced on stderr even when it does not gate: a
+	// Incomplete coverage is announced on stderr even when it does not gate: a
 	// pipeline that only reads the exit code must still be told the tool could
-	// not see the whole tree (Decision D-24).
-	if cov := res.Coverage; cov.Degraded {
+	// not see the whole tree (Decision D-24 / F-02).
+	if c := res.Coverage; c.Incomplete() {
 		fmt.Fprintf(os.Stderr,
-			"depsnort: WARNING - resolution coverage is degraded: %d unresolved dependenc(ies) "+
-				"across %d root(s), %d orphaned package(s). This report is NOT an all-clear.\n",
-			cov.Unresolved, cov.IncompleteRoots, cov.Orphans)
+			"depsnort: WARNING - coverage is incomplete: %d unresolved dependenc(ies) across %d root(s), "+
+				"%d orphaned package(s), %d failed project(s), %d partial install-surface extraction(s)",
+			c.Unresolved, c.IncompleteRoots, c.Orphans, c.FailedProjects, c.ExtractorGaps)
+		if len(c.ExtractorGapReasons) > 0 {
+			fmt.Fprintf(os.Stderr, " [%s]", strings.Join(c.ExtractorGapReasons, ", "))
+		}
+		if len(c.DataSourceGaps) > 0 {
+			fmt.Fprintf(os.Stderr, ", degraded data source(s): %s", strings.Join(c.DataSourceGaps, ", "))
+		}
+		fmt.Fprint(os.Stderr, ". This report is NOT an all-clear.\n")
 	}
 
 	// Render to a buffer first: a failed emit must not leave a truncated report

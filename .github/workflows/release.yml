@@ -1,0 +1,111 @@
+name: release
+
+# Build reproducible, checksummed, SBOM-accompanied, cryptographically attested
+# cross-platform binaries on a version tag (findings F-06 / D-33).
+#
+# A supply-chain security tool that ships unverifiable binaries is arguing
+# against itself, so every release artifact carries: a SHA-256 checksum, a
+# CycloneDX SBOM generated from the build itself, and a signed SLSA provenance
+# attestation binding the artifact to the exact workflow, commit, and runner that
+# produced it. Consumers verify with `gh attestation verify` (see README).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write     # create the Release and upload assets
+  id-token: write     # OIDC token for keyless Sigstore signing
+  attestations: write # record the provenance attestation
+
+jobs:
+  artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: '1.24'
+
+      # Refuse to publish a tag whose version does not match the single source of
+      # truth (pyproject.toml). A release labelled v0.7.0 that reports v0.6.1 when
+      # run is exactly the metadata drift F-06 was raised about.
+      - name: version consistency
+        run: |
+          set -eu
+          declared="v$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)"
+          if [ "$declared" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${declared}"
+            exit 1
+          fi
+          echo "version consistent: ${declared}"
+
+      - name: build matrix + checksums
+        run: |
+          set -eu
+          ver="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            goos="${target%/*}"; goarch="${target#*/}"
+            out="dist/depsnort-${ver}-${goos}-${goarch}"
+            [ "$goos" = "windows" ] && out="${out}.exe"
+            echo "building $out"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags "-s -w -X main.version=${ver}" -o "$out" ./cmd/depsnort
+          done
+
+      # depsnort describes its own supply chain, read from the module graph the
+      # linker embedded (D-33). Generated with -release so the document is
+      # explicitly PLATFORM-NEUTRAL: only one of the five binaries can be
+      # executed here, and stamping its GOOS/GOARCH onto a document that
+      # accompanies the other four would misstate them (R-03). The dependency
+      # graph is identical across targets — same source tree — and that is what
+      # the SBOM describes.
+      - name: generate CycloneDX SBOM (release-scoped)
+        run: |
+          set -eu
+          ver="${GITHUB_REF_NAME}"
+          CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${ver}" -o /tmp/depsnort-sbom ./cmd/depsnort
+          /tmp/depsnort-sbom sbom -release > "dist/depsnort-${ver}-sbom.cdx.json"
+          python3 - "dist/depsnort-${ver}-sbom.cdx.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          libs=[c for c in d["components"] if c.get("type")=="library"]
+          assert not libs, "zero-dependency invariant (D-10) broken: %s" % libs
+          props={p["name"] for p in d["metadata"].get("properties",[])}
+          for host in ("go:GOOS","go:GOARCH","go:GOAMD64"):
+              assert host not in props, "release SBOM must not carry host-specific %s" % host
+          assert "depsnort:sbom-scope" in props, "release SBOM must declare its scope"
+          print("SBOM ok: platform-neutral, 0 third-party components")
+          PY
+
+      - name: checksums
+        run: |
+          set -eu
+          ( cd dist && sha256sum depsnort-* > SHA256SUMS )
+          echo "--- SHA256SUMS ---"; cat dist/SHA256SUMS
+
+      # Keyless Sigstore signing via the workflow's OIDC identity: no long-lived
+      # key material exists to be stolen or to expire. The attestation is logged
+      # to the Rekor transparency log and binds each artifact digest to this
+      # repository, workflow, and commit.
+      - name: sign build provenance
+        uses: actions/attest-build-provenance@1c608d11d69870c2092266b3f9a6f3abbf17002c # v1.4.3
+        with:
+          subject-path: 'dist/depsnort-*'
+
+      # Published with the preinstalled `gh` CLI rather than a third-party action
+      # (R-03). Removing an external dependency from the workflow that BUILDS AND
+      # SIGNS the release is strictly better than pinning one: there is no longer
+      # anything to pin, and no third-party code runs with `contents: write`.
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          ver="${GITHUB_REF_NAME}"
+          gh release create "$ver" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "$ver" \
+            --generate-notes \
+            --verify-tag \
+            dist/depsnort-* dist/SHA256SUMS

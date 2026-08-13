@@ -1,12 +1,10 @@
 package nuget
 
 import (
-	"os"
-	"path/filepath"
-
 	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/installsurface"
+	"ihbv.io/depsnort/internal/securefs"
 )
 
 // ExtractInstallSurface implements ecosystem.InstallSurfaceExtractor (Decision
@@ -23,14 +21,27 @@ import (
 func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	dir := instsurf.ProjectDir(path)
 
+	// Contained reads (F-03): an install.ps1 symlinked out of the package tree
+	// is refused rather than followed off-disk.
+	reader, err := securefs.NewReader(dir)
+	if err != nil {
+		return err
+	}
+	// A refused install.ps1 is a gap, not an absence (R-01).
+	var gaps instsurf.Gaps
 	scripts := map[string]string{}
 	for _, name := range installsurface.NuGetInstallHookNames {
-		if b, err := os.ReadFile(filepath.Join(dir, name)); err == nil && len(b) > 0 {
+		b, err := reader.ReadFile(name)
+		if err != nil {
+			gaps.Add("", name, err)
+			continue
+		}
+		if len(b) > 0 {
 			scripts[name] = string(b)
 		}
 	}
 	if len(scripts) == 0 {
-		return nil
+		return gaps.Err()
 	}
 
 	roots := map[string]bool{}
@@ -46,5 +57,5 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			instsurf.AddToGraph(g, n, surface)
 		}
 	}
-	return nil
+	return gaps.Err()
 }

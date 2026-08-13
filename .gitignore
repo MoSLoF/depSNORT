@@ -30,4 +30,6 @@ __pycache__/
 *.pyc
 *.whl
 py/depsnort/_bin/
+
+# The public tree ignores the operator ledger dir; the private tree tracks it.
 .security/
