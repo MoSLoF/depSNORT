@@ -1,6 +1,7 @@
 package nuget
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -19,41 +20,78 @@ import (
 //   - MSBuild .targets/.props files in build/ or buildTransitive/ that execute
 //     arbitrary targets at build time.
 //
-// This reads those files from the root package directory and analyzes them
-// STATICALLY. Nothing is executed (Decision D-04).
+// Two scopes are checked:
 //
-// Scope is the root package directory: transitive packages resolve from the
-// NuGet gallery and are not on disk in a source checkout. A script with no
-// network/credential/obfuscation capability produces no finding.
+//  1. The project root directory — for install hooks that belong to the project
+//     itself (existing behavior).
+//  2. Each dependency package's extracted directory in the NuGet global packages
+//     cache — so build-time payloads shipped by a dependency are attributed to
+//     the DEPENDENCY PURL, not the project root.
+//
+// This reads those files STATICALLY. Nothing is executed (Decision D-04).
 func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	dir := instsurf.ProjectDir(path)
-
 	reader, err := securefs.NewReader(dir)
 	if err != nil {
 		return err
 	}
 	var gaps instsurf.Gaps
 
-	// PowerShell install hooks.
+	roots := map[string]bool{}
+	for _, r := range g.Roots {
+		roots[r] = true
+	}
+
+	// ---- project-root scan ----
+
+	scripts := readPowerShellHooks(reader, "", &gaps)
+	msbuildScripts := scanMSBuildDirs(reader, "", &gaps)
+
+	if len(scripts) > 0 || len(msbuildScripts) > 0 {
+		for _, n := range g.SortedNodes() {
+			if n.Kind != graph.KindPackage || n.Ecosystem != "nuget" || !roots[n.ID] {
+				continue
+			}
+			applyHooks(g, n, scripts, msbuildScripts)
+		}
+	}
+
+	// ---- dependency-package scan ----
+	pkgDirs := nugetPackagesDirs()
+	for _, n := range g.SortedNodes() {
+		if n.Kind != graph.KindPackage || n.Ecosystem != "nuget" || roots[n.ID] {
+			continue
+		}
+		scanDependencyPkg(g, n, pkgDirs, &gaps)
+	}
+
+	return gaps.Err()
+}
+
+func readPowerShellHooks(reader *securefs.Reader, nodeID string, gaps *instsurf.Gaps) map[string]string {
 	scripts := map[string]string{}
 	for _, name := range installsurface.NuGetInstallHookNames {
 		b, err := reader.ReadFile(name)
 		if err != nil {
-			gaps.Add("", name, err)
+			gaps.Add(nodeID, name, err)
 			continue
 		}
 		if len(b) > 0 {
 			scripts[name] = string(b)
 		}
 	}
+	return scripts
+}
 
-	// MSBuild .targets/.props from build/ and buildTransitive/, including
-	// TFM-specific subdirectories (e.g. build/net8.0/pkg.targets).
-	msbuildScripts := map[string]string{}
+// scanMSBuildDirs enumerates build/ and buildTransitive/ within the reader's
+// root, returning a map of relative-path to file content for .targets and
+// .props files. TFM-specific subdirectories (e.g. build/net8.0/) are included.
+func scanMSBuildDirs(reader *securefs.Reader, nodeID string, gaps *instsurf.Gaps) map[string]string {
+	out := map[string]string{}
 	for _, msbDir := range installsurface.NuGetMSBuildDirs {
 		entries, err := reader.ReadDir(msbDir)
 		if err != nil {
-			gaps.Add("", msbDir, err)
+			gaps.Add(nodeID, msbDir, err)
 			continue
 		}
 		for _, entry := range entries {
@@ -62,7 +100,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 				subDir := filepath.Join(msbDir, name)
 				subEntries, err := reader.ReadDir(subDir)
 				if err != nil {
-					gaps.Add("", subDir, err)
+					gaps.Add(nodeID, subDir, err)
 					continue
 				}
 				for _, sub := range subEntries {
@@ -73,11 +111,11 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 					relPath := filepath.Join(subDir, sub.Name())
 					b, err := reader.ReadFile(relPath)
 					if err != nil {
-						gaps.Add("", relPath, err)
+						gaps.Add(nodeID, relPath, err)
 						continue
 					}
 					if len(b) > 0 {
-						msbuildScripts[relPath] = string(b)
+						out[relPath] = string(b)
 					}
 				}
 				continue
@@ -89,39 +127,85 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			relPath := filepath.Join(msbDir, name)
 			b, err := reader.ReadFile(relPath)
 			if err != nil {
-				gaps.Add("", relPath, err)
+				gaps.Add(nodeID, relPath, err)
 				continue
 			}
 			if len(b) > 0 {
-				msbuildScripts[relPath] = string(b)
+				out[relPath] = string(b)
 			}
 		}
 	}
+	return out
+}
 
-	if len(scripts) == 0 && len(msbuildScripts) == 0 {
-		return gaps.Err()
+func applyHooks(g *graph.Graph, n *graph.Node, scripts, msbuildScripts map[string]string) {
+	if len(scripts) > 0 {
+		surface := installsurface.AnalyzeDotNet(scripts)
+		if len(surface.Hooks) > 0 {
+			instsurf.AddToGraph(g, n, surface)
+		}
 	}
+	if len(msbuildScripts) > 0 {
+		surface := installsurface.AnalyzeMSBuild(msbuildScripts)
+		if len(surface.Hooks) > 0 {
+			instsurf.AddToGraph(g, n, surface)
+		}
+	}
+}
 
-	roots := map[string]bool{}
-	for _, r := range g.Roots {
-		roots[r] = true
+// scanDependencyPkg locates a dependency package's content in the NuGet global
+// packages cache and scans it for install-time payloads. Hooks are attributed
+// to the dependency node, not the project root.
+func scanDependencyPkg(g *graph.Graph, n *graph.Node, pkgDirs []string, gaps *instsurf.Gaps) {
+	if !isCleanPkgName(n.Name) || !isCleanPkgName(n.Version) {
+		return
 	}
-	for _, n := range g.SortedNodes() {
-		if n.Kind != graph.KindPackage || n.Ecosystem != "nuget" || !roots[n.ID] {
-			continue
-		}
-		if len(scripts) > 0 {
-			surface := installsurface.AnalyzeDotNet(scripts)
-			if len(surface.Hooks) > 0 {
-				instsurf.AddToGraph(g, n, surface)
-			}
-		}
-		if len(msbuildScripts) > 0 {
-			surface := installsurface.AnalyzeMSBuild(msbuildScripts)
-			if len(surface.Hooks) > 0 {
-				instsurf.AddToGraph(g, n, surface)
-			}
+	pkgDir := findNuGetPkgDir(pkgDirs, n.Name, n.Version)
+	if pkgDir == "" {
+		return
+	}
+	pkgReader, err := securefs.NewReader(pkgDir)
+	if err != nil {
+		gaps.Add(n.ID, pkgDir, err)
+		return
+	}
+	scripts := readPowerShellHooks(pkgReader, n.ID, gaps)
+	msbuildScripts := scanMSBuildDirs(pkgReader, n.ID, gaps)
+	applyHooks(g, n, scripts, msbuildScripts)
+}
+
+// nugetPackagesDirs returns the NuGet global packages cache directories to
+// search, in priority order: NUGET_PACKAGES env var, then the default home
+// location.
+func nugetPackagesDirs() []string {
+	var dirs []string
+	if p := os.Getenv("NUGET_PACKAGES"); p != "" {
+		dirs = append(dirs, p)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".nuget", "packages"))
+	}
+	return dirs
+}
+
+// findNuGetPkgDir locates a NuGet package's extracted directory in the global
+// packages cache. NuGet stores packages at <cache>/<lowercase-name>/<version>/.
+func findNuGetPkgDir(dirs []string, name, version string) string {
+	lower := strings.ToLower(name)
+	for _, dir := range dirs {
+		p := filepath.Join(dir, lower, version)
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			return p
 		}
 	}
-	return gaps.Err()
+	return ""
+}
+
+// isCleanPkgName rejects names containing path separators or traversal
+// components so they cannot steer directory lookups outside the cache.
+func isCleanPkgName(s string) bool {
+	return s != "" &&
+		!strings.Contains(s, "/") &&
+		!strings.Contains(s, "\\") &&
+		!strings.Contains(s, "..")
 }

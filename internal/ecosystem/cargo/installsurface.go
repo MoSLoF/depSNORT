@@ -1,6 +1,7 @@
 package cargo
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -18,12 +19,16 @@ import (
 //   - proc-macro crates: compile-time code generation that executes arbitrary
 //     Rust when a dependent crate is compiled.
 //
-// This reads the root crate's build.rs and Cargo.toml from the on-disk
-// checkout and analyzes them STATICALLY — nothing is executed (Decision D-04).
+// Two scopes are checked:
 //
-// Scope is the root crate only. Transitive crates resolve from crates.io and
-// are not on disk in a source checkout, so their build scripts are not
-// available to read and are left unrepresented rather than guessed at.
+//  1. The root crate — its build.rs and Cargo.toml are read from the on-disk
+//     checkout (existing behavior).
+//  2. Each dependency crate — when vendored source or the Cargo registry cache
+//     is available, each dependency's Cargo.toml is checked for proc-macro
+//     status and its build.rs and src/lib.rs are analyzed. Hooks are attributed
+//     to the DEPENDENCY PURL, not the root.
+//
+// Everything is analyzed STATICALLY — nothing is executed (Decision D-04).
 func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	dir := instsurf.ProjectDir(path)
 	reader, err := securefs.NewReader(dir)
@@ -32,25 +37,28 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	}
 	var gaps instsurf.Gaps
 
-	// build.rs analysis.
+	roots := map[string]bool{}
+	for _, r := range g.Roots {
+		roots[r] = true
+	}
+
+	// ---- root crate scan ----
+
 	buildRs, err := reader.ReadFile("build.rs")
 	if err != nil {
 		gaps.Add("", filepath.Join(dir, "build.rs"), err)
 	}
 
-	// Cargo.toml proc-macro detection.
 	cargoToml, err := reader.ReadFile("Cargo.toml")
 	if err != nil {
 		gaps.Add("", filepath.Join(dir, "Cargo.toml"), err)
 	}
 
 	hasBuildRs := len(buildRs) > 0
-	isProcMacro := isProcMacroCrate(string(cargoToml))
+	rootIsProcMacro := isProcMacroCrate(string(cargoToml))
 
-	// Read the proc-macro's source when available so its capabilities
-	// flow through the VC-002 family.
 	var procMacroSource string
-	if isProcMacro {
+	if rootIsProcMacro {
 		if b, err := reader.ReadFile(filepath.Join("src", "lib.rs")); err == nil {
 			procMacroSource = string(b)
 		} else {
@@ -58,32 +66,124 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		}
 	}
 
-	if !hasBuildRs && !isProcMacro {
-		return gaps.Err()
+	if hasBuildRs || rootIsProcMacro {
+		for _, n := range g.SortedNodes() {
+			if n.Kind != graph.KindPackage || n.Ecosystem != "cargo" || !roots[n.ID] {
+				continue
+			}
+			if hasBuildRs {
+				surface := installsurface.AnalyzeRust(string(buildRs))
+				if len(surface.Hooks) > 0 {
+					instsurf.AddToGraph(g, n, surface)
+				}
+			}
+			if rootIsProcMacro {
+				surface := installsurface.AnalyzeProcMacro(procMacroSource)
+				if len(surface.Hooks) > 0 {
+					instsurf.AddToGraph(g, n, surface)
+				}
+			}
+		}
 	}
 
-	roots := map[string]bool{}
-	for _, r := range g.Roots {
-		roots[r] = true
-	}
+	// ---- dependency crate scan ----
 	for _, n := range g.SortedNodes() {
-		if n.Kind != graph.KindPackage || n.Ecosystem != "cargo" || !roots[n.ID] {
+		if n.Kind != graph.KindPackage || n.Ecosystem != "cargo" || roots[n.ID] {
 			continue
 		}
-		if hasBuildRs {
-			surface := installsurface.AnalyzeRust(string(buildRs))
-			if len(surface.Hooks) > 0 {
-				instsurf.AddToGraph(g, n, surface)
-			}
+		scanCargoDependency(g, n, dir, &gaps)
+	}
+
+	return gaps.Err()
+}
+
+// scanCargoDependency checks a dependency crate's vendored or cached source
+// for build.rs and proc-macro status, attributing hooks to the dependency node.
+func scanCargoDependency(g *graph.Graph, n *graph.Node, projectDir string, gaps *instsurf.Gaps) {
+	if !isCleanCrateName(n.Name) || !isCleanCrateName(n.Version) {
+		return
+	}
+	depDir := findCargoDependencyDir(projectDir, n.Name, n.Version)
+	if depDir == "" {
+		return
+	}
+	depReader, err := securefs.NewReader(depDir)
+	if err != nil {
+		gaps.Add(n.ID, depDir, err)
+		return
+	}
+
+	cargoToml, err := depReader.ReadFile("Cargo.toml")
+	if err != nil {
+		gaps.Add(n.ID, filepath.Join(depDir, "Cargo.toml"), err)
+		return
+	}
+
+	buildRs, buildErr := depReader.ReadFile("build.rs")
+	if buildErr != nil {
+		gaps.Add(n.ID, filepath.Join(depDir, "build.rs"), buildErr)
+	}
+	if len(buildRs) > 0 {
+		surface := installsurface.AnalyzeRust(string(buildRs))
+		if len(surface.Hooks) > 0 {
+			instsurf.AddToGraph(g, n, surface)
 		}
-		if isProcMacro {
-			surface := installsurface.AnalyzeProcMacro(procMacroSource)
-			if len(surface.Hooks) > 0 {
-				instsurf.AddToGraph(g, n, surface)
+	}
+
+	if isProcMacroCrate(string(cargoToml)) {
+		var source string
+		if b, err := depReader.ReadFile(filepath.Join("src", "lib.rs")); err == nil {
+			source = string(b)
+		} else {
+			gaps.Add(n.ID, filepath.Join(depDir, "src", "lib.rs"), err)
+		}
+		surface := installsurface.AnalyzeProcMacro(source)
+		if len(surface.Hooks) > 0 {
+			instsurf.AddToGraph(g, n, surface)
+		}
+	}
+}
+
+// findCargoDependencyDir locates a dependency crate's source directory.
+// It checks, in order:
+//  1. vendor/<name>/ (Cargo vendor output, inside project)
+//  2. CARGO_HOME/registry/src/<index>/<name>-<version>/ (registry cache)
+func findCargoDependencyDir(projectDir, name, version string) string {
+	vendorDir := filepath.Join(projectDir, "vendor", name)
+	if info, err := os.Stat(vendorDir); err == nil && info.IsDir() {
+		return vendorDir
+	}
+
+	cargoHome := os.Getenv("CARGO_HOME")
+	if cargoHome == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cargoHome = filepath.Join(home, ".cargo")
+		}
+	}
+	if cargoHome != "" {
+		registrySrc := filepath.Join(cargoHome, "registry", "src")
+		entries, err := os.ReadDir(registrySrc)
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					crateDir := filepath.Join(registrySrc, entry.Name(), name+"-"+version)
+					if info, err := os.Stat(crateDir); err == nil && info.IsDir() {
+						return crateDir
+					}
+				}
 			}
 		}
 	}
-	return gaps.Err()
+	return ""
+}
+
+// isCleanCrateName rejects names containing path separators or traversal
+// components so they cannot steer directory lookups outside vendor/.
+func isCleanCrateName(s string) bool {
+	return s != "" &&
+		!strings.Contains(s, "/") &&
+		!strings.Contains(s, "\\") &&
+		!strings.Contains(s, "..")
 }
 
 // isProcMacroCrate checks whether Cargo.toml declares this crate as a

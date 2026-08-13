@@ -1,6 +1,7 @@
 package nuget
 
 import (
+	"path/filepath"
 	"testing"
 
 	"ihbv.io/depsnort/internal/graph"
@@ -186,6 +187,57 @@ func TestNestedMSBuildTargetsProduceHook(t *testing.T) {
 			t.Logf("  node: %s kind=%s name=%s", n.ID, n.Kind, n.Name)
 		}
 		t.Error("nested build/net8.0/evil.targets should produce an install-hook node")
+	}
+}
+
+// AV-03: a dependency package's MSBuild payload must produce an install-hook
+// node attributed to the DEPENDENCY PURL, not the project root.
+func TestDependencyMSBuildHookAttribution(t *testing.T) {
+	abs, err := filepath.Abs("testdata/nuget-dep-hook/nuget-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NUGET_PACKAGES", abs)
+
+	a := New()
+	g, err := a.Resolve("testdata/nuget-dep-hook")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := a.ExtractInstallSurface("testdata/nuget-dep-hook", g); err != nil {
+		t.Fatalf("ExtractInstallSurface: %v", err)
+	}
+
+	evilPkgID := "pkg:nuget/evilpackage@1.0.0"
+	var hookFound bool
+	for _, n := range g.SortedNodes() {
+		if n.Kind == graph.KindInstallHook && n.Attr["hook.package"] == evilPkgID {
+			hookFound = true
+			if n.Attr["cap.exec"] != "true" {
+				t.Error("hook missing cap.exec")
+			}
+			if n.Attr["cap.network"] != "true" {
+				t.Error("hook missing cap.network (Invoke-WebRequest in evil.targets)")
+			}
+			if n.Attr["cap.credentials"] != "true" {
+				t.Error("hook missing cap.credentials (NUGET_API_KEY in evil.targets)")
+			}
+			break
+		}
+	}
+	if !hookFound {
+		for _, n := range g.SortedNodes() {
+			t.Logf("  node: %s kind=%s name=%s hook.package=%s", n.ID, n.Kind, n.Name, n.Attr["hook.package"])
+		}
+		t.Error("EvilPackage@1.0.0 should own the declares-hook edge, not the project root")
+	}
+
+	// The project root must NOT own the dependency's hook.
+	rootID := g.Roots[0]
+	for _, n := range g.SortedNodes() {
+		if n.Kind == graph.KindInstallHook && n.Attr["hook.package"] == rootID {
+			t.Error("project root should not own the dependency's hook")
+		}
 	}
 }
 
