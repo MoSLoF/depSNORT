@@ -636,6 +636,8 @@ var NuGetInstallHookNames = []string{
 var NuGetMSBuildDirs = []string{
 	"build",
 	"buildTransitive",
+	"buildMultiTargeting",
+	"buildCrossTargeting",
 }
 
 // AnalyzeDotNet builds the install surface from a NuGet package's PowerShell
