@@ -140,9 +140,9 @@ func TestDormancyClusterBoundaryGap(t *testing.T) {
 	base := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
 	h := &datasource.ReleaseHistory{Releases: []datasource.Release{
 		rel("1.0.0", time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)), // 3.5y dormancy before burst
-		rel("1.0.1", base),                      // cluster start
-		rel("1.0.2", base.Add(30*time.Minute)),   // bridge release
-		rel("1.0.3", base.Add(60*time.Minute)),   // pinned version
+		rel("1.0.1", base),                     // cluster start
+		rel("1.0.2", base.Add(30*time.Minute)), // bridge release
+		rel("1.0.3", base.Add(60*time.Minute)), // pinned version
 	}}
 	h.Sort()
 	hist := map[string]*datasource.ReleaseHistory{id: h}
