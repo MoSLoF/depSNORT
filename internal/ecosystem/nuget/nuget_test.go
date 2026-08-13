@@ -82,6 +82,34 @@ func TestResolveEdges(t *testing.T) {
 	}
 }
 
+// AV-05: different versions of the same package across TFMs must both appear
+// in the graph. The old name-only dedup key dropped the net8.0 version.
+func TestResolveMultiTFMRetainsBothVersions(t *testing.T) {
+	a := New()
+	g, err := a.Resolve("testdata/multi-tfm")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	v6 := g.Get("pkg:nuget/microsoft.extensions.logging@6.0.0")
+	v8 := g.Get("pkg:nuget/microsoft.extensions.logging@8.0.0")
+	if v6 == nil {
+		t.Error("net6.0 version (6.0.0) missing from graph")
+	}
+	if v8 == nil {
+		t.Error("net8.0 version (8.0.0) missing from graph")
+	}
+
+	// Both versions should be in the graph: root + v6 + v8 = 3 nodes.
+	nodes := g.SortedNodes()
+	if len(nodes) != 3 {
+		for _, n := range nodes {
+			t.Logf("  node: %s (name=%s, version=%s)", n.ID, n.Name, n.Version)
+		}
+		t.Fatalf("nodes = %d, want 3 (root + 2 versions)", len(nodes))
+	}
+}
+
 func TestResolveDepths(t *testing.T) {
 	a := New()
 	g, err := a.Resolve("testdata")

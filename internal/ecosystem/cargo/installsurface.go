@@ -2,6 +2,7 @@ package cargo
 
 import (
 	"path/filepath"
+	"strings"
 
 	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
@@ -12,34 +13,42 @@ import (
 // ExtractInstallSurface implements ecosystem.InstallSurfaceExtractor (Decision
 // D-26).
 //
-// A Cargo crate's install-time execution lives in build.rs, which runs at
-// compile time with the full privileges of the build. This reads the root
-// crate's build.rs from the on-disk checkout and analyzes it STATICALLY —
-// nothing is executed (Decision D-04).
+// A Cargo crate's install-time execution lives in:
+//   - build.rs: a build script that runs at compile time with full privileges.
+//   - proc-macro crates: compile-time code generation that executes arbitrary
+//     Rust when a dependent crate is compiled.
+//
+// This reads the root crate's build.rs and Cargo.toml from the on-disk
+// checkout and analyzes them STATICALLY — nothing is executed (Decision D-04).
 //
 // Scope is the root crate only. Transitive crates resolve from crates.io and
-// are not on disk in a source checkout, so — exactly as the npm and pypi
-// adapters do — their build scripts are not available to read and are left
-// unrepresented rather than guessed at. A build.rs is ordinary in Rust, so a
-// build script with no network/credential/obfuscation capability produces no
-// finding; that is the false-positive discipline, not a miss.
+// are not on disk in a source checkout, so their build scripts are not
+// available to read and are left unrepresented rather than guessed at.
 func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	dir := instsurf.ProjectDir(path)
-	// Contained read (F-03): a build.rs symlinked out of the crate is refused.
 	reader, err := securefs.NewReader(dir)
 	if err != nil {
 		return err
 	}
+	var gaps instsurf.Gaps
+
+	// build.rs analysis.
 	buildRs, err := reader.ReadFile("build.rs")
 	if err != nil {
-		// Absent is the common case (most crates have no build script); a
-		// refusal means one exists and was hidden from us (R-01).
-		var gaps instsurf.Gaps
 		gaps.Add("", filepath.Join(dir, "build.rs"), err)
-		return gaps.Err()
 	}
-	if len(buildRs) == 0 {
-		return nil
+
+	// Cargo.toml proc-macro detection.
+	cargoToml, err := reader.ReadFile("Cargo.toml")
+	if err != nil {
+		gaps.Add("", filepath.Join(dir, "Cargo.toml"), err)
+	}
+
+	hasBuildRs := len(buildRs) > 0
+	isProcMacro := isProcMacroCrate(string(cargoToml))
+
+	if !hasBuildRs && !isProcMacro {
+		return gaps.Err()
 	}
 
 	roots := map[string]bool{}
@@ -50,10 +59,42 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		if n.Kind != graph.KindPackage || n.Ecosystem != "cargo" || !roots[n.ID] {
 			continue
 		}
-		surface := installsurface.AnalyzeRust(string(buildRs))
-		if len(surface.Hooks) > 0 {
-			instsurf.AddToGraph(g, n, surface)
+		if hasBuildRs {
+			surface := installsurface.AnalyzeRust(string(buildRs))
+			if len(surface.Hooks) > 0 {
+				instsurf.AddToGraph(g, n, surface)
+			}
+		}
+		if isProcMacro {
+			surface := installsurface.AnalyzeProcMacro()
+			if len(surface.Hooks) > 0 {
+				instsurf.AddToGraph(g, n, surface)
+			}
 		}
 	}
-	return nil
+	return gaps.Err()
+}
+
+// isProcMacroCrate checks whether Cargo.toml declares this crate as a
+// proc-macro. The declaration is `proc-macro = true` under `[lib]`.
+func isProcMacroCrate(toml string) bool {
+	inLib := false
+	for _, line := range strings.Split(toml, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[lib]" {
+			inLib = true
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			inLib = false
+			continue
+		}
+		if inLib {
+			noSpaces := strings.ReplaceAll(trimmed, " ", "")
+			if noSpaces == "proc-macro=true" || noSpaces == "proc_macro=true" {
+				return true
+			}
+		}
+	}
+	return false
 }

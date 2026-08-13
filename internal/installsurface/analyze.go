@@ -631,6 +631,13 @@ var NuGetInstallHookNames = []string{
 	"uninstall.ps1",
 }
 
+// NuGetMSBuildDirs are the directories where NuGet packages can ship MSBuild
+// .targets and .props files that execute at build time.
+var NuGetMSBuildDirs = []string{
+	"build",
+	"buildTransitive",
+}
+
 // AnalyzeDotNet builds the install surface from a NuGet package's PowerShell
 // install scripts. scripts maps filename to content.
 func AnalyzeDotNet(scripts map[string]string) Surface {
@@ -656,6 +663,49 @@ func AnalyzeDotNet(scripts map[string]string) Surface {
 		s.Hooks = append(s.Hooks, h)
 	}
 	return s
+}
+
+// AnalyzeMSBuild builds the install surface from NuGet MSBuild .targets and
+// .props files. These run arbitrary MSBuild targets at build time and can
+// execute processes, download files, and modify the build. scripts maps
+// relative path (e.g. "build/pkg.targets") to file content.
+func AnalyzeMSBuild(scripts map[string]string) Surface {
+	var s Surface
+	for path, content := range scripts {
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		caps, ev := scanCaps(content)
+		caps = appendUnique(caps, CapExec)
+		ev = appendStr(ev, "msbuild:"+path)
+		h := Hook{
+			Name:     path,
+			Command:  truncateStr(content, 400),
+			Caps:     caps,
+			Evidence: ev,
+			Sinks:    findSinks(content),
+		}
+		for _, u := range dedupe(urlRe.FindAllString(content, -1)) {
+			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+		}
+		s.Hooks = append(s.Hooks, h)
+	}
+	return s
+}
+
+// AnalyzeProcMacro returns a surface for a Rust proc-macro crate. A proc-macro
+// executes arbitrary code at compile time — it IS the hook. Since the macro's
+// source is not scanned here (the lib.rs may or may not be on disk), the
+// surface records the structural fact with CapExec.
+func AnalyzeProcMacro() Surface {
+	return Surface{
+		Hooks: []Hook{{
+			Name:     "proc-macro",
+			Command:  "crate is a proc-macro (executes at compile time)",
+			Caps:     []Capability{CapExec},
+			Evidence: []string{"proc-macro"},
+		}},
+	}
 }
 
 // ---- helpers ----------------------------------------------------------------

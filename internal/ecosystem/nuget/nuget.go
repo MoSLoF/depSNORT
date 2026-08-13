@@ -108,8 +108,10 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 	root := rootNode(g, path)
 
 	// Flatten all TFMs (target framework monikers) into one graph. Packages
-	// at the same version across TFMs are the same node.
-	byName := map[string]string{} // lowercase name -> node ID
+	// at the same name+version across TFMs are the same node; different
+	// versions of the same package are distinct nodes.
+	type nameVer struct{ name, version string }
+	byNameVer := map[nameVer]string{} // (lowercase name, version) -> node ID
 
 	// Sorted TFM keys for determinism.
 	tfms := make([]string, 0, len(lf.Dependencies))
@@ -133,7 +135,8 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 				continue
 			}
 			lowerName := strings.ToLower(name)
-			if _, exists := byName[lowerName]; exists {
+			key := nameVer{lowerName, entry.Resolved}
+			if _, exists := byNameVer[key]; exists {
 				continue
 			}
 			id := purl.NewNuGet(name, entry.Resolved).String()
@@ -148,7 +151,7 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 				Direct: isDirect,
 				Attr:   attr,
 			})
-			byName[lowerName] = id
+			byNameVer[key] = id
 			if isDirect {
 				g.AddEdge(root.ID, id, graph.EdgeDependsOn)
 			}
@@ -159,16 +162,31 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 		return nil, fmt.Errorf("nuget: %s contained no resolved packages", packagesLockName)
 	}
 
-	// Build inter-package edges from dependency maps.
+	// Build inter-package edges from dependency maps. A dependency spec in
+	// packages.lock.json names only the package and a version; we resolve
+	// the target by looking up (lowered dep name, dep version) first, falling
+	// back to any version of that name when the lock entry carries a range.
 	for _, tfm := range tfms {
 		pkgs := lf.Dependencies[tfm]
 		for name, entry := range pkgs {
-			fromID, ok := byName[strings.ToLower(name)]
+			fromKey := nameVer{strings.ToLower(name), entry.Resolved}
+			fromID, ok := byNameVer[fromKey]
 			if !ok {
 				continue
 			}
-			for dep := range entry.Dependencies {
-				toID, ok := byName[strings.ToLower(dep)]
+			for dep, depVer := range entry.Dependencies {
+				lowerDep := strings.ToLower(dep)
+				toID, ok := byNameVer[nameVer{lowerDep, depVer}]
+				if !ok {
+					// Fall back: find any version of this dependency.
+					for k, id := range byNameVer {
+						if k.name == lowerDep {
+							toID = id
+							ok = true
+							break
+						}
+					}
+				}
 				if !ok || toID == fromID {
 					continue
 				}
@@ -184,8 +202,7 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 			hasInbound[e.To] = true
 		}
 	}
-	for name, id := range byName {
-		_ = name
+	for _, id := range byNameVer {
 		if !hasInbound[id] {
 			n := g.Get(id)
 			if n != nil && !n.Direct {

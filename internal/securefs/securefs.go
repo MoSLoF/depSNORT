@@ -119,6 +119,37 @@ func (r *Reader) ReadFile(p string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, r.maxBytes))
 }
 
+// ReadDir lists entries of a directory at p — relative to root or absolute —
+// only if p resolves to a directory inside root. This prevents a symlinked-out
+// directory from leaking external entry names. The returned entries are raw
+// os.DirEntry values; callers that go on to read individual files should use
+// ReadFile (which re-checks containment per file).
+func (r *Reader) ReadDir(p string) ([]os.DirEntry, error) {
+	abs := p
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(r.absRoot, p)
+	}
+	abs = filepath.Clean(abs)
+	if !within(abs, r.absRoot) {
+		return nil, fmt.Errorf("securefs: %q: %w", p, ErrOutsideRoot)
+	}
+	canon, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return nil, err
+	}
+	if !within(canon, r.canonRoot) {
+		return nil, fmt.Errorf("securefs: %q -> %q: %w", p, canon, ErrOutsideRoot)
+	}
+	info, err := os.Lstat(canon)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("securefs: %q: %w", p, ErrNotRegular)
+	}
+	return os.ReadDir(canon)
+}
+
 // Contains reports whether p resolves to a path inside the scan root. Unlike
 // ReadFile it does not require a regular file, so callers can vet a DIRECTORY
 // before enumerating it — listing a symlinked-out directory leaks its entry
