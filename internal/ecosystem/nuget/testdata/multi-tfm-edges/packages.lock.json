@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net6.0": {
+      "PackageA": {
+        "type": "Direct",
+        "requested": "[6.0.0, )",
+        "resolved": "6.0.0",
+        "contentHash": "a60",
+        "dependencies": {
+          "PackageB": "[1.0.0, 2.0.0)"
+        }
+      },
+      "PackageB": {
+        "type": "Transitive",
+        "resolved": "1.0.0",
+        "contentHash": "b10",
+        "dependencies": {}
+      }
+    },
+    "net8.0": {
+      "PackageA": {
+        "type": "Direct",
+        "requested": "[8.0.0, )",
+        "resolved": "8.0.0",
+        "contentHash": "a80",
+        "dependencies": {
+          "PackageB": "[2.0.0, 3.0.0)"
+        }
+      },
+      "PackageB": {
+        "type": "Transitive",
+        "resolved": "2.0.0",
+        "contentHash": "b20",
+        "dependencies": {}
+      }
+    }
+  }
+}

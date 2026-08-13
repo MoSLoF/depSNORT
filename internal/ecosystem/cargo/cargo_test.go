@@ -161,6 +161,64 @@ func TestProcMacroInstallSurface(t *testing.T) {
 	}
 }
 
+// AV-04: a malicious proc-macro with network+credential markers in lib.rs
+// must produce a hook node with those capabilities so VC-002 checks fire.
+func TestMaliciousProcMacroCapabilities(t *testing.T) {
+	a := New()
+	g, err := a.Resolve("testdata/proc-macro-malicious")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := a.ExtractInstallSurface("testdata/proc-macro-malicious", g); err != nil {
+		t.Fatalf("ExtractInstallSurface: %v", err)
+	}
+
+	var hook *graph.Node
+	for _, n := range g.SortedNodes() {
+		if n.Kind == graph.KindInstallHook && n.Name == "proc-macro" {
+			hook = n
+			break
+		}
+	}
+	if hook == nil {
+		t.Fatal("malicious proc-macro should generate a hook node")
+	}
+	if hook.Attr["cap.exec"] != "true" {
+		t.Error("hook missing cap.exec")
+	}
+	if hook.Attr["cap.network"] != "true" {
+		t.Error("hook missing cap.network (TcpStream::connect in lib.rs)")
+	}
+	if hook.Attr["cap.credentials"] != "true" {
+		t.Error("hook missing cap.credentials (CARGO_REGISTRY_TOKEN in lib.rs)")
+	}
+}
+
+// AV-04: a benign proc-macro (no lib.rs or clean lib.rs) must NOT produce
+// VC-002 findings — bare CapExec is the false-positive discipline.
+func TestBenignProcMacroNoExtraCaps(t *testing.T) {
+	a := New()
+	g, err := a.Resolve("testdata/proc-macro")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := a.ExtractInstallSurface("testdata/proc-macro", g); err != nil {
+		t.Fatalf("ExtractInstallSurface: %v", err)
+	}
+	for _, n := range g.SortedNodes() {
+		if n.Kind == graph.KindInstallHook && n.Name == "proc-macro" {
+			if n.Attr["cap.network"] == "true" {
+				t.Error("benign proc-macro should not have cap.network")
+			}
+			if n.Attr["cap.credentials"] == "true" {
+				t.Error("benign proc-macro should not have cap.credentials")
+			}
+			return
+		}
+	}
+	t.Error("proc-macro hook node missing")
+}
+
 func TestNonProcMacroCrateNoHook(t *testing.T) {
 	a := New()
 	g, err := a.Resolve("testdata")

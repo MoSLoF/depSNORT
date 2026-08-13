@@ -2,6 +2,8 @@ package nuget
 
 import (
 	"testing"
+
+	"ihbv.io/depsnort/internal/graph"
 )
 
 func TestDetect(t *testing.T) {
@@ -107,6 +109,83 @@ func TestResolveMultiTFMRetainsBothVersions(t *testing.T) {
 			t.Logf("  node: %s (name=%s, version=%s)", n.ID, n.Name, n.Version)
 		}
 		t.Fatalf("nodes = %d, want 3 (root + 2 versions)", len(nodes))
+	}
+}
+
+// AV-05: cross-TFM edges must link to the version resolved within the SAME
+// TFM. When dependency values are version ranges, the fallback must use the
+// per-TFM index, not a nondeterministic map scan.
+func TestResolveMultiTFMEdgeIdentity(t *testing.T) {
+	a := New()
+	g, err := a.Resolve("testdata/multi-tfm-edges")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	a6 := "pkg:nuget/packagea@6.0.0"
+	a8 := "pkg:nuget/packagea@8.0.0"
+	b1 := "pkg:nuget/packageb@1.0.0"
+	b2 := "pkg:nuget/packageb@2.0.0"
+
+	// Verify all nodes exist.
+	for _, id := range []string{a6, a8, b1, b2} {
+		if g.Get(id) == nil {
+			t.Fatalf("node %s missing from graph", id)
+		}
+	}
+
+	// Verify correct edges exist and incorrect cross-TFM edges do not.
+	type edgePair struct{ from, to string }
+	wantEdges := map[edgePair]bool{
+		{a6, b1}: true,
+		{a8, b2}: true,
+	}
+	badEdges := map[edgePair]bool{
+		{a6, b2}: true,
+		{a8, b1}: true,
+	}
+
+	for _, e := range g.SortedEdges() {
+		ep := edgePair{e.From, e.To}
+		if wantEdges[ep] {
+			delete(wantEdges, ep)
+		}
+		if badEdges[ep] {
+			t.Errorf("cross-TFM edge should not exist: %s -> %s", e.From, e.To)
+		}
+	}
+	for ep := range wantEdges {
+		t.Errorf("expected edge missing: %s -> %s", ep.from, ep.to)
+	}
+}
+
+// AV-03: nested TFM-specific MSBuild payloads (e.g. build/net8.0/evil.targets)
+// must produce install-hook nodes.
+func TestNestedMSBuildTargetsProduceHook(t *testing.T) {
+	a := New()
+	g, err := a.Resolve("testdata/msbuild-nested")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := a.ExtractInstallSurface("testdata/msbuild-nested", g); err != nil {
+		t.Fatalf("ExtractInstallSurface: %v", err)
+	}
+
+	var hookFound bool
+	for _, n := range g.SortedNodes() {
+		if n.Kind == graph.KindInstallHook {
+			hookFound = true
+			if n.Attr["cap.exec"] != "true" {
+				t.Errorf("hook %q missing cap.exec", n.Name)
+			}
+			break
+		}
+	}
+	if !hookFound {
+		for _, n := range g.SortedNodes() {
+			t.Logf("  node: %s kind=%s name=%s", n.ID, n.Kind, n.Name)
+		}
+		t.Error("nested build/net8.0/evil.targets should produce an install-hook node")
 	}
 }
 

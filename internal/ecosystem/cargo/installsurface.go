@@ -47,6 +47,17 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	hasBuildRs := len(buildRs) > 0
 	isProcMacro := isProcMacroCrate(string(cargoToml))
 
+	// Read the proc-macro's source when available so its capabilities
+	// flow through the VC-002 family.
+	var procMacroSource string
+	if isProcMacro {
+		if b, err := reader.ReadFile(filepath.Join("src", "lib.rs")); err == nil {
+			procMacroSource = string(b)
+		} else {
+			gaps.Add("", filepath.Join(dir, "src", "lib.rs"), err)
+		}
+	}
+
 	if !hasBuildRs && !isProcMacro {
 		return gaps.Err()
 	}
@@ -66,7 +77,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			}
 		}
 		if isProcMacro {
-			surface := installsurface.AnalyzeProcMacro()
+			surface := installsurface.AnalyzeProcMacro(procMacroSource)
 			if len(surface.Hooks) > 0 {
 				instsurf.AddToGraph(g, n, surface)
 			}
