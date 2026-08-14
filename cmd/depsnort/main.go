@@ -399,6 +399,7 @@ func cmdScan(args []string) int {
 	offline := fs.Bool("offline", false, "use only the local OSV cache; never touch the network")
 	noOSV := fs.Bool("no-osv", false, "skip the OSV data-source layer entirely")
 	cacheDir := fs.String("osv-cache", defaultCacheDir("osv"), "OSV advisory cache directory")
+	snapshotPath := fs.String("osv-snapshot", "", "path to a JSON advisory snapshot to import into the OSV cache before scanning (bootstraps -offline with zero network calls)")
 	regCacheDir := fs.String("registry-cache", defaultCacheDir("registry"), "registry metadata cache directory")
 	noRegistry := fs.Bool("no-registry", false, "skip registry-metadata source (disables VC-004/VC-005)")
 	noInstallSurface := fs.Bool("no-install-surface", false, "skip static install-hook extraction")
@@ -530,6 +531,14 @@ func cmdScan(args []string) int {
 			ID: m.ID, Axis: string(m.Axis), Severity: string(m.DefaultSeverity),
 			GateClass: string(m.DefaultGate), Description: m.Description,
 		})
+	}
+	if *snapshotPath != "" {
+		n, err := datasource.ImportSnapshot(datasource.NewCache(*cacheDir, 24*time.Hour), *snapshotPath, time.Now())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "depsnort: osv-snapshot import: %v\n", err)
+			return exitInternal
+		}
+		fmt.Fprintf(os.Stderr, "depsnort: imported %d advisory record(s) from snapshot\n", n)
 	}
 	if !*noOSV {
 		client := osv.New(datasource.NewCache(*cacheDir, 24*time.Hour), *offline)
