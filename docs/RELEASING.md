@@ -68,6 +68,17 @@ weakens a guarantee.
    honestly disclosed on every scan that uses it); committing a corrupted or
    silently-stale one is not. `git diff` the result before committing.
 
+   If you're working from an environment with no outbound network access
+   (a network-restricted sandbox, for instance — GitHub-hosted Actions
+   runners are not behind that kind of restriction), run the
+   `refresh-bundled-snapshot` workflow instead: Actions tab -> select it ->
+   "Run workflow". It's `workflow_dispatch`-only (no `schedule:`) and never
+   pushes to `main` directly — it opens a PR with the regenerated file for
+   review, same as any other change. This is deliberate: a scheduled job
+   with standing write access to refresh a security-advisory dataset
+   unattended is real attack surface this project doesn't need for
+   something that's fine to refresh by hand a few times a release.
+
 5. **Run the full pre-tag suite on the exact candidate:**
 
    ```
