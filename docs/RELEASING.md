@@ -50,7 +50,25 @@ weakens a guarantee.
    The Go suite enforces the same invariant (`internal/ciactions`), so a drift
    here also fails `go test`.
 
-4. **Run the full pre-tag suite on the exact candidate:**
+4. **Refresh the compiled-in OSV fallback dataset, from an environment with
+   real network access:**
+
+   ```
+   make refresh-bundled-snapshot
+   ```
+
+   This regenerates `internal/datasource/osv/bundled_snapshot.json` — the
+   last tier of the cache -> live query -> bundled -> gap resolution chain —
+   from a live query against this repo's own real-world reference fixtures
+   (`internal/ecosystem/{npm,pypi}/testdata/realworld`). It fails loudly and
+   leaves the committed file untouched if it can't reach `api.osv.dev` — do
+   not run this from a network-restricted sandbox or CI runner and do not
+   force a stale result through. Skipping this step on a given release is
+   fine (the dataset just carries an older `generated_at`, which stays
+   honestly disclosed on every scan that uses it); committing a corrupted or
+   silently-stale one is not. `git diff` the result before committing.
+
+5. **Run the full pre-tag suite on the exact candidate:**
 
    ```
    test -z "$(gofmt -l .)"          # formatting clean

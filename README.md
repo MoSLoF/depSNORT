@@ -141,6 +141,30 @@ than silently writing an empty or stale file. If the live query itself fails
 partway through, the export is skipped with a warning instead of writing a
 snapshot that looks complete but isn't.
 
+**A third tier runs automatically, with no flag needed.** Every scan resolves
+each coordinate through: on-disk cache → live `api.osv.dev` query → a small
+known-malicious-package dataset **compiled into the binary itself** → a typed
+gap. That third tier only fires for coordinates the first two couldn't
+answer (an offline cache miss, or a live query that failed outright), so a
+sandbox with no network path to OSV still gets real known-malicious-package
+coverage on a first run — not an empty cache and a silent gap. A bundled hit
+is real coverage (a known-malicious package doesn't stop being malicious
+because the data is a few weeks old) and is disclosed explicitly, never
+mistaken for a live check:
+
+```json
+{"name": "osv", "stats": {"from_bundled": 1, "bundled_dataset_generated_at": "2026-08-01T00:00:00Z"}}
+```
+
+`-no-osv-bundled` disables this tier entirely, for anyone who wants zero
+non-live data under any circumstances. The bundled dataset is scoped
+deliberately narrow — known-malicious (`MAL-*`) advisories only, plus
+ordinary CVEs for a small, maintained list of popular packages — and is
+regenerated with `make refresh-bundled-snapshot` (needs real network access;
+see `docs/RELEASING.md`). Embedding the *entire* OSV corpus isn't feasible
+(it's 300k+ records and grows weekly); embedding the bounded, high-signal
+malicious-package feed is.
+
 Try it against the bundled fixtures:
 
 ```

@@ -38,6 +38,11 @@ type Client struct {
 	Offline  bool
 	// Now is injected for deterministic cache timestamps; defaults to time.Now.
 	Now func() time.Time
+	// Bundled is the last-tier fallback lookup, consulted only when neither
+	// the cache nor a live query has an answer for a coordinate. Defaults to
+	// BundledLookup (the dataset compiled into this binary); set to nil to
+	// disable the fallback entirely (-no-osv-bundled).
+	Bundled func(key string) (adv []datasource.Advisory, generatedAt time.Time, ok bool)
 
 	Stats datasource.Stats
 }
@@ -50,6 +55,7 @@ func New(cache *datasource.Cache, offline bool) *Client {
 		Endpoint: DefaultEndpoint,
 		Offline:  offline,
 		Now:      time.Now,
+		Bundled:  BundledLookup,
 	}
 }
 
@@ -101,9 +107,17 @@ type qbVuln struct {
 	Modified string `json:"modified"`
 }
 
-// QueryBatch implements datasource.Source. Cache hits (fresh, or any entry when
-// offline) are served locally; misses are batched to the network unless
-// offline. It updates c.Stats.
+// QueryBatch implements datasource.Source. Tiered resolution per coordinate:
+//
+//  1. On-disk cache — fresh, or any entry when offline.
+//  2. Live network query — skipped entirely when offline.
+//  3. The compiled-in bundled fallback dataset — consulted only when neither
+//     of the above had an answer (an offline cache miss, or a live query
+//     that failed outright). Never mistaken for a live check: every use is
+//     recorded on c.Stats with the dataset's own generation time.
+//  4. A typed gap — nothing above had this coordinate.
+//
+// It updates c.Stats.
 func (c *Client) QueryBatch(ctx context.Context, coords []datasource.Coord) ([][]datasource.Advisory, error) {
 	now := time.Now
 	if c.Now != nil {
@@ -121,8 +135,7 @@ func (c *Client) QueryBatch(ctx context.Context, coords []datasource.Coord) ([][
 			continue
 		}
 		if c.Offline {
-			out[i] = nil
-			c.Stats.Gaps++
+			c.resolveFromBundledOrGap(out, i, co)
 			continue
 		}
 		missIdx = append(missIdx, i)
@@ -137,11 +150,14 @@ func (c *Client) QueryBatch(ctx context.Context, coords []datasource.Coord) ([][
 		chunk := missIdx[start:end]
 		results, err := c.postBatch(ctx, coords, chunk)
 		if err != nil {
-			// Mark the rest as gaps and surface the error; the caller decides
-			// how to treat degraded coverage (no silent caps).
+			// The live query failed for this chunk and everything queued
+			// after it. Before giving up, check the bundled fallback for
+			// each coordinate — real (if not live-fresh) coverage beats a
+			// silent gap, the same reasoning that makes -osv-snapshot worth
+			// having (Decision D-09 extended to data shipped with the binary
+			// itself rather than imported by hand).
 			for _, i := range missIdx[start:] {
-				c.Stats.Gaps++
-				_ = i
+				c.resolveFromBundledOrGap(out, i, coords[i])
 			}
 			return out, err
 		}
@@ -154,6 +170,26 @@ func (c *Client) QueryBatch(ctx context.Context, coords []datasource.Coord) ([][
 		}
 	}
 	return out, nil
+}
+
+// resolveFromBundledOrGap serves coord from the compiled-in fallback dataset
+// when available, otherwise records a gap. A bundled hit is deliberately NOT
+// written into the on-disk cache: doing so would stamp it with "now" and make
+// a build-time dataset indistinguishable from a fresh live check on the very
+// next run.
+func (c *Client) resolveFromBundledOrGap(out [][]datasource.Advisory, i int, coord datasource.Coord) {
+	if c.Bundled != nil {
+		if adv, generatedAt, ok := c.Bundled(coord.Key()); ok {
+			out[i] = adv
+			c.Stats.FromBundled++
+			c.tally(adv)
+			at := generatedAt
+			c.Stats.BundledDatasetAt = &at
+			return
+		}
+	}
+	out[i] = nil
+	c.Stats.Gaps++
 }
 
 func (c *Client) tally(adv []datasource.Advisory) {

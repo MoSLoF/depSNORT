@@ -419,6 +419,7 @@ func cmdScan(args []string) int {
 	cacheDir := fs.String("osv-cache", defaultCacheDir("osv"), "OSV advisory cache directory")
 	snapshotPath := fs.String("osv-snapshot", "", "path to a JSON advisory snapshot to import into the OSV cache before scanning (bootstraps -offline with zero network calls)")
 	exportPath := fs.String("osv-export", "", "write this scan's OSV results to path as a JSON snapshot for later -osv-snapshot import; requires live network access (incompatible with -offline/-no-osv)")
+	noBundled := fs.Bool("no-osv-bundled", false, "never use the compiled-in fallback advisory dataset, even when the network is unreachable")
 	regCacheDir := fs.String("registry-cache", defaultCacheDir("registry"), "registry metadata cache directory")
 	noRegistry := fs.Bool("no-registry", false, "skip registry-metadata source (disables VC-004/VC-005)")
 	noInstallSurface := fs.Bool("no-install-surface", false, "skip static install-hook extraction")
@@ -565,12 +566,23 @@ func cmdScan(args []string) int {
 	}
 	if !*noOSV {
 		client := osv.New(datasource.NewCache(*cacheDir, 24*time.Hour), *offline)
+		if *noBundled {
+			client.Bundled = nil
+		}
 		advisories, exportEntries, qErr := prefetchAdvisories(g, client)
 		ctx.Advisories = advisories
 		cov := emit.DataSourceCoverage{Name: client.Name(), Stats: client.Stats}
 		if qErr != nil {
 			cov.Error = qErr.Error()
 			fmt.Fprintf(os.Stderr, "depsnort: warning: OSV coverage degraded: %v\n", qErr)
+		}
+		if cov.Stats.FromBundled > 0 {
+			age := ""
+			if cov.Stats.BundledDatasetAt != nil {
+				days := int(time.Since(*cov.Stats.BundledDatasetAt).Hours() / 24)
+				age = fmt.Sprintf(" (generated %s, %dd old)", cov.Stats.BundledDatasetAt.Format("2006-01-02"), days)
+			}
+			fmt.Fprintf(os.Stderr, "depsnort: warning: served %d coordinate(s) from the embedded fallback dataset%s — not a live check\n", cov.Stats.FromBundled, age)
 		}
 		if *exportPath != "" {
 			if qErr != nil {

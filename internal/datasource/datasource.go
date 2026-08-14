@@ -67,6 +67,16 @@ type Stats struct {
 	// packages) rather than "the lookup failed". Conflating them makes an
 	// ordinary private dependency look like a broken scan.
 	NotFound int `json:"not_found,omitempty"`
+	// FromBundled counts coordinates served from a compiled-in fallback
+	// dataset — consulted only when neither the cache nor a live query had an
+	// answer. Tracked separately from FromCache/FromNet so a bundled-sourced
+	// finding is never mistaken for a live or freshly-cached one.
+	FromBundled int `json:"from_bundled,omitempty"`
+	// BundledDatasetAt is when the compiled-in fallback dataset was
+	// generated. Present only when FromBundled > 0, so a report can disclose
+	// exactly how stale a bundled-sourced answer might be rather than letting
+	// it read as equivalent to a live check (Decision D-24).
+	BundledDatasetAt *time.Time `json:"bundled_dataset_generated_at,omitempty"`
 }
 
 // RegistrySource provides release-history metadata for a single ecosystem. The
