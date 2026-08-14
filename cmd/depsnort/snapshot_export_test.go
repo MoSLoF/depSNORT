@@ -150,6 +150,19 @@ func (*erroringDoer) Do(*http.Request) (*http.Response, error) {
 	return nil, context.DeadlineExceeded
 }
 
+// -no-osv-bundled must parse and run cleanly alongside -offline (the
+// combination a sandbox operator who wants zero non-live data, ever, would
+// actually use). The compiled-in dataset in this repo ships empty, so this
+// can't observe the flag changing behavior end-to-end (that's covered at the
+// Client/QueryBatch level in internal/datasource/osv), but it proves the flag
+// is wired into cmdScan without breaking the run.
+func TestNoOSVBundledFlagParsesAndRuns(t *testing.T) {
+	code := run([]string{"scan", "-offline", "-no-osv-bundled", "-no-registry", "../../internal/ecosystem/npm/testdata/emptylock"})
+	if code == exitUsage || code == exitInternal {
+		t.Errorf("-no-osv-bundled -offline exit code = %d, want a normal scan outcome", code)
+	}
+}
+
 func TestExportIncompatibleWithOfflineAndNoOSV(t *testing.T) {
 	dir := t.TempDir()
 	exportPath := filepath.Join(dir, "out.json")

@@ -13,7 +13,7 @@ LDFLAGS := -X main.version=$(VERSION)
 export CGO_ENABLED := 0
 
 .PHONY: build test vet fmt fmtcheck run checks self-audit clean \
-       org-scan priority pin pin-check
+       org-scan priority pin pin-check refresh-bundled-snapshot
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) $(PKG)
@@ -62,6 +62,12 @@ pin:
 
 pin-check:
 	sh scripts/pin-actions.sh --check
+
+# Regenerates the OSV fallback dataset compiled into the binary (last tier of
+# the cache -> live query -> bundled -> gap chain). Needs real network access
+# to api.osv.dev — see docs/RELEASING.md.
+refresh-bundled-snapshot:
+	sh scripts/refresh-bundled-snapshot.sh
 
 # --- Python tooling (stdlib only, no pip install) ---
 
