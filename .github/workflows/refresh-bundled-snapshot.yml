@@ -1,0 +1,63 @@
+name: refresh-bundled-snapshot
+
+# Regenerates the OSV fallback dataset compiled into the binary
+# (internal/datasource/osv/bundled_snapshot.json) from a live query against
+# this repo's own reference fixtures, then opens a PR for human review.
+#
+# DELIBERATELY manual-trigger only — no `schedule:`. This is an on-demand
+# action a maintainer runs when they want the dataset refreshed, not an
+# autonomous process with standing write access: it never runs on its own,
+# and it never pushes to main directly — only to a fresh branch, via a PR
+# that still has to be reviewed and merged like any other change. The
+# alternative (a scheduled job with contents:write running unattended on a
+# cadence) is real attack surface this project doesn't need to carry for a
+# dataset that's fine to refresh by hand a few times a release.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write      # push the regenerated file to a new branch
+  pull-requests: write # open the review PR
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: '1.24'
+
+      - name: refresh bundled snapshot
+        run: make refresh-bundled-snapshot
+
+      - name: check for changes
+        id: diff
+        run: |
+          if git diff --quiet -- internal/datasource/osv/bundled_snapshot.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: open review PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          BRANCH="refresh-bundled-snapshot-$(date -u +%Y%m%d-%H%M%S)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add internal/datasource/osv/bundled_snapshot.json
+          git commit -m "chore: refresh compiled-in OSV fallback dataset"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "chore: refresh compiled-in OSV fallback dataset" \
+            --body "Manually triggered via the refresh-bundled-snapshot workflow (not scheduled). Review the diff — especially any new or changed advisory entries — before merging." \
+            --base main --head "$BRANCH"
+
+      - name: no changes
+        if: steps.diff.outputs.changed == 'false'
+        run: echo "bundled_snapshot.json is already current — nothing to open a PR for."
