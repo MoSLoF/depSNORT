@@ -72,11 +72,14 @@ weakens a guarantee.
    (a network-restricted sandbox, for instance — GitHub-hosted Actions
    runners are not behind that kind of restriction), run the
    `refresh-bundled-snapshot` workflow instead: Actions tab -> select it ->
-   "Run workflow". It's `workflow_dispatch`-only (no `schedule:`) and never
-   pushes to `main` directly — it opens a PR with the regenerated file for
-   review, same as any other change. This is deliberate: a scheduled job
-   with standing write access to refresh a security-advisory dataset
-   unattended is real attack surface this project doesn't need for
+   "Run workflow". It's `workflow_dispatch`-only (no `schedule:`), scoped to
+   `contents: write` only, and never touches `main` directly — it pushes the
+   regenerated file to a fresh branch and prints a "create PR" link in the
+   job summary; opening the PR itself is a separate, manual step (most repos
+   disable "Allow GitHub Actions to create and approve pull requests" by
+   default, and this workflow doesn't fight that). This is deliberate: a
+   scheduled job with standing write access to refresh a security-advisory
+   dataset unattended is real attack surface this project doesn't need for
    something that's fine to refresh by hand a few times a release.
 
 5. **Run the full pre-tag suite on the exact candidate:**

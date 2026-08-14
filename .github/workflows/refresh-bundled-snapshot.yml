@@ -2,22 +2,31 @@ name: refresh-bundled-snapshot
 
 # Regenerates the OSV fallback dataset compiled into the binary
 # (internal/datasource/osv/bundled_snapshot.json) from a live query against
-# this repo's own reference fixtures, then opens a PR for human review.
+# this repo's own reference fixtures, and pushes the result to a fresh branch
+# for human review — it does NOT open the PR itself (see below).
 #
 # DELIBERATELY manual-trigger only — no `schedule:`. This is an on-demand
 # action a maintainer runs when they want the dataset refreshed, not an
 # autonomous process with standing write access: it never runs on its own,
-# and it never pushes to main directly — only to a fresh branch, via a PR
-# that still has to be reviewed and merged like any other change. The
-# alternative (a scheduled job with contents:write running unattended on a
-# cadence) is real attack surface this project doesn't need to carry for a
-# dataset that's fine to refresh by hand a few times a release.
+# and it never touches main directly — only a fresh branch, which still has
+# to go through a real PR like any other change. The alternative (a
+# scheduled job with contents:write running unattended on a cadence) is real
+# attack surface this project doesn't need to carry for a dataset that's
+# fine to refresh by hand a few times a release.
+#
+# Scoped to contents:write only — no pull-requests:write. Most repos disable
+# "Allow GitHub Actions to create and approve pull requests" by default,
+# which is itself a sensible boundary (it stops any workflow, compromised or
+# not, from silently opening/self-approving PRs), so this workflow doesn't
+# fight it: it pushes the branch and stops. GitHub renders a
+# "Create a pull request" link for any freshly pushed branch without any
+# special permission — open it from there, or from wherever you're
+# triggering this workflow with credentials that can create PRs.
 on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write      # push the regenerated file to a new branch
-  pull-requests: write # open the review PR
+  contents: write # push the regenerated file to a new branch only
 
 jobs:
   refresh:
@@ -40,10 +49,8 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: open review PR
+      - name: push refresh branch
         if: steps.diff.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           BRANCH="refresh-bundled-snapshot-$(date -u +%Y%m%d-%H%M%S)"
@@ -53,11 +60,14 @@ jobs:
           git add internal/datasource/osv/bundled_snapshot.json
           git commit -m "chore: refresh compiled-in OSV fallback dataset"
           git push origin "$BRANCH"
-          gh pr create \
-            --title "chore: refresh compiled-in OSV fallback dataset" \
-            --body "Manually triggered via the refresh-bundled-snapshot workflow (not scheduled). Review the diff — especially any new or changed advisory entries — before merging." \
-            --base main --head "$BRANCH"
+          {
+            echo "### Bundled OSV dataset refreshed"
+            echo ""
+            echo "Pushed to \`$BRANCH\`. Open a PR from it:"
+            echo ""
+            echo "https://github.com/${{ github.repository }}/pull/new/$BRANCH"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: no changes
         if: steps.diff.outputs.changed == 'false'
-        run: echo "bundled_snapshot.json is already current — nothing to open a PR for."
+        run: echo "bundled_snapshot.json is already current — nothing to push."
