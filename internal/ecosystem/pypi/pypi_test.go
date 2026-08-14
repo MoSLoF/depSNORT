@@ -90,9 +90,16 @@ func TestRequirementsPinningAndExtras(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	// Extras stripped, name normalized, marker ignored.
-	if n := g.Get(purl.NewPyPI("flask-sqlalchemy", "2.5.1").String()); n == nil {
-		t.Error("Flask_SQLAlchemy[async]==2.5.1 with a marker was not resolved")
+	// Extras stripped, name normalized. The marker is now captured (not
+	// evaluated for a pinned entry — python_version >= "3.8" is not a
+	// platform-gate this parser tries to interpret) but must not block
+	// resolution of the pin itself.
+	n := g.Get(purl.NewPyPI("flask-sqlalchemy", "2.5.1").String())
+	if n == nil {
+		t.Fatal("Flask_SQLAlchemy[async]==2.5.1 with a marker was not resolved")
+	}
+	if got := n.Attr["pypi.marker"]; got != `python_version >= "3.8"` {
+		t.Errorf(`pypi.marker = %q, want python_version >= "3.8"`, got)
 	}
 	// Inline --hash must not corrupt the version.
 	if n := g.Get(purl.NewPyPI("requests", "2.31.0").String()); n == nil {
@@ -133,6 +140,117 @@ func TestPipfileLock(t *testing.T) {
 	}
 	if p := g.Get(purl.NewPyPI("pytest", "7.4.0").String()); p == nil || p.Attr["pypi.section"] != "develop" {
 		t.Errorf("develop section not recorded: %+v", p)
+	}
+}
+
+// A fully pinned requirements.txt with zero `# via` annotations — exactly
+// what plain `pip freeze` produces — resolves every package fine but cannot
+// reconstruct real edges. That must be disclosed the same way Pipfile.lock's
+// flatness is, not silently reported as a genuine dependency tree.
+func TestFlatResolutionForProvenanceFreeRequirements(t *testing.T) {
+	g, err := (&Adapter{}).Resolve("testdata/pipfreeze")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	var root *graph.Node
+	for _, id := range g.Roots {
+		root = g.Get(id)
+	}
+	if root == nil || root.Attr[graph.AttrFlatResolution] != "pypi" {
+		t.Errorf("provenance-free requirements.txt not flagged flat: %+v", root)
+	}
+	cov := g.Coverage()
+	var found bool
+	for _, eco := range cov.FlatEcosystems {
+		if eco == "pypi" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Coverage().FlatEcosystems = %v, want to include \"pypi\"", cov.FlatEcosystems)
+	}
+}
+
+// A file that DOES carry `# via` provenance — even a partial listing, like
+// testdata/mixed and testdata/realworld — must NOT be flagged flat: the
+// format can express structure here and mostly did.
+func TestProvenancePresentIsNotFlaggedFlat(t *testing.T) {
+	for _, dir := range []string{"testdata/mixed", "testdata/realworld"} {
+		g, err := (&Adapter{}).Resolve(dir)
+		if err != nil {
+			t.Fatalf("Resolve(%s): %v", dir, err)
+		}
+		var root *graph.Node
+		for _, id := range g.Roots {
+			root = g.Get(id)
+		}
+		if root != nil && root.Attr[graph.AttrFlatResolution] != "" {
+			t.Errorf("%s: should not be flagged flat, got %q", dir, root.Attr[graph.AttrFlatResolution])
+		}
+	}
+}
+
+// An unpinned dependency gated to Windows only by an unambiguous marker must
+// not inflate the unresolved count — but the exclusion itself must be
+// disclosed, not silent. A marker this parser cannot prove excludes (e.g. a
+// python_version comparison) must still count as unresolved.
+func TestMarkerExclusionIsNarrowAndDisclosed(t *testing.T) {
+	g, err := (&Adapter{}).Resolve("testdata/markers")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	var root *graph.Node
+	for _, id := range g.Roots {
+		root = g.Get(id)
+	}
+	if root == nil {
+		t.Fatal("root missing")
+	}
+	if root.Attr["pypi.marker_excluded"] != "pyreadline3" {
+		t.Errorf(`pypi.marker_excluded = %q, want "pyreadline3"`, root.Attr["pypi.marker_excluded"])
+	}
+	if root.Attr[graph.AttrUnresolved] != "some-lib" {
+		t.Errorf(`%s = %q, want "some-lib" (pyreadline3 must be excluded, some-lib must not)`, graph.AttrUnresolved, root.Attr[graph.AttrUnresolved])
+	}
+	if root.Attr[graph.AttrUnresolvedCount] != "1" {
+		t.Errorf("%s = %q, want \"1\"", graph.AttrUnresolvedCount, root.Attr[graph.AttrUnresolvedCount])
+	}
+}
+
+func TestMarkerExcludesLinux(t *testing.T) {
+	cases := map[string]bool{
+		`sys_platform=='win32'`:                true,
+		`sys_platform == 'win32'`:              true,
+		`sys_platform=="win32"`:                true,
+		`os_name=='nt'`:                        true,
+		`platform_system=='Windows'`:           true,
+		`platform_system == "Windows"`:         true,
+		`python_version < '3.9'`:               false,
+		`sys_platform=='win32' and extra=='x'`: false,
+		``:                                     false,
+	}
+	for marker, want := range cases {
+		if got := markerExcludesLinux(marker); got != want {
+			t.Errorf("markerExcludesLinux(%q) = %v, want %v", marker, got, want)
+		}
+	}
+}
+
+// The PyPI root version is always a placeholder — nothing in this adapter
+// executes setup.py/pyproject.toml to get a real one. That must be
+// disclosed so a reader can tell "genuinely 0.0.0" apart from "could not
+// determine" instead of guessing.
+func TestRootVersionPlaceholderDisclosed(t *testing.T) {
+	g, err := (&Adapter{}).Resolve("testdata/mixed")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	var root *graph.Node
+	for _, id := range g.Roots {
+		root = g.Get(id)
+	}
+	if root == nil || root.Attr["pypi.version_source"] != "unresolved-placeholder" {
+		t.Errorf("root version placeholder not disclosed: %+v", root)
 	}
 }
 

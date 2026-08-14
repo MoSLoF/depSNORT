@@ -69,7 +69,7 @@ go build -o depsnort ./cmd/depsnort      # Windows: go build -o depsnort.exe ./c
 ```
 
 > **Check which build you have.** `./depsnort version` and every report header
-> carry the baked-in version (`v0.7.3`). If a report header or the flag list does
+> carry the baked-in version (`v0.7.4`). If a report header or the flag list does
 > not match what you expect, the source tree on disk is stale — re-extract before
 > debugging anything else.
 
@@ -103,6 +103,24 @@ your user cache dir); `-offline` runs entirely from that cache for
 deterministic, air-gapped gating. Degraded coverage (offline misses, network
 errors) is reported under `data_sources` in the JSON — a partial run is never
 mistaken for a clean one.
+
+The OSV client honors the standard `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`
+environment variables (Go's default HTTP transport reads them), so a
+sandboxed or corporate runner can reach `api.osv.dev` through an egress
+proxy without any depSNORT-specific configuration — just allowlist the host
+in your proxy policy.
+
+When no network path to `api.osv.dev` exists at all — a fully air-gapped CI
+runner or sandbox — `-osv-snapshot <file>` imports a JSON advisory snapshot
+into the OSV cache before the scan runs, so `-offline` has real coverage on
+a first run instead of an empty cache. The snapshot is a JSON array of
+`{"ecosystem", "name", "version", "advisories": [...]}` records (the same
+`Advisory` shape OSV itself returns); a container image or CI cache can ship
+a periodically-refreshed snapshot file alongside the repo:
+
+```
+./depsnort scan -osv-snapshot advisories-snapshot.json -offline .
+```
 
 Try it against the bundled fixtures:
 
@@ -366,7 +384,7 @@ attestation is recorded in the public Rekor transparency log.
 sha256sum -c SHA256SUMS --ignore-missing
 
 # 2. provenance — proves THIS binary came from THIS repo's release workflow
-gh attestation verify depsnort-v0.7.3-linux-amd64 --repo MoSLoF/depSNORT
+gh attestation verify depsnort-v0.7.4-linux-amd64 --repo MoSLoF/depSNORT
 
 # 3. what it is built from (the components array should be empty)
 ./depsnort sbom

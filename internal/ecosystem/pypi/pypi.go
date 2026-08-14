@@ -128,6 +128,13 @@ func rootNode(g *graph.Graph, path string) *graph.Node {
 	id := purl.NewPyPI(name, "0.0.0").String()
 	n := g.AddNode(&graph.Node{
 		ID: id, Ecosystem: "pypi", Name: purl.NormalizePyPI(name), Version: "0.0.0", Depth: 0,
+		// "0.0.0" is always a placeholder here — nothing in this adapter reads a
+		// real version out of setup.py/pyproject.toml (consistent with the
+		// zero-execution ethos: a setuptools_scm/hatch-vcs project computes its
+		// real version by running git, which this tool will never do). Tagged
+		// so a reader can tell "genuinely 0.0.0" apart from "could not
+		// determine" without already knowing the project.
+		Attr: map[string]string{"pypi.version_source": "unresolved-placeholder"},
 	})
 	g.MarkRoot(id)
 	return n
@@ -147,9 +154,17 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 		name    string
 		version string
 		vias    []string
+		marker  string
 	}
 	var entries []entry
 	var unpinned []string
+	var markerExcluded []string
+	// hasProvenance is true the moment any line contributes a `# via` parent.
+	// A file with zero provenance (plain `pip freeze` output) resolves every
+	// entry as a direct root dependency by construction, not by fact — the
+	// same "format cannot express structure" situation Pipfile.lock records
+	// via AttrFlatResolution.
+	hasProvenance := false
 
 	sc := bufio.NewScanner(strings.NewReader(string(raw)))
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -176,12 +191,14 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 				if cur != nil {
 					if v := viaTarget(strings.TrimPrefix(comment, "via ")); v != "" {
 						cur.vias = append(cur.vias, v)
+						hasProvenance = true
 					}
 				}
 				inVia = false
 			case inVia && cur != nil:
 				if v := viaTarget(comment); v != "" {
 					cur.vias = append(cur.vias, v)
+					hasProvenance = true
 				}
 			}
 			continue
@@ -206,15 +223,19 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 			continue
 		}
 
-		name, version, pinned := splitPin(body)
+		name, version, pinned, marker := splitPin(body)
 		if name == "" {
 			continue
 		}
 		if !pinned {
-			unpinned = append(unpinned, name)
+			if marker != "" && markerExcludesLinux(marker) {
+				markerExcluded = append(markerExcluded, name)
+			} else {
+				unpinned = append(unpinned, name)
+			}
 			continue
 		}
-		entries = append(entries, entry{name: name, version: version})
+		entries = append(entries, entry{name: name, version: version, marker: marker})
 		cur = &entries[len(entries)-1]
 	}
 	if err := sc.Err(); err != nil {
@@ -228,9 +249,13 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 	byName := map[string]string{} // normalized name -> node ID
 	for _, e := range entries {
 		id := purl.NewPyPI(e.name, e.version).String()
+		attr := map[string]string{"pypi.source": requirementsName}
+		if e.marker != "" {
+			attr["pypi.marker"] = e.marker
+		}
 		g.AddNode(&graph.Node{
 			ID: id, Ecosystem: "pypi", Name: purl.NormalizePyPI(e.name), Version: e.version,
-			Attr: map[string]string{"pypi.source": requirementsName},
+			Attr: attr,
 		})
 		byName[purl.NormalizePyPI(e.name)] = id
 	}
@@ -256,14 +281,34 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 		}
 	}
 
+	// Root-level facts are written into the existing root.Attr map (rootNode
+	// always populates it) rather than replaced wholesale — several conditions
+	// below can all be true for the same file (e.g. partially unpinned AND
+	// fully flat), and a bare `root.Attr = map[string]string{...}` would drop
+	// whichever fact was written first, including rootNode's own attributes.
+	if root.Attr == nil {
+		root.Attr = map[string]string{}
+	}
 	if len(unpinned) > 0 {
 		sort.Strings(unpinned)
 		// Surfaced as a graph fact so degraded coverage is visible rather than
 		// silently reported as a clean, fully-resolved tree.
-		root.Attr = map[string]string{
-			graph.AttrUnresolved:      strings.Join(unpinned, ","),
-			graph.AttrUnresolvedCount: fmt.Sprintf("%d", len(unpinned)),
-		}
+		root.Attr[graph.AttrUnresolved] = strings.Join(unpinned, ",")
+		root.Attr[graph.AttrUnresolvedCount] = fmt.Sprintf("%d", len(unpinned))
+	}
+	if len(markerExcluded) > 0 {
+		sort.Strings(markerExcluded)
+		// Not folded into AttrUnresolved: these are deliberately excluded from
+		// the coverage gate because their marker proves they never install on
+		// this platform. The exclusion itself is still disclosed, not silent.
+		root.Attr["pypi.marker_excluded"] = strings.Join(markerExcluded, ",")
+	}
+	if !hasProvenance && len(entries) > 0 {
+		// No line in the file contributed a `# via` parent at all — the same
+		// "format records no inter-package relationships" situation
+		// Pipfile.lock is in, just for a plain `pip freeze` requirements.txt
+		// instead of a lockfile format.
+		root.Attr[graph.AttrFlatResolution] = "pypi"
 	}
 
 	assignDepths(g, root.ID)
@@ -284,11 +329,15 @@ func viaTarget(s string) string {
 	return s
 }
 
-// splitPin splits "name[extra]==1.2.3" into its name and version. pinned is
-// false for any specifier that is not an exact `==` pin.
-func splitPin(s string) (name, version string, pinned bool) {
+// splitPin splits "name[extra]==1.2.3 ; marker" into its name, version, and
+// PEP 508 environment marker (if any). pinned is false for any specifier
+// that is not an exact `==` pin. marker is returned verbatim (untrimmed of
+// internal spacing beyond the outer TrimSpace) so it can be surfaced to the
+// caller rather than silently discarded.
+func splitPin(s string) (name, version string, pinned bool, marker string) {
 	// Environment markers: "pkg==1.0 ; python_version < '3.9'"
 	if i := strings.IndexByte(s, ';'); i >= 0 {
+		marker = strings.TrimSpace(s[i+1:])
 		s = strings.TrimSpace(s[:i])
 	}
 	if i := strings.Index(s, "=="); i >= 0 {
@@ -297,17 +346,37 @@ func splitPin(s string) (name, version string, pinned bool) {
 		version = strings.TrimSuffix(version, ".*")
 		name = stripExtras(name)
 		if name != "" && version != "" {
-			return name, version, true
+			return name, version, true, marker
 		}
-		return name, "", false
+		return name, "", false, marker
 	}
 	// Any other specifier is unpinned for our purposes.
 	for _, op := range []string{">=", "<=", "~=", "!=", ">", "<", "@"} {
 		if i := strings.Index(s, op); i >= 0 {
-			return stripExtras(strings.TrimSpace(s[:i])), "", false
+			return stripExtras(strings.TrimSpace(s[:i])), "", false, marker
 		}
 	}
-	return stripExtras(strings.TrimSpace(s)), "", false
+	return stripExtras(strings.TrimSpace(s)), "", false, marker
+}
+
+// markerExcludesLinux reports whether marker is a single, unambiguous PEP 508
+// clause proving a dependency is gated to Windows only — the idiom real
+// Windows-only packages use (pyreadline3, pywin32). Anything this cannot
+// prove — "and"/"or", parens, a python_version comparison, an unrecognized
+// key — returns false rather than being guessed at, so a marker the parser
+// does not fully understand is never silently excluded from coverage; it
+// still surfaces via the pypi.marker attribute for a human or an automated
+// reader to judge.
+func markerExcludesLinux(marker string) bool {
+	m := strings.ToLower(strings.Join(strings.Fields(marker), ""))
+	switch m {
+	case `sys_platform=='win32'`, `sys_platform=="win32"`,
+		`os_name=='nt'`, `os_name=="nt"`,
+		`platform_system=='windows'`, `platform_system=="windows"`:
+		return true
+	default:
+		return false
+	}
 }
 
 // stripExtras removes an extras suffix: "requests[security]" -> "requests".

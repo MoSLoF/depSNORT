@@ -1,0 +1,3 @@
+requests==2.31.0
+pyreadline3>=3.4 ; sys_platform=='win32'
+some-lib>=1.0 ; python_version<'3.9'
