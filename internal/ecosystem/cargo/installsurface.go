@@ -99,14 +99,19 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 
 // scanCargoDependency checks a dependency crate's vendored or cached source
 // for build.rs and proc-macro status, attributing hooks to the dependency node.
+// When multiple identity-valid vendor candidates exist, ALL are scanned so that
+// malicious code in any candidate reaches the graph.
 func scanCargoDependency(g *graph.Graph, n *graph.Node, projectDir string, projectReader *securefs.Reader, gaps *instsurf.Gaps) {
 	if !isCleanCrateName(n.Name) || !isCleanCrateName(n.Version) {
 		return
 	}
-	depDir, _ := findCargoDependencyDir(projectDir, projectReader, n.Name, n.Version, gaps, n.ID)
-	if depDir == "" {
-		return
+	dirs := findCargoDependencyDir(projectDir, projectReader, n.Name, n.Version, gaps, n.ID)
+	for _, d := range dirs {
+		scanCargoDependencyAt(g, n, d.dir, gaps)
 	}
+}
+
+func scanCargoDependencyAt(g *graph.Graph, n *graph.Node, depDir string, gaps *instsurf.Gaps) {
 	depReader, err := securefs.NewReader(depDir)
 	if err != nil {
 		gaps.Add(n.ID, depDir, err)
@@ -153,16 +158,18 @@ type vendorCandidate struct {
 // validates its manifest identity. It checks, in order:
 //
 //  1. vendor/<name>/ and vendor/<name>-<version>/ — both are enumerated, each
-//     candidate's Cargo.toml is parsed, and only a manifest whose [package]
-//     name and version match the requested dependency is accepted. When both
-//     exist and match, the versioned directory wins (it is unambiguous).
+//     candidate's Cargo.toml is read through projectReader (containment + size
+//     cap), and only a manifest whose [package] name and version match the
+//     requested dependency is accepted. When BOTH pass identity validation, ALL
+//     matched candidates are returned and an ambiguous-source gap is emitted —
+//     the caller scans every candidate so malicious code in any of them reaches
+//     the graph.
 //  2. CARGO_HOME/registry/src/<index>/<name>-<version>/ — registry cache,
 //     already version-qualified by directory name.
 //
-// Returns (absoluteDir, vendorRelative). vendorRelative is non-empty for
-// vendor/ hits (subject to containment checks). Emits typed gaps for identity
-// mismatches and unavailable source directly.
-func findCargoDependencyDir(projectDir string, projectReader *securefs.Reader, name, version string, gaps *instsurf.Gaps, nodeID string) (string, string) {
+// Returns all identity-valid candidates. Emits typed gaps for containment
+// refusals, identity mismatches, ambiguity, and unavailable source.
+func findCargoDependencyDir(projectDir string, projectReader *securefs.Reader, name, version string, gaps *instsurf.Gaps, nodeID string) []vendorCandidate {
 	candidates := []vendorCandidate{}
 	for _, sub := range []string{name, name + "-" + version} {
 		rel := filepath.Join("vendor", sub)
@@ -178,10 +185,10 @@ func findCargoDependencyDir(projectDir string, projectReader *securefs.Reader, n
 			gaps.Add(nodeID, c.rel, securefs.ErrOutsideRoot)
 			continue
 		}
-		tomlPath := filepath.Join(c.dir, "Cargo.toml")
-		b, err := os.ReadFile(tomlPath)
+		tomlRel := filepath.Join(c.rel, "Cargo.toml")
+		b, err := projectReader.ReadFile(tomlRel)
 		if err != nil {
-			gaps.Add(nodeID, tomlPath, err)
+			gaps.Add(nodeID, tomlRel, err)
 			continue
 		}
 		mName, mVersion := extractManifestIdentity(string(b))
@@ -192,14 +199,11 @@ func findCargoDependencyDir(projectDir string, projectReader *securefs.Reader, n
 		}
 	}
 
+	if len(matched) > 1 {
+		gaps.AddReason(nodeID, name+"@"+version, instsurf.GapAmbiguousSource, nil)
+	}
 	if len(matched) > 0 {
-		best := matched[0]
-		for _, c := range matched[1:] {
-			if strings.HasSuffix(filepath.Base(c.rel), "-"+version) {
-				best = c
-			}
-		}
-		return best.dir, best.rel
+		return matched
 	}
 
 	cargoHome := os.Getenv("CARGO_HOME")
@@ -216,7 +220,7 @@ func findCargoDependencyDir(projectDir string, projectReader *securefs.Reader, n
 				if entry.IsDir() {
 					crateDir := filepath.Join(registrySrc, entry.Name(), name+"-"+version)
 					if info, err := os.Stat(crateDir); err == nil && info.IsDir() {
-						return crateDir, ""
+						return []vendorCandidate{{dir: crateDir, rel: ""}}
 					}
 				}
 			}
@@ -226,7 +230,7 @@ func findCargoDependencyDir(projectDir string, projectReader *securefs.Reader, n
 	if len(candidates) == 0 {
 		gaps.AddReason(nodeID, name+"@"+version, instsurf.GapUnavailable, nil)
 	}
-	return "", ""
+	return nil
 }
 
 // extractManifestIdentity reads the [package] name and version from a

@@ -52,6 +52,11 @@ const (
 	// GapIdentityMismatch means a candidate source directory exists but its
 	// manifest declares a different package name or version than requested.
 	GapIdentityMismatch GapReason = "identity-mismatch"
+	// GapAmbiguousSource means multiple candidate source directories passed
+	// identity validation for the same dependency. All candidates are scanned,
+	// but the ambiguity itself is a coverage signal — a repository-controlled
+	// duplicate could hide or suppress dependency-owned build code.
+	GapAmbiguousSource GapReason = "ambiguous-source"
 	// GapUnreadable is any other I/O failure (permissions, I/O error).
 	GapUnreadable GapReason = "unreadable"
 )
