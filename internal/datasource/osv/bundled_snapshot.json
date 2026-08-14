@@ -1,4 +1,1092 @@
 {
-  "generated_at": "2026-08-14T00:00:00Z",
-  "entries": []
+  "generated_at": "2026-08-14T19:30:18Z",
+  "entries": [
+    {
+      "ecosystem": "npm",
+      "name": "axios",
+      "version": "0.21.0",
+      "advisories": [
+        {
+          "id": "GHSA-3g43-6gmg-66jw",
+          "malicious": false,
+          "modified": "2026-06-12T19:30:10.204806Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-3p68-rc4w-qgx5",
+          "malicious": false,
+          "modified": "2026-05-08T13:46:43Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-43fc-jf86-j433",
+          "malicious": false,
+          "modified": "2026-05-08T14:03:50.604057Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-4w2v-q235-vp99",
+          "malicious": false,
+          "modified": "2023-11-08T04:03:23.856522Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-5c9x-8gcm-mpgx",
+          "malicious": false,
+          "modified": "2026-05-06T15:29:22.48411Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-62hf-57xw-28j9",
+          "malicious": false,
+          "modified": "2026-06-08T16:00:10.031349Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-6chq-wfr3-2hj9",
+          "malicious": false,
+          "modified": "2026-05-06T15:29:22.420628Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-7q8q-rj6j-mhjq",
+          "malicious": false,
+          "modified": "2026-08-02T03:56:48.829122Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-898c-q2cr-xwhg",
+          "malicious": false,
+          "modified": "2026-06-12T19:30:11.389775Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-cph5-m8f7-6c5x",
+          "malicious": false,
+          "modified": "2023-11-08T04:06:18.328201Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-fvcv-3m26-pcqx",
+          "malicious": false,
+          "modified": "2026-05-20T00:30:10.353644Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-hfxv-24rg-xrqf",
+          "malicious": false,
+          "modified": "2026-06-18T05:15:07.46838Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-j5f8-grm9-p9fc",
+          "malicious": false,
+          "modified": "2026-06-12T19:30:09.84782Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-jr5f-v2jv-69x6",
+          "malicious": false,
+          "modified": "2026-02-04T03:30:49.527969Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-m7pr-hjqh-92cm",
+          "malicious": false,
+          "modified": "2026-05-06T15:29:25.469495Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-mmx7-hfxf-jppx",
+          "malicious": false,
+          "modified": "2026-08-02T03:56:47.407301Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-p92q-9vqr-4j8v",
+          "malicious": false,
+          "modified": "2026-06-12T19:30:09.850549Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-pf86-5x62-jrwf",
+          "malicious": false,
+          "modified": "2026-05-06T15:29:21.690525Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-pjwm-pj3p-43mv",
+          "malicious": false,
+          "modified": "2026-07-20T12:46:22.030126Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-pmwg-cvhr-8vh7",
+          "malicious": false,
+          "modified": "2026-05-06T15:29:21.321963Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-vf2m-468p-8v99",
+          "malicious": false,
+          "modified": "2026-05-06T15:29:25.221206Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-w9j2-pvgh-6h63",
+          "malicious": false,
+          "modified": "2026-05-06T15:29:25.530276Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-wf5p-g6vw-rhxx",
+          "malicious": false,
+          "modified": "2026-02-04T02:41:22.966638Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-xhjh-pmcv-23jw",
+          "malicious": false,
+          "modified": "2026-05-06T15:29:21.46327Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-xx6v-rp6x-q39c",
+          "malicious": false,
+          "modified": "2026-05-06T15:29:24.391236Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "npm",
+      "name": "express",
+      "version": "4.17.1",
+      "advisories": [
+        {
+          "id": "GHSA-qw6h-vgh9-j6wx",
+          "malicious": false,
+          "modified": "2026-02-04T04:10:32.06992Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-rv95-896h-c2vc",
+          "malicious": false,
+          "modified": "2026-02-04T02:13:10.82136Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "npm",
+      "name": "follow-redirects",
+      "version": "1.13.0",
+      "advisories": [
+        {
+          "id": "GHSA-74fj-2j2h-c42q",
+          "malicious": false,
+          "modified": "2023-11-08T04:07:29.226977Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-cxjh-pqwp-8mfp",
+          "malicious": false,
+          "modified": "2026-02-04T03:39:16.669258Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-jchw-25xp-jwwc",
+          "malicious": false,
+          "modified": "2026-02-04T02:34:59.271979Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-pw2r-vq6v-hr8c",
+          "malicious": false,
+          "modified": "2023-11-08T04:07:35.415981Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-r4q5-vmmm-2653",
+          "malicious": false,
+          "modified": "2026-07-08T06:50:18.680803Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "npm",
+      "name": "glob-parent",
+      "version": "5.1.1",
+      "advisories": [
+        {
+          "id": "GHSA-ww39-953v-wcq6",
+          "malicious": false,
+          "modified": "2025-01-14T08:57:10.357296Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "npm",
+      "name": "lodash",
+      "version": "4.17.15",
+      "advisories": [
+        {
+          "id": "GHSA-29mw-wpgm-hmr9",
+          "malicious": false,
+          "modified": "2025-09-29T21:12:31.102523Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-35jh-r3h4-6jhm",
+          "malicious": false,
+          "modified": "2026-07-08T18:29:36.682352Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-f23m-r3pf-42rh",
+          "malicious": false,
+          "modified": "2026-07-08T07:10:26.957853Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-p6mc-m468-83gw",
+          "malicious": false,
+          "modified": "2025-08-12T21:56:17.174859Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-r5fr-rjxr-66jc",
+          "malicious": false,
+          "modified": "2026-07-08T08:11:11.75956Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-xxjr-mmjv-4gpg",
+          "malicious": false,
+          "modified": "2026-07-08T07:10:26.957853Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "npm",
+      "name": "minimist",
+      "version": "1.2.5",
+      "advisories": [
+        {
+          "id": "GHSA-xvch-5gv4-984h",
+          "malicious": false,
+          "modified": "2026-03-13T22:11:59.523514Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "npm",
+      "name": "node-fetch",
+      "version": "2.6.0",
+      "advisories": [
+        {
+          "id": "GHSA-r683-j2x4-v87g",
+          "malicious": false,
+          "modified": "2023-11-08T04:07:30.211593Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-w7rc-rwvf-8q5r",
+          "malicious": false,
+          "modified": "2026-07-08T06:00:29.567074Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "npm",
+      "name": "qs",
+      "version": "6.7.0",
+      "advisories": [
+        {
+          "id": "GHSA-6rw7-vpxm-498p",
+          "malicious": false,
+          "modified": "2026-03-04T15:06:33.112273Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-hrpp-h998-j3pp",
+          "malicious": false,
+          "modified": "2025-04-29T15:41:43Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-w7fw-mjwx-w883",
+          "malicious": false,
+          "modified": "2026-07-08T07:14:00.737913Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "npm",
+      "name": "tar",
+      "version": "4.4.13",
+      "advisories": [
+        {
+          "id": "GHSA-23hp-3jrh-7fpw",
+          "malicious": false,
+          "modified": "2026-07-21T14:59:37.690492Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-34x7-hfp2-rc4v",
+          "malicious": false,
+          "modified": "2026-02-04T03:15:55.338132Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-3jfq-g458-7qm9",
+          "malicious": false,
+          "modified": "2026-07-08T06:28:51.409971Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-5955-9wpr-37jh",
+          "malicious": false,
+          "modified": "2026-07-08T06:28:41.552506Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-83g3-92jg-28cx",
+          "malicious": false,
+          "modified": "2026-02-20T17:04:10.056655Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-8qq5-rm4j-mr97",
+          "malicious": false,
+          "modified": "2026-02-22T23:20:34.076378Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-8x88-c5mf-7j5w",
+          "malicious": false,
+          "modified": "2026-07-21T14:59:37.465292Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-9ppj-qmqm-q256",
+          "malicious": false,
+          "modified": "2026-03-13T04:44:43.03843Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-9r2w-394v-53qc",
+          "malicious": false,
+          "modified": "2026-07-08T06:29:15.266514Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-f5x3-32g6-xq36",
+          "malicious": false,
+          "modified": "2026-02-04T04:39:20.518853Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-gvwx-54wh-qm9j",
+          "malicious": false,
+          "modified": "2026-07-21T14:59:36.966687Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-qffp-2rhf-9h96",
+          "malicious": false,
+          "modified": "2026-03-10T10:43:54.597657Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-qq89-hq3f-393p",
+          "malicious": false,
+          "modified": "2026-07-08T06:28:24.989628Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-r292-9mhp-454m",
+          "malicious": false,
+          "modified": "2026-08-14T04:12:08.764112Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-r628-mhmh-qjhw",
+          "malicious": false,
+          "modified": "2026-07-08T06:27:29.457953Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-r6q2-hw4h-h46w",
+          "malicious": false,
+          "modified": "2026-03-16T14:31:36.090978Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-vmf3-w455-68vh",
+          "malicious": false,
+          "modified": "2026-06-18T20:29:25.007433Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-w8wr-v893-vjvp",
+          "malicious": false,
+          "modified": "2026-07-21T14:59:36.74304Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "npm",
+      "name": "ws",
+      "version": "7.4.0",
+      "advisories": [
+        {
+          "id": "GHSA-3h5v-q93c-6h6q",
+          "malicious": false,
+          "modified": "2026-05-13T15:34:13.111538Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-6fc8-4gx4-v693",
+          "malicious": false,
+          "modified": "2026-07-08T06:28:00.103808Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-96hv-2xvq-fx4p",
+          "malicious": false,
+          "modified": "2026-07-13T15:49:19.712225Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "certifi",
+      "version": "2018.11.29",
+      "advisories": [
+        {
+          "id": "GHSA-43fp-rhv2-5gv8",
+          "malicious": false,
+          "modified": "2025-02-12T18:53:14.421067Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-xqr8-7jwr-rhp7",
+          "malicious": false,
+          "modified": "2026-02-04T04:37:03.387402Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2022-42986",
+          "malicious": false,
+          "modified": "2023-11-08T04:08:19.066843Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2023-135",
+          "malicious": false,
+          "modified": "2023-11-08T04:13:04.801823Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2024-230",
+          "malicious": false,
+          "modified": "2026-06-10T17:14:18.78602Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "chardet",
+      "version": "3.0.4",
+      "advisories": []
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "click",
+      "version": "6.7",
+      "advisories": [
+        {
+          "id": "PYSEC-2026-2132",
+          "malicious": false,
+          "modified": "2026-07-13T07:15:21.899333Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "flask",
+      "version": "0.12.2",
+      "advisories": [
+        {
+          "id": "GHSA-562c-5r94-xh97",
+          "malicious": false,
+          "modified": "2025-02-21T05:29:40.872529Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-5wv5-4vpf-pj6m",
+          "malicious": false,
+          "modified": "2024-09-20T21:24:25.14056Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-68rp-wp8r-4726",
+          "malicious": false,
+          "modified": "2026-07-13T07:26:21.445447Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-m2qf-hxjv-5gpq",
+          "malicious": false,
+          "modified": "2025-02-21T05:42:17.33704Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2018-66",
+          "malicious": false,
+          "modified": "2023-11-08T03:59:39.887416Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2019-179",
+          "malicious": false,
+          "modified": "2023-11-08T04:00:40.602062Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2023-62",
+          "malicious": false,
+          "modified": "2023-11-08T04:12:28.231927Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-2151",
+          "malicious": false,
+          "modified": "2026-07-13T07:15:25.033843Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "idna",
+      "version": "2.8",
+      "advisories": [
+        {
+          "id": "GHSA-65pc-fj4g-8rjx",
+          "malicious": false,
+          "modified": "2026-07-08T17:45:15.021597Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-jjg7-2v4v-x38h",
+          "malicious": false,
+          "modified": "2026-02-04T03:49:45.087439Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2024-60",
+          "malicious": false,
+          "modified": "2026-06-10T17:01:21.102419Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-215",
+          "malicious": false,
+          "modified": "2026-06-16T16:15:04.639265Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "itsdangerous",
+      "version": "0.24",
+      "advisories": []
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "jinja2",
+      "version": "2.10",
+      "advisories": [
+        {
+          "id": "GHSA-462w-v97r-4m45",
+          "malicious": false,
+          "modified": "2024-09-24T21:03:59.802687Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-cpwx-vrp4-4pq7",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:16.836141Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-g3rq-g295-4j3m",
+          "malicious": false,
+          "modified": "2025-02-14T05:26:14.56516Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-h5c8-rqwp-cp95",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:26.82457Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-h75v-3vvj-5mfj",
+          "malicious": false,
+          "modified": "2026-07-07T17:57:30.872296Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-q2x7-8rv6-6q7h",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:44.376174Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2019-217",
+          "malicious": false,
+          "modified": "2023-11-08T04:00:58.644982Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2021-66",
+          "malicious": false,
+          "modified": "2023-11-08T04:03:28.543308Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1471",
+          "malicious": false,
+          "modified": "2026-07-07T17:46:43.358335Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1473",
+          "malicious": false,
+          "modified": "2026-07-07T17:46:13.853151Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1474",
+          "malicious": false,
+          "modified": "2026-07-07T17:46:13.83216Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1475",
+          "malicious": false,
+          "modified": "2026-07-07T17:46:13.842466Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "markupsafe",
+      "version": "1.0",
+      "advisories": []
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "pyyaml",
+      "version": "5.1",
+      "advisories": [
+        {
+          "id": "GHSA-3pqx-4fqf-j49f",
+          "malicious": false,
+          "modified": "2024-10-25T21:23:11.506576Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-6757-jp84-gxfx",
+          "malicious": false,
+          "modified": "2026-05-04T08:57:14.89756Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-8q59-q68h-6hv4",
+          "malicious": false,
+          "modified": "2026-02-04T03:33:10.792778Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2020-176",
+          "malicious": false,
+          "modified": "2023-11-08T04:01:30.627114Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2020-96",
+          "malicious": false,
+          "modified": "2026-05-04T08:57:14.89756Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2021-142",
+          "malicious": false,
+          "modified": "2023-11-08T04:02:26.414885Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "requests",
+      "version": "2.19.1",
+      "advisories": [
+        {
+          "id": "GHSA-9hjg-9r4m-mvj7",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:56.234172Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-9wx4-h78v-vm56",
+          "malicious": false,
+          "modified": "2026-07-07T17:57:17.012984Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-gc5v-m9x4-r6x2",
+          "malicious": false,
+          "modified": "2026-07-13T07:26:34.091663Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-j8r2-6x86-q33q",
+          "malicious": false,
+          "modified": "2026-02-04T03:34:13.807518Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-x84v-xcm2-53pg",
+          "malicious": false,
+          "modified": "2024-10-21T21:42:55.896669Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2018-28",
+          "malicious": false,
+          "modified": "2023-11-08T04:00:04.815794Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2023-74",
+          "malicious": false,
+          "modified": "2023-11-08T04:12:35.436175Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1872",
+          "malicious": false,
+          "modified": "2026-07-07T17:47:00.332079Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1873",
+          "malicious": false,
+          "modified": "2026-07-07T17:46:36.762141Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-2275",
+          "malicious": false,
+          "modified": "2026-07-13T07:15:43.964902Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "urllib3",
+      "version": "1.24.1",
+      "advisories": [
+        {
+          "id": "GHSA-2xpw-w6gg-jr37",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:33.872074Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-34jh-p97f-mpxf",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:53.715123Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-38jv-5279-wg99",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:31.346111Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-g4mx-q9vg-27p4",
+          "malicious": false,
+          "modified": "2026-02-04T03:30:16.767903Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-gm62-xv2j-4w53",
+          "malicious": false,
+          "modified": "2026-07-07T17:57:28.93161Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-gwvm-45gx-3cf8",
+          "malicious": false,
+          "modified": "2024-11-18T23:24:00.169548Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-mh33-7rrq-662w",
+          "malicious": false,
+          "modified": "2024-11-18T22:25:21.266722Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-pq67-6m6q-mj2v",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:41.872294Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-qccp-gfcp-xxvc",
+          "malicious": false,
+          "modified": "2026-05-20T08:11:43.145797Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-r64q-w8jr-g9qp",
+          "malicious": false,
+          "modified": "2024-11-18T23:01:35.378516Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-v845-jxx5-vc9f",
+          "malicious": false,
+          "modified": "2026-02-04T02:58:30.152562Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-wqvq-5m8c-6g24",
+          "malicious": false,
+          "modified": "2024-11-18T22:47:07.79272Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2019-132",
+          "malicious": false,
+          "modified": "2023-11-08T04:01:00.047784Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2019-133",
+          "malicious": false,
+          "modified": "2023-11-08T04:01:00.967964Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2020-148",
+          "malicious": false,
+          "modified": "2023-11-08T04:03:14.251187Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2023-192",
+          "malicious": false,
+          "modified": "2023-11-08T04:13:33.452167Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2023-207",
+          "malicious": false,
+          "modified": "2026-06-10T17:02:48.915096Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2023-212",
+          "malicious": false,
+          "modified": "2023-11-08T04:13:39.16545Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-141",
+          "malicious": false,
+          "modified": "2026-05-20T09:19:20.983812Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1994",
+          "malicious": false,
+          "modified": "2026-07-07T17:48:15.379954Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1995",
+          "malicious": false,
+          "modified": "2026-07-07T17:48:15.400192Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1996",
+          "malicious": false,
+          "modified": "2026-07-07T17:48:15.382053Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1998",
+          "malicious": false,
+          "modified": "2026-07-07T17:47:54.140852Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1999",
+          "malicious": false,
+          "modified": "2026-07-07T17:47:54.161376Z",
+          "source": "osv"
+        }
+      ]
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "werkzeug",
+      "version": "0.15.0",
+      "advisories": [
+        {
+          "id": "GHSA-29vq-49wr-vm6x",
+          "malicious": false,
+          "modified": "2026-07-13T07:26:55.904978Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-2g68-c3qc-8985",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:15.006571Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-87hc-h4r5-73f7",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:19.044748Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-f9vj-2wh5-fj8j",
+          "malicious": false,
+          "modified": "2026-07-07T17:56:25.762524Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-gq9m-qvpx-68hc",
+          "malicious": false,
+          "modified": "2024-11-19T18:22:43.515928Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-hgf8-39gv-g3f2",
+          "malicious": false,
+          "modified": "2026-07-07T17:57:36.044527Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-j544-7q9p-6xp8",
+          "malicious": false,
+          "modified": "2026-07-07T11:56:35.016614Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-px8h-6qxv-m22q",
+          "malicious": false,
+          "modified": "2026-02-04T02:50:59.290989Z",
+          "source": "osv"
+        },
+        {
+          "id": "GHSA-xg9f-g7g7-2323",
+          "malicious": false,
+          "modified": "2026-02-04T03:57:31.773504Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2019-140",
+          "malicious": false,
+          "modified": "2023-11-08T04:01:10.893476Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2022-203",
+          "malicious": false,
+          "modified": "2023-11-08T04:09:13.275498Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2023-221",
+          "malicious": false,
+          "modified": "2023-11-08T18:38:34.170214Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2023-57",
+          "malicious": false,
+          "modified": "2023-11-08T04:11:43.09167Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2023-58",
+          "malicious": false,
+          "modified": "2023-11-08T04:11:52.539843Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-1065",
+          "malicious": false,
+          "modified": "2026-07-07T11:45:36.92007Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-2043",
+          "malicious": false,
+          "modified": "2026-07-07T17:47:56.449875Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-2044",
+          "malicious": false,
+          "modified": "2026-07-07T17:47:56.418445Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-2045",
+          "malicious": false,
+          "modified": "2026-07-07T17:47:56.415783Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-2046",
+          "malicious": false,
+          "modified": "2026-07-07T17:47:56.418201Z",
+          "source": "osv"
+        },
+        {
+          "id": "PYSEC-2026-2320",
+          "malicious": false,
+          "modified": "2026-07-13T07:15:48.093424Z",
+          "source": "osv"
+        }
+      ]
+    }
+  ]
 }
