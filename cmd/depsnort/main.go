@@ -362,7 +362,14 @@ func prefetchReleases(g *graph.Graph, src datasource.RegistrySource) (map[string
 // queries the data-source layer once, returning advisories keyed by node ID.
 // This is the pipeline's data-source stage — checks judge these facts, they do
 // not fetch (Decision D-03).
-func prefetchAdvisories(g *graph.Graph, src *osv.Client) (map[string][]datasource.Advisory, error) {
+// prefetchAdvisories also returns the queried coordinates paired with their
+// results as exportable SnapshotEntry records — -osv-export writes these out
+// so a later air-gapped scan can bootstrap from exactly what this run saw,
+// without anyone hand-authoring snapshot JSON. Callers must only use entries
+// when err is nil: on a batch failure results (and therefore entries) may be
+// partial, and a partial snapshot silently masquerading as complete is worse
+// than no snapshot at all.
+func prefetchAdvisories(g *graph.Graph, src *osv.Client) (map[string][]datasource.Advisory, []datasource.SnapshotEntry, error) {
 	roots := map[string]bool{}
 	for _, r := range g.Roots {
 		roots[r] = true
@@ -380,15 +387,26 @@ func prefetchAdvisories(g *graph.Graph, src *osv.Client) (map[string][]datasourc
 	}
 	byNode := make(map[string][]datasource.Advisory, len(ids))
 	if len(coords) == 0 {
-		return byNode, nil
+		return byNode, nil, nil
 	}
 	results, err := src.QueryBatch(context.Background(), coords)
+	entries := make([]datasource.SnapshotEntry, 0, len(coords))
 	for i := range results {
 		if i < len(ids) {
 			byNode[ids[i]] = results[i]
 		}
+		if i < len(coords) {
+			adv := results[i]
+			if adv == nil {
+				adv = []datasource.Advisory{}
+			}
+			entries = append(entries, datasource.SnapshotEntry{
+				Ecosystem: coords[i].Ecosystem, Name: coords[i].Name, Version: coords[i].Version,
+				Advisories: adv,
+			})
+		}
 	}
-	return byNode, err
+	return byNode, entries, err
 }
 
 func cmdScan(args []string) int {
@@ -400,6 +418,7 @@ func cmdScan(args []string) int {
 	noOSV := fs.Bool("no-osv", false, "skip the OSV data-source layer entirely")
 	cacheDir := fs.String("osv-cache", defaultCacheDir("osv"), "OSV advisory cache directory")
 	snapshotPath := fs.String("osv-snapshot", "", "path to a JSON advisory snapshot to import into the OSV cache before scanning (bootstraps -offline with zero network calls)")
+	exportPath := fs.String("osv-export", "", "write this scan's OSV results to path as a JSON snapshot for later -osv-snapshot import; requires live network access (incompatible with -offline/-no-osv)")
 	regCacheDir := fs.String("registry-cache", defaultCacheDir("registry"), "registry metadata cache directory")
 	noRegistry := fs.Bool("no-registry", false, "skip registry-metadata source (disables VC-004/VC-005)")
 	noInstallSurface := fs.Bool("no-install-surface", false, "skip static install-hook extraction")
@@ -412,6 +431,10 @@ func cmdScan(args []string) int {
 	fs.StringVar(&outSpec, "out", "", "alias for -o")
 	localStamp := fs.Bool("local", false, "stamp report paths in local time instead of UTC")
 	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *exportPath != "" && (*offline || *noOSV) {
+		fmt.Fprintln(os.Stderr, "depsnort: -osv-export requires live network access; incompatible with -offline and -no-osv")
 		return exitUsage
 	}
 	path := "."
@@ -542,12 +565,22 @@ func cmdScan(args []string) int {
 	}
 	if !*noOSV {
 		client := osv.New(datasource.NewCache(*cacheDir, 24*time.Hour), *offline)
-		advisories, qErr := prefetchAdvisories(g, client)
+		advisories, exportEntries, qErr := prefetchAdvisories(g, client)
 		ctx.Advisories = advisories
 		cov := emit.DataSourceCoverage{Name: client.Name(), Stats: client.Stats}
 		if qErr != nil {
 			cov.Error = qErr.Error()
 			fmt.Fprintf(os.Stderr, "depsnort: warning: OSV coverage degraded: %v\n", qErr)
+		}
+		if *exportPath != "" {
+			if qErr != nil {
+				fmt.Fprintf(os.Stderr, "depsnort: osv-export skipped: OSV query did not complete cleanly (%v)\n", qErr)
+			} else if err := datasource.ExportSnapshot(*exportPath, exportEntries); err != nil {
+				fmt.Fprintf(os.Stderr, "depsnort: osv-export: %v\n", err)
+				return exitInternal
+			} else {
+				fmt.Fprintf(os.Stderr, "depsnort: exported %d advisory record(s) to %s\n", len(exportEntries), *exportPath)
+			}
 		}
 		// A source that errored, or returned no data for coordinates it was
 		// asked about (an offline miss / empty cache), is a coverage gap (F-02).

@@ -122,6 +122,25 @@ a periodically-refreshed snapshot file alongside the repo:
 ./depsnort scan -osv-snapshot advisories-snapshot.json -offline .
 ```
 
+That snapshot file doesn't have to be hand-written. `-osv-export <file>` writes
+the results of a NORMAL, network-connected scan out in the same format — run it
+once somewhere with network access, then ship the resulting file to every
+air-gapped environment that needs `-osv-snapshot`:
+
+```
+# once, with network access: scan and capture what OSV said
+./depsnort scan -osv-export advisories-snapshot.json .
+
+# everywhere else: bootstrap from that file, zero network calls
+./depsnort scan -osv-snapshot advisories-snapshot.json -offline .
+```
+
+`-osv-export` requires a live OSV query to have something to export, so it's
+rejected together with `-offline` or `-no-osv` (exit 64, usage error) rather
+than silently writing an empty or stale file. If the live query itself fails
+partway through, the export is skipped with a warning instead of writing a
+snapshot that looks complete but isn't.
+
 Try it against the bundled fixtures:
 
 ```

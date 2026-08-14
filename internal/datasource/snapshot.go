@@ -64,3 +64,20 @@ func ImportSnapshot(c *Cache, path string, now time.Time) (int, error) {
 	}
 	return len(entries), nil
 }
+
+// ExportSnapshot writes entries to path as the same JSON format ImportSnapshot
+// reads, so a scan run with real network access can produce a file a later
+// air-gapped scan bootstraps from — closing the loop without anyone having to
+// hand-author snapshot JSON. Indented for readability, since a snapshot file
+// is meant to be reviewed, diffed, and committed alongside a repo, not just
+// machine-consumed.
+func ExportSnapshot(path string, entries []SnapshotEntry) error {
+	raw, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return fmt.Errorf("datasource: export %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		return fmt.Errorf("datasource: export %s: %w", path, err)
+	}
+	return nil
+}
