@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
@@ -24,8 +25,22 @@ type sarifLog struct {
 }
 
 type sarifRun struct {
-	Tool    sarifTool     `json:"tool"`
-	Results []sarifResult `json:"results"`
+	Tool        sarifTool         `json:"tool"`
+	Results     []sarifResult     `json:"results"`
+	Invocations []sarifInvocation `json:"invocations,omitempty"`
+}
+
+// sarifInvocation carries the run-level facts SARIF-only consumers (FN-01)
+// need to distinguish a genuine all-clear from an incomplete scan: results
+// being an empty array is not, by itself, evidence the tree was fully seen.
+type sarifInvocation struct {
+	ExecutionSuccessful        bool                `json:"executionSuccessful"`
+	ToolExecutionNotifications []sarifNotification `json:"toolExecutionNotifications,omitempty"`
+}
+
+type sarifNotification struct {
+	Level   string    `json:"level"` // "warning" | "note"
+	Message sarifText `json:"message"`
 }
 
 type sarifTool struct {
@@ -81,6 +96,48 @@ func sarifLevel(f finding.Finding) string {
 	}
 }
 
+// coverageNotifications translates coverage facts the JSON report already
+// carries (res.Coverage, info.DataSources) into SARIF notifications, so a
+// SARIF-only consumer can tell an incomplete scan from a genuine all-clear
+// (FN-01) instead of reading zero results as "nothing found".
+func coverageNotifications(cov graph.Coverage, sources []DataSourceCoverage) []sarifNotification {
+	var notes []sarifNotification
+
+	if cov.Incomplete() {
+		notes = append(notes, sarifNotification{
+			Level:   "warning",
+			Message: sarifText{Text: "depSNORT: " + cov.IncompleteSummary()},
+		})
+	}
+
+	// Flat resolution is a lockfile-format limitation, not a scan failure
+	// (coverage.go's own Degraded doc comment) — stderr deliberately never
+	// warns on this alone, so this stays a "note", never a "warning".
+	if len(cov.FlatEcosystems) > 0 {
+		notes = append(notes, sarifNotification{
+			Level: "note",
+			Message: sarifText{Text: fmt.Sprintf(
+				"depSNORT: flat lockfile resolution for %s — the lockfile format "+
+					"records no inter-package relationships, so depth is one layer by "+
+					"format, not by fact.",
+				strings.Join(cov.FlatEcosystems, ", "))},
+		})
+	}
+
+	for _, s := range sources {
+		if s.Error == "" && s.Stats.Gaps == 0 {
+			continue
+		}
+		msg := fmt.Sprintf("depSNORT: data source %q degraded: %d gap(s)", s.Name, s.Stats.Gaps)
+		if s.Error != "" {
+			msg += fmt.Sprintf(" (%s)", s.Error)
+		}
+		notes = append(notes, sarifNotification{Level: "warning", Message: sarifText{Text: msg}})
+	}
+
+	return notes
+}
+
 // Emit implements Emitter.
 func (SARIF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) error {
 	run := sarifRun{
@@ -88,6 +145,13 @@ func (SARIF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo)
 			Name:           "depSNORT",
 			Version:        Version,
 			InformationURI: "https://ihbv.io",
+		}},
+		Results: []sarifResult{},
+		Invocations: []sarifInvocation{{
+			// No code path reaches Emit after a hard failure — cmdScan returns
+			// exitInternal before ever calling an emitter — so this is always true.
+			ExecutionSuccessful:        true,
+			ToolExecutionNotifications: coverageNotifications(res.Coverage, info.DataSources),
 		}},
 	}
 

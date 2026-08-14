@@ -217,25 +217,6 @@ func TestMarkerExclusionIsNarrowAndDisclosed(t *testing.T) {
 	}
 }
 
-func TestMarkerExcludesLinux(t *testing.T) {
-	cases := map[string]bool{
-		`sys_platform=='win32'`:                true,
-		`sys_platform == 'win32'`:              true,
-		`sys_platform=="win32"`:                true,
-		`os_name=='nt'`:                        true,
-		`platform_system=='Windows'`:           true,
-		`platform_system == "Windows"`:         true,
-		`python_version < '3.9'`:               false,
-		`sys_platform=='win32' and extra=='x'`: false,
-		``:                                     false,
-	}
-	for marker, want := range cases {
-		if got := markerExcludesLinux(marker); got != want {
-			t.Errorf("markerExcludesLinux(%q) = %v, want %v", marker, got, want)
-		}
-	}
-}
-
 // The PyPI root version is always a placeholder — nothing in this adapter
 // executes setup.py/pyproject.toml to get a real one. That must be
 // disclosed so a reader can tell "genuinely 0.0.0" apart from "could not

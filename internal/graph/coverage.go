@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -109,6 +110,25 @@ func (c Coverage) Incomplete() bool {
 		len(c.DataSourceGaps) > 0 ||
 		c.ExtractorGaps > 0 ||
 		c.FailedProjects > 0
+}
+
+// IncompleteSummary renders "coverage is incomplete" as one sentence, shared
+// verbatim between the CLI's stderr warning and SARIF's execution
+// notification so the two surfaces never describe the same fact differently.
+func (c Coverage) IncompleteSummary() string {
+	var b strings.Builder
+	fmt.Fprintf(&b,
+		"coverage is incomplete: %d unresolved dependenc(ies) across %d root(s), "+
+			"%d orphaned package(s), %d failed project(s), %d partial install-surface extraction(s)",
+		c.Unresolved, c.IncompleteRoots, c.Orphans, c.FailedProjects, c.ExtractorGaps)
+	if len(c.ExtractorGapReasons) > 0 {
+		fmt.Fprintf(&b, " [%s]", strings.Join(c.ExtractorGapReasons, ", "))
+	}
+	if len(c.DataSourceGaps) > 0 {
+		fmt.Fprintf(&b, ", degraded data source(s): %s", strings.Join(c.DataSourceGaps, ", "))
+	}
+	b.WriteString(". This report is NOT an all-clear.")
+	return b.String()
 }
 
 // Coverage computes the resolution-coverage facts recorded on the graph.

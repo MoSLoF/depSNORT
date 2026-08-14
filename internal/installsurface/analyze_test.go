@@ -316,6 +316,99 @@ setup(**setup_kwargs)
 	}
 }
 
+func TestExtractBuildRequiresSingleLine(t *testing.T) {
+	toml := `[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+`
+	got := ExtractBuildRequires(toml)
+	want := []string{"setuptools>=64", "wheel"}
+	if len(got) != len(want) {
+		t.Fatalf("ExtractBuildRequires = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExtractBuildRequiresMultiLine(t *testing.T) {
+	toml := `[build-system]
+requires = [
+    "scikit-build-core>=0.5",
+    "cython",
+]
+build-backend = "scikit_build_core.build"
+`
+	got := ExtractBuildRequires(toml)
+	want := []string{"scikit-build-core>=0.5", "cython"}
+	if len(got) != len(want) {
+		t.Fatalf("ExtractBuildRequires = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExtractBuildRequiresAbsent(t *testing.T) {
+	if got := ExtractBuildRequires(`[project]
+name = "foo"
+`); got != nil {
+		t.Errorf("ExtractBuildRequires with no [build-system] = %v, want nil", got)
+	}
+}
+
+func TestIsKnownBuildBackend(t *testing.T) {
+	tests := []struct {
+		backend string
+		want    bool
+	}{
+		{"setuptools.build_meta", true},
+		{"setuptools.build_meta:__legacy__", true},
+		{"hatchling.build", true},
+		{"poetry.core.masonry.api", true},
+		{"evil_backend.api", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := IsKnownBuildBackend(tt.backend); got != tt.want {
+			t.Errorf("IsKnownBuildBackend(%q) = %v, want %v", tt.backend, got, tt.want)
+		}
+	}
+}
+
+func TestMatchBuildBackendRequiresExact(t *testing.T) {
+	matched, ok, ambiguous := MatchBuildBackendRequires(
+		"scikit_build_core.build", []string{"scikit-build-core==0.8.0", "cython"})
+	if !ok || ambiguous {
+		t.Fatalf("ok=%v ambiguous=%v, want ok=true ambiguous=false", ok, ambiguous)
+	}
+	if matched != "scikit-build-core==0.8.0" {
+		t.Errorf("matched = %q, want %q", matched, "scikit-build-core==0.8.0")
+	}
+}
+
+func TestMatchBuildBackendRequiresAmbiguous(t *testing.T) {
+	_, ok, ambiguous := MatchBuildBackendRequires(
+		"scikit_build_core.build", []string{"scikit-build-core==0.8.0", "scikit_build_core==0.9.0"})
+	if ok {
+		t.Error("ok should be false when more than one candidate matches")
+	}
+	if !ambiguous {
+		t.Error("ambiguous should be true when more than one candidate matches")
+	}
+}
+
+func TestMatchBuildBackendRequiresMissing(t *testing.T) {
+	_, ok, ambiguous := MatchBuildBackendRequires("evil_backend.api", []string{"requests==2.31.0"})
+	if ok || ambiguous {
+		t.Errorf("ok=%v ambiguous=%v, want both false when no candidate matches", ok, ambiguous)
+	}
+}
+
 func TestSetupPyCommentAndErrorURLsNotNetwork(t *testing.T) {
 	setupPy := `
 # See https://github.com/grpc/grpc/issues/22491

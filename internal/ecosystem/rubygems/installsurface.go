@@ -14,10 +14,12 @@ import (
 // D-26).
 //
 // A gem with a native extension compiles it at install time by running
-// extconf.rb — arbitrary Ruby, executed during `gem install`. This reads the
-// root gem's extconf.rb (searched at the conventional locations) and its
-// gemspec from the on-disk checkout and analyzes them STATICALLY. Nothing is
-// executed (Decision D-04).
+// extconf.rb — arbitrary Ruby, executed during `gem install`. A gem built via
+// rake-compiler instead declares a `compile` Rake task that does the same
+// thing under `rake compile`. This reads the root gem's extconf.rb (searched
+// at the conventional locations), its gemspec, and its Rakefile from the
+// on-disk checkout and analyzes them STATICALLY. Nothing is executed
+// (Decision D-04).
 //
 // Scope is the root gem only: transitive gems are fetched from rubygems.org and
 // are not present in a source checkout. A native extension is ordinary, so an
@@ -30,7 +32,8 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	var gaps instsurf.Gaps
 	extconf := findExtconf(dir, &gaps)
 	gemspec := readFirstGemspec(dir, &gaps)
-	if extconf == "" && gemspec == "" {
+	rakefile := findRakefile(dir, &gaps)
+	if extconf == "" && gemspec == "" && rakefile == "" {
 		return gaps.Err()
 	}
 
@@ -42,7 +45,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		if n.Kind != graph.KindPackage || n.Ecosystem != "gem" || !roots[n.ID] {
 			continue
 		}
-		surface := installsurface.AnalyzeRuby(extconf, gemspec)
+		surface := installsurface.AnalyzeRuby(extconf, gemspec, rakefile)
 		if len(surface.Hooks) > 0 {
 			instsurf.AddToGraph(g, n, surface)
 		}
@@ -95,6 +98,33 @@ func findExtconf(dir string, gaps *instsurf.Gaps) string {
 			if s, ok := read(filepath.Join("ext", e.Name(), "extconf.rb")); ok {
 				return s
 			}
+		}
+	}
+	return ""
+}
+
+// findRakefile looks for a Rakefile at the gem root — the conventional home
+// for a rake-compiler native-extension "compile" task. Root-gem scope only
+// (same documented limitation as extconf.rb — transitive gems aren't on
+// disk).
+func findRakefile(dir string, gaps *instsurf.Gaps) string {
+	// Contained reads (F-03): a Rakefile symlinked out of the gem is refused.
+	reader, err := securefs.NewReader(dir)
+	if err != nil {
+		gaps.Add("", dir, err)
+		return ""
+	}
+	read := func(rel string) (string, bool) {
+		b, err := reader.ReadFile(rel)
+		if err != nil {
+			gaps.Add("", filepath.Join(dir, rel), err)
+			return "", false
+		}
+		return string(b), len(b) > 0
+	}
+	for _, c := range []string{"Rakefile", "rakefile"} {
+		if s, ok := read(c); ok {
+			return s
 		}
 	}
 	return ""

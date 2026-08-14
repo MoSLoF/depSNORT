@@ -34,6 +34,9 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 
 	ctx := context.Background()
 	var gaps instsurf.Gaps
+	// processed dedupes PEP 517 build-backend resolution: a backend used by
+	// several consumers is fetched and analyzed once, not once per consumer.
+	processed := map[string]bool{}
 
 	for _, n := range g.SortedNodes() {
 		if n.Kind != graph.KindPackage {
@@ -46,7 +49,7 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		if roots[n.ID] {
 			// Root project: read setup.py/pyproject.toml from the local
 			// project directory rather than fetching from PyPI.
-			extractLocalPython(projectDir, g, n, &gaps)
+			a.extractLocalPython(ctx, projectDir, g, n, &gaps, processed)
 			continue
 		}
 
@@ -71,8 +74,19 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 				n.Attr = map[string]string{}
 			}
 			n.Attr["pypi.wheel_only"] = "true"
+			// A wheel has no setup.py/build-backend to analyze (build-time/sdist
+			// concepts) — only .pth files recovered from the wheel's zip, if any.
+			if len(files.PthFiles) == 0 {
+				continue
+			}
+			surface := installsurface.AnalyzePython("", "", files.PthFiles)
+			if len(surface.Hooks) > 0 {
+				addPySurfaceToGraph(g, n, surface)
+			}
 			continue
 		}
+
+		a.resolveBuildBackend(ctx, g, n, files.PyprojectToml, processed, &gaps)
 
 		surface := installsurface.AnalyzePython(files.SetupPy, files.PyprojectToml, files.PthFiles)
 		if len(surface.Hooks) > 0 {
@@ -85,7 +99,7 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 // extractLocalPython reads setup.py and pyproject.toml from the local project
 // directory and analyzes them for install-time capabilities. This handles the
 // root project, which isn't published on PyPI and can't be fetched via sdist.
-func extractLocalPython(dir string, g *graph.Graph, n *graph.Node, gaps *instsurf.Gaps) {
+func (a *Adapter) extractLocalPython(ctx context.Context, dir string, g *graph.Graph, n *graph.Node, gaps *instsurf.Gaps, processed map[string]bool) {
 	// Contained reads (F-03): a setup.py or pyproject.toml symlinked out of the
 	// project is refused rather than followed — and that refusal is recorded as
 	// a gap rather than silently read as "this project has no setup.py" (R-01).
@@ -108,6 +122,8 @@ func extractLocalPython(dir string, g *graph.Graph, n *graph.Node, gaps *instsur
 	if len(setupPy) == 0 && len(pyprojectToml) == 0 {
 		return
 	}
+
+	a.resolveBuildBackend(ctx, g, n, string(pyprojectToml), processed, gaps)
 
 	surface := installsurface.AnalyzePython(string(setupPy), string(pyprojectToml), nil)
 	if len(surface.Hooks) > 0 {

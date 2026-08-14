@@ -2,6 +2,7 @@ package pypi
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -15,6 +16,7 @@ import (
 	neturl "net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +35,12 @@ var (
 	maxTarEntries          = 20000             // tar entry count cap (entry-flood guard)
 	maxPthFiles            = 64                // retained .pth file count cap
 	maxPthTotalBytes int64 = 1 * 1024 * 1024   // cumulative retained .pth bytes
+	// maxWheelSize bounds the whole wheel download, buffered in memory in one
+	// shot (archive/zip needs the full byte stream, unlike the tar path's
+	// sequential read) — large compiled wheels commonly exceed this and become a
+	// gap rather than a silent skip; that's an accepted, intentional trade.
+	maxWheelSize  int64 = 50 * 1024 * 1024
+	maxZipEntries       = 20000 // wheel zip entry count cap (entry-flood guard)
 )
 
 // Hostile-input failures. Each is a COVERAGE GAP, not a clean result: the caller
@@ -128,7 +136,8 @@ func allowedSdistHost(host string) bool {
 	return false
 }
 
-// sdistFiles holds the install-time files extracted from an sdist.
+// sdistFiles holds the install-time files extracted from a package's sdist,
+// or — when WheelOnly — any .pth files recovered from its wheel instead.
 type sdistFiles struct {
 	SetupPy       string            `json:"setup_py,omitempty"`
 	PyprojectToml string            `json:"pyproject_toml,omitempty"`
@@ -144,7 +153,10 @@ type sdistFiles struct {
 // clean result, so bumping this invalidates them wholesale.
 //
 // Bump this whenever a change alters what a cached record is allowed to mean.
-const sdistSemantics = "v2"
+// v2 -> v3: WheelOnly:true used to mean "no .pth evidence was ever looked for";
+// it now means a wheel was fetched and its .pth files (if any) were examined. A
+// stale v2 record would silently suppress newly-recoverable .pth evidence.
+const sdistSemantics = "v3"
 
 func sdistCacheKey(name, version string) string {
 	return "pypi-sdist|" + sdistSemantics + "|" + name + "|" + version
@@ -177,14 +189,28 @@ func (f *SdistFetcher) Fetch(ctx context.Context, name, version string) (*sdistF
 	}
 
 	var files sdistFiles
-	if sdistURL == "" {
-		files.WheelOnly = true
-	} else {
+	if sdistURL != "" {
 		extracted, err := f.downloadAndExtract(ctx, sdistURL, wantSHA)
 		if err != nil {
 			return nil, fmt.Errorf("pypi-sdist: extracting %s@%s: %w", name, version, err)
 		}
 		files = *extracted
+	} else {
+		// No sdist: recover what we can from the wheel. Wheels have no
+		// setup.py/build-backend to analyze (that's a build-time/sdist concept) —
+		// only .pth files, which land unpacked directly into site-packages.
+		files.WheelOnly = true
+		wheelURL, wheelSHA, err := f.findWheelURL(ctx, name, version)
+		if err != nil {
+			return nil, err
+		}
+		if wheelURL != "" {
+			extracted, err := f.downloadAndExtractWheel(ctx, wheelURL, wheelSHA)
+			if err != nil {
+				return nil, fmt.Errorf("pypi-sdist: extracting wheel %s@%s: %w", name, version, err)
+			}
+			files.PthFiles = extracted.PthFiles
+		}
 	}
 
 	// Cache the result.
@@ -272,9 +298,11 @@ func (f *SdistFetcher) findSdistURL(ctx context.Context, name, version string) (
 	return "", "", nil // genuinely wheel-only: no sdist was published
 }
 
-// downloadAndExtract fetches an sdist tarball and extracts the install-time
-// files we need: setup.py, pyproject.toml, and any .pth files.
-func (f *SdistFetcher) downloadAndExtract(ctx context.Context, rawURL, wantSHA string) (*sdistFiles, error) {
+// fetchVerified downloads rawURL, bounded to maxSize bytes, and verifies it
+// against wantSHA. It is the shared integrity gate for both the sdist (tar)
+// and wheel (zip) paths, so the two archive formats can never drift apart on
+// host allowlisting, size bounds, or digest verification (finding R-02).
+func (f *SdistFetcher) fetchVerified(ctx context.Context, rawURL, wantSHA string, maxSize int64) ([]byte, error) {
 	// Validate the ORIGIN before the request, not just redirect targets. This URL
 	// comes from index metadata, so an attacker who can influence that response
 	// could otherwise steer the fetch to any host (finding R-02).
@@ -301,15 +329,16 @@ func (f *SdistFetcher) downloadAndExtract(ctx context.Context, rawURL, wantSHA s
 		return nil, fmt.Errorf("download %s: HTTP %d", rawURL, resp.StatusCode)
 	}
 
-	// Read the compressed artifact into memory ONCE (bounded by the size cap),
-	// so the digest is computed over exactly the bytes PyPI served. Streaming the
-	// hash through gzip would miss trailing bytes the tar reader never pulls.
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxSdistSize+1))
+	// Read the artifact into memory ONCE (bounded by the size cap), so the digest
+	// is computed over exactly the bytes PyPI served. Streaming the hash through
+	// gzip/zip decoding would miss trailing bytes the reader never pulls, and
+	// archive/zip needs random access to the whole buffer regardless.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(raw)) > maxSdistSize {
-		return nil, fmt.Errorf("%w: compressed sdist over %d bytes", ErrSdistTooLarge, maxSdistSize)
+	if int64(len(raw)) > maxSize {
+		return nil, fmt.Errorf("%w: download of %s over %d bytes", ErrSdistTooLarge, rawURL, maxSize)
 	}
 
 	// Integrity: the digest is REQUIRED. Treating an absent one as "skip
@@ -323,6 +352,17 @@ func (f *SdistFetcher) downloadAndExtract(ctx context.Context, rawURL, wantSHA s
 		return nil, ErrSdistDigestMismatch
 	}
 
+	return raw, nil
+}
+
+// downloadAndExtract fetches an sdist tarball and extracts the install-time
+// files we need: setup.py, pyproject.toml, and any .pth files.
+func (f *SdistFetcher) downloadAndExtract(ctx context.Context, rawURL, wantSHA string) (*sdistFiles, error) {
+	raw, err := f.fetchVerified(ctx, rawURL, wantSHA, maxSdistSize)
+	if err != nil {
+		return nil, err
+	}
+
 	gz, err := gzip.NewReader(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSdistCorrupt, err)
@@ -330,6 +370,139 @@ func (f *SdistFetcher) downloadAndExtract(ctx context.Context, rawURL, wantSHA s
 	defer gz.Close()
 
 	return extractFromTar(gz)
+}
+
+// findWheelURL queries the PyPI JSON API and returns a wheel download URL and
+// its expected SHA-256 digest, for use when no sdist is published. Returns
+// "", "" if no wheel is usable either (mirrors findSdistURL's
+// oversize-vs-absent distinction: a wheel that EXISTS but is oversized is a
+// gap, not silent absence).
+func (f *SdistFetcher) findWheelURL(ctx context.Context, name, version string) (string, string, error) {
+	endpoint := fmt.Sprintf("https://pypi.org/pypi/%s/%s/json", name, version)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := f.HTTP.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("pypi-sdist: querying %s: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", "", nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("pypi-sdist: %s returned %d", endpoint, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
+	if err != nil {
+		return "", "", err
+	}
+
+	var info pypiVersionInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return "", "", fmt.Errorf("pypi-sdist: parsing response for %s@%s: %w", name, version, err)
+	}
+
+	var sawOversize bool
+	var candidates []pypiURL
+	for _, u := range info.URLs {
+		if u.PackageType != "bdist_wheel" {
+			continue
+		}
+		if u.Size > maxWheelSize {
+			sawOversize = true
+			continue
+		}
+		candidates = append(candidates, u)
+	}
+	if len(candidates) == 0 {
+		if sawOversize {
+			return "", "", fmt.Errorf("%w: every candidate wheel for %s@%s declares a size over %d bytes; "+
+				"install surface unexamined", ErrSdistTooLarge, name, version, maxWheelSize)
+		}
+		return "", "", nil // genuinely no usable wheel published
+	}
+	// Several wheel variants (platform/abi tags) may exist for one release; pick
+	// deterministically rather than depending on JSON array order.
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].URL < candidates[j].URL })
+	return candidates[0].URL, candidates[0].Digests.SHA256, nil
+}
+
+// downloadAndExtractWheel fetches a wheel and recovers any .pth files from it.
+// Wheels carry no setup.py or build-backend declaration (those are sdist/
+// build-time concepts) — .pth is the only install-time surface a wheel can
+// still disclose.
+func (f *SdistFetcher) downloadAndExtractWheel(ctx context.Context, rawURL, wantSHA string) (*sdistFiles, error) {
+	raw, err := f.fetchVerified(ctx, rawURL, wantSHA, maxWheelSize)
+	if err != nil {
+		return nil, err
+	}
+	return extractPthFromZip(raw)
+}
+
+// extractPthFromZip reads a wheel's zip central directory and extracts any
+// .pth files it contains. It reuses the sdist path's Err* sentinels and
+// retention caps as-is: it's the same resource (an attacker-controlled
+// archive) being protected, and the container format is incidental.
+func extractPthFromZip(raw []byte) (*sdistFiles, error) {
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSdistCorrupt, err)
+	}
+	if len(zr.File) > maxZipEntries {
+		return nil, ErrSdistTooManyEntries
+	}
+
+	files := &sdistFiles{}
+	var pthBytes int64
+
+	for _, zf := range zr.File {
+		name := path.Clean(zf.Name)
+		basename := path.Base(name)
+		if !strings.HasSuffix(basename, ".pth") {
+			continue
+		}
+
+		// The central directory's declared size is attacker-controlled and can be
+		// forged independent of the actual compressed bytes, so it is only ever a
+		// cheap pre-filter here; the capped read below is what actually enforces
+		// the limit.
+		if zf.UncompressedSize64 > uint64(maxFileSize) {
+			return nil, fmt.Errorf("%w: %s declares size over %d bytes; content unexamined",
+				ErrSdistTooLarge, name, maxFileSize)
+		}
+
+		rc, err := zf.Open()
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrSdistCorrupt, err)
+		}
+		content, err := io.ReadAll(io.LimitReader(rc, maxFileSize+1))
+		rc.Close()
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrSdistCorrupt, err)
+		}
+		if int64(len(content)) > maxFileSize {
+			return nil, fmt.Errorf("%w: %s is over %d bytes; content unexamined",
+				ErrSdistTooLarge, name, maxFileSize)
+		}
+
+		// Same retention discipline as the tar path (R-02): exceeding a cap is a
+		// coverage gap, never a silent discard of unexamined .pth content.
+		if len(files.PthFiles) >= maxPthFiles || pthBytes+int64(len(content)) > maxPthTotalBytes {
+			return nil, fmt.Errorf("%w (%s)", ErrSdistRetentionExceeded, name)
+		}
+		if files.PthFiles == nil {
+			files.PthFiles = map[string]string{}
+		}
+		files.PthFiles[basename] = string(content)
+		pthBytes += int64(len(content))
+	}
+	return files, nil
 }
 
 // extractFromTar reads a tar stream and extracts the install-time files.

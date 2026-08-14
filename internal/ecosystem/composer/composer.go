@@ -151,6 +151,7 @@ func parseComposerLock(path string, raw []byte) (*graph.Graph, error) {
 		}
 		if hasInbound[n.ID] {
 			n.Direct = false
+			g.RemoveEdge(root.ID, n.ID, graph.EdgeDependsOn)
 		}
 	}
 

