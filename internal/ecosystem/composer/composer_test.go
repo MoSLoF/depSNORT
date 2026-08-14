@@ -2,6 +2,8 @@ package composer
 
 import (
 	"testing"
+
+	"ihbv.io/depsnort/internal/graph"
 )
 
 func TestDetect(t *testing.T) {
@@ -72,6 +74,62 @@ func TestResolveComposerNamespace(t *testing.T) {
 	}
 	if monolog.Name != "monolog/monolog" {
 		t.Errorf("name = %q, want monolog/monolog", monolog.Name)
+	}
+}
+
+// TestReMarkDirectRemovesSyntheticRootEdge covers the flat-collapse bug: every
+// lockfile package used to get an unconditional root -> pkg edge that survived
+// even after a real inter-package edge was drawn, so assignDepths' BFS always
+// found the synthetic one-hop path first. B is only ever required by A, so it
+// must end up at Depth 2 via A, not Depth 1 via a stale root edge.
+func TestReMarkDirectRemovesSyntheticRootEdge(t *testing.T) {
+	raw := []byte(`{
+		"packages": [
+			{"name": "vendor/a", "version": "1.0.0", "require": {"vendor/b": "^1.0"}},
+			{"name": "vendor/b", "version": "1.0.0"}
+		]
+	}`)
+	g, err := parseComposerLock("composer.lock", raw)
+	if err != nil {
+		t.Fatalf("parseComposerLock: %v", err)
+	}
+
+	aID := "pkg:composer/vendor/a@1.0.0"
+	bID := "pkg:composer/vendor/b@1.0.0"
+
+	b := g.Get(bID)
+	if b == nil {
+		t.Fatal("vendor/b node missing")
+	}
+	if b.Depth != 2 {
+		t.Errorf("vendor/b Depth = %d, want 2", b.Depth)
+	}
+	if b.Direct {
+		t.Error("vendor/b Direct = true, want false")
+	}
+
+	if len(g.Roots) != 1 {
+		t.Fatalf("roots = %d, want 1", len(g.Roots))
+	}
+	rootID := g.Roots[0]
+
+	var rootToB, aToB bool
+	for _, e := range g.SortedEdges() {
+		if e.Type != graph.EdgeDependsOn {
+			continue
+		}
+		if e.From == rootID && e.To == bID {
+			rootToB = true
+		}
+		if e.From == aID && e.To == bID {
+			aToB = true
+		}
+	}
+	if rootToB {
+		t.Error("root -> vendor/b edge still present, want removed")
+	}
+	if !aToB {
+		t.Error("vendor/a -> vendor/b edge missing")
 	}
 }
 

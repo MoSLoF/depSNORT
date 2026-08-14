@@ -339,7 +339,7 @@ create_makefile('native_ext')
 	})
 	g.AddEdge(root.ID, dep.ID, graph.EdgeDependsOn)
 
-	surface := installsurface.AnalyzeRuby(extconf, "")
+	surface := installsurface.AnalyzeRuby(extconf, "", "")
 	for _, h := range surface.Hooks {
 		hookID := "hook:" + dep.ID + "#" + h.Name
 		hookNode := g.AddNode(&graph.Node{

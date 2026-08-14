@@ -34,6 +34,38 @@ func TestAddEdgeDedupe(t *testing.T) {
 	}
 }
 
+func TestRemoveEdge(t *testing.T) {
+	g := New()
+	g.AddEdge("a", "b", EdgeDependsOn)
+	g.AddEdge("a", "b", EdgeDeclaresHook) // different type -> untouched by the removal below
+
+	if removed := g.RemoveEdge("a", "c", EdgeDependsOn); removed {
+		t.Error("RemoveEdge on an absent edge returned true, want false")
+	}
+	if len(g.Edges) != 2 {
+		t.Fatalf("len(Edges) after no-op removal = %d, want 2", len(g.Edges))
+	}
+
+	if removed := g.RemoveEdge("a", "b", EdgeDependsOn); !removed {
+		t.Error("RemoveEdge on a present edge returned false, want true")
+	}
+	if len(g.Edges) != 1 || g.Edges[0].Type != EdgeDeclaresHook {
+		t.Fatalf("Edges after removal = %v, want only the EdgeDeclaresHook edge", g.Edges)
+	}
+
+	if removed := g.RemoveEdge("a", "b", EdgeDependsOn); removed {
+		t.Error("second RemoveEdge of the same edge returned true, want false")
+	}
+	if len(g.Edges) != 1 {
+		t.Fatalf("len(Edges) after double-remove = %d, want 1", len(g.Edges))
+	}
+
+	g.AddEdge("a", "b", EdgeDependsOn)
+	if len(g.Edges) != 2 {
+		t.Fatalf("re-adding a removed edge should succeed: len(Edges) = %d, want 2", len(g.Edges))
+	}
+}
+
 func TestSortedNodesDeterministic(t *testing.T) {
 	g := New()
 	for _, id := range []string{"pkg:npm/c@1", "pkg:npm/a@1", "pkg:npm/b@1"} {

@@ -37,6 +37,7 @@ const (
 	EdgeHookReadsEnv EdgeType = "hook-reads-env" // hook/artifact -> credential sink
 	EdgeExfil        EdgeType = "exfil"          // artifact/sink -> C2
 	EdgeRepublish    EdgeType = "republish"      // worm loop back into the declared tree
+	EdgeBuildBackend EdgeType = "build-backend"  // consumer -> its PEP 517 build backend package
 )
 
 // Node is a single vertex. Adapters set the fact fields (everything except
@@ -108,6 +109,23 @@ func (g *Graph) AddEdge(from, to string, t EdgeType) {
 	}
 	g.edgeSeen[key] = struct{}{}
 	g.Edges = append(g.Edges, Edge{From: from, To: to, Type: t})
+}
+
+// RemoveEdge deletes the edge (from, to, t) if present, reporting whether
+// anything was removed.
+func (g *Graph) RemoveEdge(from, to string, t EdgeType) bool {
+	key := from + "\x00" + to + "\x00" + string(t)
+	if _, ok := g.edgeSeen[key]; !ok {
+		return false
+	}
+	delete(g.edgeSeen, key)
+	for i, e := range g.Edges {
+		if e.From == from && e.To == to && e.Type == t {
+			g.Edges = append(g.Edges[:i], g.Edges[i+1:]...)
+			break
+		}
+	}
+	return true
 }
 
 // MarkRoot records id as a graph root (the analyzed project itself).

@@ -1,0 +1,143 @@
+package registry
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"ihbv.io/depsnort/internal/datasource"
+)
+
+type pypiDepsDoer struct {
+	body   string
+	status int
+	calls  int
+}
+
+func (d *pypiDepsDoer) Do(req *http.Request) (*http.Response, error) {
+	d.calls++
+	st := d.status
+	if st == 0 {
+		st = 200
+	}
+	return &http.Response{
+		StatusCode: st,
+		Body:       io.NopCloser(strings.NewReader(d.body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestParseRequiresDistFiltersExtrasAndNormalizes(t *testing.T) {
+	raw := `{"info":{"requires_dist":[
+		"Flask_SQLAlchemy==2.5.1",
+		"urllib3>=1.21.1",
+		"aiohttp ; extra == \"async\"",
+		"pywin32 ; sys_platform == \"win32\" and extra == \"windows\""
+	]}}`
+	names, err := parseRequiresDist([]byte(raw))
+	if err != nil {
+		t.Fatalf("parseRequiresDist: %v", err)
+	}
+	want := map[string]bool{"flask-sqlalchemy": true, "urllib3": true}
+	if len(names) != len(want) {
+		t.Fatalf("names = %v, want exactly %v (extras-gated entries dropped)", names, want)
+	}
+	for _, n := range names {
+		if !want[n] {
+			t.Errorf("unexpected name %q in %v", n, names)
+		}
+	}
+}
+
+func TestParseRequiresDistBadJSON(t *testing.T) {
+	if _, err := parseRequiresDist([]byte("not json")); err == nil {
+		t.Error("expected an error for malformed JSON")
+	}
+}
+
+func TestRequiresDistFetchesParsesAndCaches(t *testing.T) {
+	doer := &pypiDepsDoer{body: `{"info":{"requires_dist":["click==8.0.1","itsdangerous>=2.0"]}}`}
+	dir := t.TempDir()
+	cache := datasource.NewCache(dir, time.Hour)
+	c := &PyPIDepsClient{HTTP: doer, Cache: cache, Now: time.Now}
+	coord := datasource.Coord{Ecosystem: "pypi", Name: "flask", Version: "2.0.1"}
+
+	got, err := c.RequiresDist(context.Background(), []datasource.Coord{coord})
+	if err != nil {
+		t.Fatalf("RequiresDist: %v", err)
+	}
+	names := got[coord.Key()]
+	if len(names) != 2 || names[0] != "click" || names[1] != "itsdangerous" {
+		t.Fatalf("names = %v, want [click itsdangerous]", names)
+	}
+	if c.Stats.FromNet != 1 {
+		t.Errorf("Stats.FromNet = %d, want 1", c.Stats.FromNet)
+	}
+
+	// Second call must be served entirely from cache.
+	if _, err := c.RequiresDist(context.Background(), []datasource.Coord{coord}); err != nil {
+		t.Fatal(err)
+	}
+	if doer.calls != 1 {
+		t.Errorf("network calls = %d, want 1 (second lookup should hit cache)", doer.calls)
+	}
+	if c.Stats.FromCache != 1 {
+		t.Errorf("Stats.FromCache = %d, want 1", c.Stats.FromCache)
+	}
+}
+
+func TestRequiresDistOfflineColdCacheIsGapNotError(t *testing.T) {
+	doer := &pypiDepsDoer{body: `{"info":{"requires_dist":["click==8.0.1"]}}`}
+	c := &PyPIDepsClient{HTTP: doer, Cache: datasource.NewCache(t.TempDir(), time.Hour), Offline: true}
+	coord := datasource.Coord{Ecosystem: "pypi", Name: "flask", Version: "2.0.1"}
+
+	got, err := c.RequiresDist(context.Background(), []datasource.Coord{coord})
+	if err != nil {
+		t.Fatalf("offline cold cache should not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected no entries, got %d", len(got))
+	}
+	if doer.calls != 0 {
+		t.Errorf("offline made %d network calls, want 0", doer.calls)
+	}
+	if c.Stats.Gaps != 1 {
+		t.Errorf("Stats.Gaps = %d, want 1", c.Stats.Gaps)
+	}
+}
+
+func TestRequiresDistNotFoundIsNotAnError(t *testing.T) {
+	doer := &pypiDepsDoer{body: `{"message":"Not Found"}`, status: 404}
+	c := &PyPIDepsClient{HTTP: doer, Cache: datasource.NewCache(t.TempDir(), time.Hour)}
+	coord := datasource.Coord{Ecosystem: "pypi", Name: "private-pkg", Version: "1.0.0"}
+
+	got, err := c.RequiresDist(context.Background(), []datasource.Coord{coord})
+	if err != nil {
+		t.Errorf("404 should not surface as an error, got %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected no entries, got %d", len(got))
+	}
+	if c.Stats.NotFound != 1 {
+		t.Errorf("Stats.NotFound = %d, want 1", c.Stats.NotFound)
+	}
+	if c.Stats.Gaps != 0 {
+		t.Errorf("a 404 must not count as a gap, got %d", c.Stats.Gaps)
+	}
+}
+
+func TestRequiresDistServerErrorDegrades(t *testing.T) {
+	doer := &pypiDepsDoer{body: "boom", status: 500}
+	c := &PyPIDepsClient{HTTP: doer, Cache: datasource.NewCache(t.TempDir(), time.Hour)}
+	coord := datasource.Coord{Ecosystem: "pypi", Name: "flask", Version: "2.0.1"}
+
+	if _, err := c.RequiresDist(context.Background(), []datasource.Coord{coord}); err == nil {
+		t.Error("a 500 should surface as an error")
+	}
+	if c.Stats.Gaps != 1 || c.Stats.NotFound != 0 {
+		t.Errorf("stats = %+v, want gaps=1 notfound=0", c.Stats)
+	}
+}

@@ -50,6 +50,8 @@ func cypherRel(t graph.EdgeType) string {
 		return "EXFIL"
 	case graph.EdgeRepublish:
 		return "REPUBLISH"
+	case graph.EdgeBuildBackend:
+		return "BUILD_BACKEND"
 	default:
 		return "DEPENDS_ON"
 	}

@@ -409,6 +409,53 @@ func prefetchAdvisories(g *graph.Graph, src *osv.Client) (map[string][]datasourc
 	return byNode, entries, err
 }
 
+// reconstructPyPIDepth targets only PyPI roots whose lockfile format left
+// them fully flat (graph.AttrFlatResolution == "pypi"): it fetches
+// requires_dist for the union of their pinned coordinates and calls
+// pypi.ReconstructDepth to redraw real edges from it. Non-PyPI roots, and
+// PyPI roots that already resolved real structure (e.g. a pip-compile
+// requirements.txt with `# via` provenance), are left untouched — this
+// never runs on data it would only duplicate or corrupt.
+func reconstructPyPIDepth(g *graph.Graph, client *registry.PyPIDepsClient, roots []*graph.Node) emit.DataSourceCoverage {
+	var flatRoots []*graph.Node
+	for _, r := range roots {
+		if r.Ecosystem == "pypi" && r.Attr[graph.AttrFlatResolution] == "pypi" {
+			flatRoots = append(flatRoots, r)
+		}
+	}
+	cov := emit.DataSourceCoverage{Name: client.Name()}
+	if len(flatRoots) == 0 {
+		return cov
+	}
+
+	seen := map[string]bool{}
+	var coords []datasource.Coord
+	for _, root := range flatRoots {
+		for _, e := range g.SortedEdges() {
+			if e.From != root.ID || e.Type != graph.EdgeDependsOn {
+				continue
+			}
+			n := g.Get(e.To)
+			if n == nil || n.Version == "" {
+				continue
+			}
+			c := datasource.Coord{Ecosystem: n.Ecosystem, Name: n.Name, Version: n.Version}
+			if key := c.Key(); !seen[key] {
+				seen[key] = true
+				coords = append(coords, c)
+			}
+		}
+	}
+
+	requiresDist, err := client.RequiresDist(context.Background(), coords)
+	cov.Stats = client.Stats
+	if err != nil {
+		cov.Error = err.Error()
+	}
+	pypi.ReconstructDepth(g, flatRoots, requiresDist)
+	return cov
+}
+
 func cmdScan(args []string) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	format := fs.String("format", "json", "output format: "+strings.Join(emit.Formats(), " | "))
@@ -625,6 +672,37 @@ func cmdScan(args []string) int {
 			info.DataSources = append(info.DataSources, cov)
 		}
 		ctx.Releases = allReleases
+
+		// PyPI real transitive-depth reconstruction: a post-merge stage, same
+		// tier as the release-history prefetch above, gated by the same
+		// -offline/-no-registry flags rather than a new CLI flag. It only ever
+		// touches PyPI roots the graph itself already marked flat.
+		var rootNodes []*graph.Node
+		for _, r := range g.Roots {
+			if n := g.Get(r); n != nil {
+				rootNodes = append(rootNodes, n)
+			}
+		}
+		depsClient := registry.NewPyPIDeps(datasource.NewCache(filepath.Join(*regCacheDir, "pypi-requires-dist"), 24*time.Hour), *offline)
+		depsCov := reconstructPyPIDepth(g, depsClient, rootNodes)
+		if depsCov.Error != "" {
+			fmt.Fprintf(os.Stderr, "depsnort: warning: %s coverage degraded: %v\n", depsCov.Name, depsCov.Error)
+		}
+		if depsCov.Error != "" || depsCov.Stats.Gaps > 0 {
+			dataSourceGaps = append(dataSourceGaps, depsCov.Name)
+		}
+		info.DataSources = append(info.DataSources, depsCov)
+	} else {
+		// -no-registry means requires_dist was never even fetched: a flat PyPI
+		// root must say so explicitly rather than silently carrying no
+		// reconstruction fact at all (Decision D-24 / "disclose, don't guess").
+		for _, r := range g.Roots {
+			n := g.Get(r)
+			if n == nil || n.Ecosystem != "pypi" || n.Attr[graph.AttrFlatResolution] != "pypi" {
+				continue
+			}
+			n.Attr[pypi.AttrReconstruction] = "not-attempted"
+		}
 	}
 
 	// IOC ledger stage: match resolved packages against the operator's own
@@ -673,17 +751,7 @@ func cmdScan(args []string) int {
 	// pipeline that only reads the exit code must still be told the tool could
 	// not see the whole tree (Decision D-24 / F-02).
 	if c := res.Coverage; c.Incomplete() {
-		fmt.Fprintf(os.Stderr,
-			"depsnort: WARNING - coverage is incomplete: %d unresolved dependenc(ies) across %d root(s), "+
-				"%d orphaned package(s), %d failed project(s), %d partial install-surface extraction(s)",
-			c.Unresolved, c.IncompleteRoots, c.Orphans, c.FailedProjects, c.ExtractorGaps)
-		if len(c.ExtractorGapReasons) > 0 {
-			fmt.Fprintf(os.Stderr, " [%s]", strings.Join(c.ExtractorGapReasons, ", "))
-		}
-		if len(c.DataSourceGaps) > 0 {
-			fmt.Fprintf(os.Stderr, ", degraded data source(s): %s", strings.Join(c.DataSourceGaps, ", "))
-		}
-		fmt.Fprint(os.Stderr, ". This report is NOT an all-clear.\n")
+		fmt.Fprintf(os.Stderr, "depsnort: WARNING - %s\n", c.IncompleteSummary())
 	}
 
 	// Render to a buffer first: a failed emit must not leave a truncated report

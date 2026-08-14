@@ -16,6 +16,8 @@ package installsurface
 import (
 	"regexp"
 	"strings"
+
+	"ihbv.io/depsnort/internal/pep508"
 )
 
 // Capability is something an install-time chain can do.
@@ -476,10 +478,16 @@ var RubyInstallHookNames = []string{
 	"Rakefile:compile",
 }
 
+// rakeCompileRe detects a Rakefile declaring a native-extension compile task
+// (rake-compiler convention) — an ordinary Rakefile with neither is not an
+// install-time hook, matching the gemspec:extensions branch's discipline.
+var rakeCompileRe = regexp.MustCompile(`(?i)Rake::(?:Extension|Compiler)Task|task\s+[:'"]compile\b|require\s+['"]rake/extensiontask['"]`)
+
 // AnalyzeRuby builds the install surface from a Ruby gem's build files.
 // extconfRb is the content of extconf.rb (may be empty). gemspec is the
-// content of the .gemspec file (may be empty).
-func AnalyzeRuby(extconfRb, gemspec string) Surface {
+// content of the .gemspec file (may be empty). rakefile is the content of the
+// gem's Rakefile (may be empty).
+func AnalyzeRuby(extconfRb, gemspec, rakefile string) Surface {
 	var s Surface
 	if extconfRb != "" {
 		caps, ev := scanCaps(extconfRb)
@@ -493,6 +501,22 @@ func AnalyzeRuby(extconfRb, gemspec string) Surface {
 			Sinks:    findSinks(extconfRb),
 		}
 		for _, u := range dedupe(urlRe.FindAllString(extconfRb, -1)) {
+			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+		}
+		s.Hooks = append(s.Hooks, h)
+	}
+	if rakefile != "" && rakeCompileRe.MatchString(rakefile) {
+		caps, ev := scanCaps(rakefile)
+		caps = appendUnique(caps, CapExec)
+		ev = appendStr(ev, "Rakefile:compile")
+		h := Hook{
+			Name:     "Rakefile:compile",
+			Command:  truncateStr(rakefile, 400),
+			Caps:     caps,
+			Evidence: ev,
+			Sinks:    findSinks(rakefile),
+		}
+		for _, u := range dedupe(urlRe.FindAllString(rakefile, -1)) {
 			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
 		}
 		s.Hooks = append(s.Hooks, h)
@@ -763,7 +787,8 @@ func AnalyzePython(setupPy, pyprojectToml string, pthFiles map[string]string) Su
 		s.Hooks = append(s.Hooks, analyzeSetupPy(setupPy)...)
 	}
 	if pyprojectToml != "" {
-		if h, ok := analyzeBuildBackend(pyprojectToml, setupPy != ""); ok {
+		requires := ExtractBuildRequires(pyprojectToml)
+		if h, ok := analyzeBuildBackend(pyprojectToml, setupPy != "", requires); ok {
 			s.Hooks = append(s.Hooks, h)
 		}
 	}
@@ -854,7 +879,11 @@ var knownBuildBackends = []string{
 }
 
 // analyzeBuildBackend checks pyproject.toml for non-standard build backends.
-func analyzeBuildBackend(tomlSource string, hasSetupPy bool) (Hook, bool) {
+// requires is build-system.requires (see ExtractBuildRequires), used only to
+// append a second evidence marker recording whether the declared backend
+// could be matched to a pinned entry — the hook itself already fires on the
+// backend name alone.
+func analyzeBuildBackend(tomlSource string, hasSetupPy bool, requires []string) (Hook, bool) {
 	backend := ExtractBuildBackend(tomlSource)
 
 	if backend == "" {
@@ -869,18 +898,155 @@ func analyzeBuildBackend(tomlSource string, hasSetupPy bool) (Hook, bool) {
 		return Hook{}, false
 	}
 
-	for _, known := range knownBuildBackends {
-		if strings.HasPrefix(backend, known) {
-			return Hook{}, false
-		}
+	if IsKnownBuildBackend(backend) {
+		return Hook{}, false
+	}
+
+	evidence := []string{"non-standard-build-backend:" + backend}
+	matched, ok, ambiguous := MatchBuildBackendRequires(backend, requires)
+	switch {
+	case ambiguous:
+		evidence = append(evidence, "ambiguous-build-backend-requires")
+	case !ok:
+		evidence = append(evidence, "missing-requires-entry")
+	default:
+		evidence = append(evidence, "build-backend-requires:"+matched)
 	}
 
 	return Hook{
 		Name:     "pyproject.toml:build-backend",
 		Command:  "non-standard build backend: " + backend,
 		Caps:     []Capability{CapExec},
-		Evidence: []string{"non-standard-build-backend:" + backend},
+		Evidence: evidence,
 	}, true
+}
+
+// IsKnownBuildBackend reports whether backend is one of the standard Python
+// packaging ecosystem's PEP 517 build backends.
+func IsKnownBuildBackend(backend string) bool {
+	for _, known := range knownBuildBackends {
+		if strings.HasPrefix(backend, known) {
+			return true
+		}
+	}
+	return false
+}
+
+// ExtractBuildRequires reads the build-system.requires array out of
+// pyproject.toml without a full TOML parser (D-10). Handles both the
+// single-line (`requires = ["a", "b"]`) and multi-line array forms.
+func ExtractBuildRequires(toml string) []string {
+	inBuildSystem := false
+	capturing := false
+	var raw strings.Builder
+	for _, line := range strings.Split(toml, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[build-system]" {
+			inBuildSystem = true
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			inBuildSystem = false
+			if capturing {
+				break
+			}
+			continue
+		}
+		if !inBuildSystem {
+			continue
+		}
+		if capturing {
+			raw.WriteByte(' ')
+			raw.WriteString(trimmed)
+			if strings.Contains(trimmed, "]") {
+				break
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "requires") {
+			if i := strings.IndexByte(trimmed, '='); i >= 0 {
+				val := strings.TrimSpace(trimmed[i+1:])
+				raw.WriteString(val)
+				capturing = true
+				if strings.Contains(val, "]") {
+					break
+				}
+			}
+		}
+	}
+
+	s := raw.String()
+	start := strings.IndexByte(s, '[')
+	end := strings.LastIndexByte(s, ']')
+	if start < 0 || end < 0 || end <= start {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s[start+1:end], ",") {
+		part = strings.Trim(strings.TrimSpace(part), `"'`)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// normalizePEP503 applies PEP 503 name normalization (lowercase; runs of -,
+// _, . collapse to a single -). Duplicated locally, rather than importing
+// internal/purl's equivalent, so this format-agnostic package keeps its
+// existing zero-ecosystem-import footprint.
+func normalizePEP503(name string) string {
+	var b strings.Builder
+	prevSep := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		if r == '-' || r == '_' || r == '.' {
+			if !prevSep {
+				b.WriteByte('-')
+				prevSep = true
+			}
+			continue
+		}
+		prevSep = false
+		b.WriteRune(r)
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// MatchBuildBackendRequires finds which entry in requires names the PyPI
+// package providing backend. PEP 517 backend strings are import paths, not
+// PyPI package names (e.g. "scikit_build_core.build" is provided by the
+// "scikit-build-core" package) — the mapping is not mechanical in general, so
+// this only matches the PEP-503-normalized LEADING module component of
+// backend against each requires entry's PEP-503-normalized name.
+//
+// Never guesses among multiple candidates (Decision D-01): ambiguous is true
+// when more than one requires entry plausibly matches, and resolution then
+// declines (ok is false) rather than picking one.
+func MatchBuildBackendRequires(backend string, requires []string) (matched string, ok, ambiguous bool) {
+	module := backend
+	if i := strings.IndexByte(module, '.'); i >= 0 {
+		module = module[:i]
+	}
+	want := normalizePEP503(module)
+	if want == "" {
+		return "", false, false
+	}
+
+	var candidates []string
+	for _, r := range requires {
+		name, _, _, _ := pep508.Split(r)
+		if normalizePEP503(name) == want {
+			candidates = append(candidates, r)
+		}
+	}
+	switch len(candidates) {
+	case 0:
+		return "", false, false
+	case 1:
+		return candidates[0], true, false
+	default:
+		return "", false, true
+	}
 }
 
 // ExtractBuildBackend reads the build-backend value from pyproject.toml without

@@ -30,6 +30,7 @@ import (
 
 	"ihbv.io/depsnort/internal/datasource"
 	"ihbv.io/depsnort/internal/graph"
+	"ihbv.io/depsnort/internal/pep508"
 	"ihbv.io/depsnort/internal/purl"
 )
 
@@ -223,12 +224,12 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 			continue
 		}
 
-		name, version, pinned, marker := splitPin(body)
+		name, version, pinned, marker := pep508.Split(body)
 		if name == "" {
 			continue
 		}
 		if !pinned {
-			if marker != "" && markerExcludesLinux(marker) {
+			if marker != "" && pep508.ExcludesLinux(marker) {
 				markerExcluded = append(markerExcluded, name)
 			} else {
 				unpinned = append(unpinned, name)
@@ -327,64 +328,6 @@ func viaTarget(s string) string {
 		s = s[:i]
 	}
 	return s
-}
-
-// splitPin splits "name[extra]==1.2.3 ; marker" into its name, version, and
-// PEP 508 environment marker (if any). pinned is false for any specifier
-// that is not an exact `==` pin. marker is returned verbatim (untrimmed of
-// internal spacing beyond the outer TrimSpace) so it can be surfaced to the
-// caller rather than silently discarded.
-func splitPin(s string) (name, version string, pinned bool, marker string) {
-	// Environment markers: "pkg==1.0 ; python_version < '3.9'"
-	if i := strings.IndexByte(s, ';'); i >= 0 {
-		marker = strings.TrimSpace(s[i+1:])
-		s = strings.TrimSpace(s[:i])
-	}
-	if i := strings.Index(s, "=="); i >= 0 {
-		name = strings.TrimSpace(s[:i])
-		version = strings.TrimSpace(s[i+2:])
-		version = strings.TrimSuffix(version, ".*")
-		name = stripExtras(name)
-		if name != "" && version != "" {
-			return name, version, true, marker
-		}
-		return name, "", false, marker
-	}
-	// Any other specifier is unpinned for our purposes.
-	for _, op := range []string{">=", "<=", "~=", "!=", ">", "<", "@"} {
-		if i := strings.Index(s, op); i >= 0 {
-			return stripExtras(strings.TrimSpace(s[:i])), "", false, marker
-		}
-	}
-	return stripExtras(strings.TrimSpace(s)), "", false, marker
-}
-
-// markerExcludesLinux reports whether marker is a single, unambiguous PEP 508
-// clause proving a dependency is gated to Windows only — the idiom real
-// Windows-only packages use (pyreadline3, pywin32). Anything this cannot
-// prove — "and"/"or", parens, a python_version comparison, an unrecognized
-// key — returns false rather than being guessed at, so a marker the parser
-// does not fully understand is never silently excluded from coverage; it
-// still surfaces via the pypi.marker attribute for a human or an automated
-// reader to judge.
-func markerExcludesLinux(marker string) bool {
-	m := strings.ToLower(strings.Join(strings.Fields(marker), ""))
-	switch m {
-	case `sys_platform=='win32'`, `sys_platform=="win32"`,
-		`os_name=='nt'`, `os_name=="nt"`,
-		`platform_system=='windows'`, `platform_system=="windows"`:
-		return true
-	default:
-		return false
-	}
-}
-
-// stripExtras removes an extras suffix: "requests[security]" -> "requests".
-func stripExtras(name string) string {
-	if i := strings.IndexByte(name, '['); i >= 0 {
-		return strings.TrimSpace(name[:i])
-	}
-	return strings.TrimSpace(name)
 }
 
 // ---- Pipfile.lock --------------------------------------------------------
