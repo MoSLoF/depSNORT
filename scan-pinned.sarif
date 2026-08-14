@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "depSNORT",
+          "version": "dev",
+          "informationUri": "https://ihbv.io",
+          "rules": [
+            {
+              "id": "VC-001",
+              "name": "VC-001",
+              "shortDescription": {
+                "text": "package@version is in a known-malicious advisory (OSV/GHSA MAL-*)"
+              },
+              "properties": {
+                "axis": "known-compromise",
+                "defaultSeverity": "critical",
+                "gateClass": "block"
+              }
+            },
+            {
+              "id": "VC-002a",
+              "name": "VC-002a",
+              "shortDescription": {
+                "text": "package declares an install lifecycle hook (preinstall/install/postinstall)"
+              },
+              "properties": {
+                "axis": "known-compromise",
+                "defaultSeverity": "low",
+                "gateClass": "gate-eligible"
+              }
+            },
+            {
+              "id": "VC-002b",
+              "name": "VC-002b",
+              "shortDescription": {
+                "text": "install hook reaches the network"
+              },
+              "properties": {
+                "axis": "known-compromise",
+                "defaultSeverity": "medium",
+                "gateClass": "gate-eligible"
+              }
+            },
+            {
+              "id": "VC-002c",
+              "name": "VC-002c",
+              "shortDescription": {
+                "text": "install hook references named credentials or secret files"
+              },
+              "properties": {
+                "axis": "known-compromise",
+                "defaultSeverity": "high",
+                "gateClass": "gate-eligible"
+              }
+            },
+            {
+              "id": "VC-002d",
+              "name": "VC-002d",
+              "shortDescription": {
+                "text": "install hook is exfil-capable: named credentials + network egress"
+              },
+              "properties": {
+                "axis": "known-compromise",
+                "defaultSeverity": "critical",
+                "gateClass": "block"
+              }
+            },
+            {
+              "id": "VC-002e",
+              "name": "VC-002e",
+              "shortDescription": {
+                "text": "install hook decodes and executes code (obfuscation/indirection)"
+              },
+              "properties": {
+                "axis": "known-compromise",
+                "defaultSeverity": "high",
+                "gateClass": "gate-eligible"
+              }
+            },
+            {
+              "id": "VC-002f",
+              "name": "VC-002f",
+              "shortDescription": {
+                "text": "install hook fetches and executes remote code (download cradle)"
+              },
+              "properties": {
+                "axis": "known-compromise",
+                "defaultSeverity": "critical",
+                "gateClass": "block"
+              }
+            },
+            {
+              "id": "VC-003",
+              "name": "VC-003",
+              "shortDescription": {
+                "text": "package matches an entry in the operator's IOC ledger"
+              },
+              "properties": {
+                "axis": "known-compromise",
+                "defaultSeverity": "critical",
+                "gateClass": "block"
+              }
+            },
+            {
+              "id": "VC-004",
+              "name": "VC-004",
+              "shortDescription": {
+                "text": "version published recently after prolonged dormancy (possible account takeover)"
+              },
+              "properties": {
+                "axis": "weather",
+                "defaultSeverity": "medium",
+                "gateClass": "advisory"
+              }
+            },
+            {
+              "id": "VC-005",
+              "name": "VC-005",
+              "shortDescription": {
+                "text": "pinned version arrived in a release burst anomalous for this package"
+              },
+              "properties": {
+                "axis": "weather",
+                "defaultSeverity": "medium",
+                "gateClass": "advisory"
+              }
+            },
+            {
+              "id": "VC-006",
+              "name": "VC-006",
+              "shortDescription": {
+                "text": "package name is a near-miss (typosquat) of a popular package"
+              },
+              "properties": {
+                "axis": "weather",
+                "defaultSeverity": "medium",
+                "gateClass": "advisory"
+              }
+            },
+            {
+              "id": "VC-007",
+              "name": "VC-007",
+              "shortDescription": {
+                "text": "internal-looking package resolves from a public registry (dependency confusion)"
+              },
+              "properties": {
+                "axis": "weather",
+                "defaultSeverity": "high",
+                "gateClass": "gate-eligible"
+              }
+            },
+            {
+              "id": "VC-008",
+              "name": "VC-008",
+              "shortDescription": {
+                "text": "package@version has a disclosed vulnerability (OSV/GHSA CVE)"
+              },
+              "properties": {
+                "axis": "vuln",
+                "defaultSeverity": "medium",
+                "gateClass": "advisory"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "VC-004",
+          "level": "note",
+          "message": {
+            "text": "0.6.4 published after 492d of dormancy — dormancy gap: 0.6.1 -\u003e 0.6.2 (492d, 2024-09-10 -\u003e 2026-01-16)"
+          },
+          "locations": [
+            {
+              "logicalLocations": [
+                {
+                  "fullyQualifiedName": "pkg:pypi/pyasn1@0.6.4",
+                  "kind": "package"
+                }
+              ]
+            }
+          ],
+          "properties": {
+            "axis": "weather",
+            "confidence": "0.40",
+            "gateClass": "advisory",
+            "remediation": "verify the publishing account and confirm the release corresponds to reviewed source changes",
+            "score": "0.040",
+            "severity": "medium"
+          }
+        }
+      ]
+    }
+  ]
+}
