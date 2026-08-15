@@ -31,16 +31,25 @@ weakens a guarantee.
 
    Then update the **two prose literals in `README.md`** that do NOT derive: the
    "baked-in version" note and the `gh attestation verify depsnort-vX.Y.Z-…`
-   example. Nothing in CI checks these — `release.yml` gates only the tag
-   against `pyproject.toml` — so a bump that skips them ships a README
-   advertising the previous release. Find them with:
+   example. `release.yml` gates only the tag against `pyproject.toml`, so a bump
+   that skips them ships a README advertising the previous release. Find them
+   with:
 
    ```
    grep -rn "v[0-9]\+\.[0-9]\+\.[0-9]\+" README.md
    ```
 
+   Forgetting them now fails the Go suite:
+   `internal/versiondrift.TestREADMEVersionLiteralsMatchPyproject` asserts every
+   `vX.Y.Z` literal in `README.md` equals the declared version, and that
+   `pyproject.toml` carries exactly one column-0 `version = "…"` line (a second
+   would silently concatenate through the `sed -n …p` this step and the release
+   gate both rely on). So this checklist item is now belt-and-braces rather than
+   the only guard.
+
    (Earlier revisions of this document claimed nothing else carried a version
-   literal. That was false, and is exactly how a stale README ships.)
+   literal. That was false, and is exactly how a stale README ships — which is
+   why the invariant is a test now instead of a sentence.)
 
 2. **Bump the sdist cache semantics if extraction meaning changed.** If this
    release changes *what a cached sdist-extraction record is allowed to mean* —
