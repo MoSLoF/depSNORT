@@ -69,7 +69,7 @@ go build -o depsnort ./cmd/depsnort      # Windows: go build -o depsnort.exe ./c
 ```
 
 > **Check which build you have.** `./depsnort version` and every report header
-> carry the baked-in version (`v0.7.4`). If a report header or the flag list does
+> carry the baked-in version (`v0.7.5`). If a report header or the flag list does
 > not match what you expect, the source tree on disk is stale — re-extract before
 > debugging anything else.
 
@@ -427,7 +427,7 @@ attestation is recorded in the public Rekor transparency log.
 sha256sum -c SHA256SUMS --ignore-missing
 
 # 2. provenance — proves THIS binary came from THIS repo's release workflow
-gh attestation verify depsnort-v0.7.4-linux-amd64 --repo MoSLoF/depSNORT
+gh attestation verify depsnort-v0.7.5-linux-amd64 --repo MoSLoF/depSNORT
 
 # 3. what it is built from (the components array should be empty)
 ./depsnort sbom

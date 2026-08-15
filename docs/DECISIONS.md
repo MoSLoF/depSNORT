@@ -959,3 +959,46 @@ worse than no tool, because it launders an unverified artifact as a verified one
 The script now refuses to start without gofmt, treats a gofmt failure as fatal,
 asserts `gofmt -l` is empty afterwards, and prints the toolchain version into the
 generation log so the evidence records what produced the tree.
+
+## D-39 — v0.7.5: the release the version file already claimed
+
+Two releases' worth of work shipped under one version number, because the tag
+and the version literal drifted apart without anything noticing.
+
+`pyproject.toml` was bumped to `0.7.4` and a lightweight `v0.7.4` tag was created
+locally on the PR #13 merge. The tag was never pushed. `release.yml` only fires
+on a pushed `v*` tag, so no Release was ever built, no attestation signed, and no
+binary published — while thirteen further commits landed on `main`. The repo
+spent that entire stretch claiming to be `0.7.4` in every report header and SBOM,
+with the only published artifact still `v0.7.3`.
+
+Nothing was wrong with the single-source mechanism (D-33 / F-06): the version
+genuinely does derive from `pyproject.toml` into the binary, the wheel, and the
+SBOM. What was missing is that **a version literal and a published release are
+different facts, and only one of them had a guard.** `release.yml` verifies the
+tag matches `pyproject.toml`; nothing verifies that the version in
+`pyproject.toml` was ever released at all.
+
+v0.7.5 is cut from current `main` and carries the accumulated work: `-osv-export`
+round-trip snapshots, the tiered OSV fallback (cache → live → bundled → gap),
+PyPI transitive-depth reconstruction from `requires_dist`, PEP 517 build-backend
+recursive analysis, wheel-only `.pth` recovery, the SARIF coverage-notification
+block, the composer depth fix, and the PEP 508 compound-specifier parser rewrite.
+`v0.7.4` is left in place as a historical marker rather than moved, since moving
+a tag to cover a gap is how the gap becomes invisible.
+
+Two process corrections came out of this, both in `docs/RELEASING.md`:
+
+**The single-source claim was false.** Step 1 stated "nothing else carries a
+version literal." `README.md` carries two — the baked-in-version note and the
+`gh attestation verify` example — and no test or CI job checks either. A document
+that tells you a checklist is unnecessary is worse than one that omits it, so the
+step now names both sites and gives the grep that finds them.
+
+**`git push --tags` is now forbidden in the procedure.** It was the documented
+command. With an abandoned local tag present it would have pushed `v0.7.4` too,
+and the consistency gate would have *passed* — that commit's `pyproject.toml` did
+read `0.7.4` — publishing a fully signed Release built from thirteen-commit-old
+code. The gate compares a tag to the version at the commit it points to, which
+protects against a mislabelled release and not at all against publishing the
+wrong commit. Pushing one tag by name is what protects against that.

@@ -21,13 +21,26 @@ weakens a guarantee.
    If a review produced an archive, apply it to this tree and commit it *before*
    validating. Never validate an archive and tag a repo.
 
-1. **Bump the version in one place.** Edit `version` in `pyproject.toml`. Nothing
-   else carries a version literal — the Go binary, the wheel tag, the SBOM, and
-   `py/depsnort/__init__.py` all derive from it (D-33 / F-06). Confirm:
+1. **Bump the version.** Edit `version` in `pyproject.toml` — the Go binary, the
+   wheel tag, the SBOM, and `py/depsnort/__init__.py` all derive from it
+   (D-33 / F-06). Confirm:
 
    ```
    make build && ./depsnort version      # must print the new version
    ```
+
+   Then update the **two prose literals in `README.md`** that do NOT derive: the
+   "baked-in version" note and the `gh attestation verify depsnort-vX.Y.Z-…`
+   example. Nothing in CI checks these — `release.yml` gates only the tag
+   against `pyproject.toml` — so a bump that skips them ships a README
+   advertising the previous release. Find them with:
+
+   ```
+   grep -rn "v[0-9]\+\.[0-9]\+\.[0-9]\+" README.md
+   ```
+
+   (Earlier revisions of this document claimed nothing else carried a version
+   literal. That was false, and is exactly how a stale README ships.)
 
 2. **Bump the sdist cache semantics if extraction meaning changed.** If this
    release changes *what a cached sdist-extraction record is allowed to mean* —
@@ -115,9 +128,18 @@ A non-zero exit means a private marker survived — fix the source or add a
 ## Tagging
 
 ```
+git push origin main      # the candidate commit must already be on main
 git tag vX.Y.Z            # must equal pyproject.toml — release.yml enforces this
-git push origin main --tags
+git push origin vX.Y.Z    # push THIS tag by name — never --tags
 ```
+
+**Never `git push --tags`.** It pushes every local tag, including any stale or
+abandoned one. `release.yml`'s consistency gate compares the tag against
+`pyproject.toml` *at the commit the tag points to*, so an old tag whose commit
+carried a matching version passes the gate and publishes a full signed Release
+built from that old tree. The gate protects against a mislabelled release, not
+against publishing the wrong commit — pushing one tag by name is what protects
+against that.
 
 Pushing the tag fires `.github/workflows/release.yml`, which rebuilds the five
 platform binaries, generates a platform-neutral SBOM, writes `SHA256SUMS`, signs
