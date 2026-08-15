@@ -67,6 +67,15 @@ type Stats struct {
 	// packages) rather than "the lookup failed". Conflating them makes an
 	// ordinary private dependency look like a broken scan.
 	NotFound int `json:"not_found,omitempty"`
+	// UnparsedEntries counts individual dependency specifiers inside a
+	// SUCCESSFULLY fetched response that could not be parsed at all. Tracked
+	// separately from Gaps for the same reason NotFound is: it is a different
+	// fact. The coordinate's metadata was retrieved fine — part of its content
+	// was unreadable — so any dependency edge that entry would have produced is
+	// missing. Folding it into Gaps would make a partially-unreadable response
+	// indistinguishable from a failed lookup, and leaving it uncounted would let
+	// a dropped dependency pass as a clean result (Decision D-24).
+	UnparsedEntries int `json:"unparsed_entries,omitempty"`
 	// FromBundled counts coordinates served from a compiled-in fallback
 	// dataset — consulted only when neither the cache nor a live query had an
 	// answer. Tracked separately from FromCache/FromNet so a bundled-sourced

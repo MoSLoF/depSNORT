@@ -143,6 +143,24 @@ func rootNode(g *graph.Graph, path string) *graph.Node {
 
 // ---- requirements.txt ----------------------------------------------------
 
+// unparseableToken renders an unreadable requirements.txt line as one
+// disclosure token for graph.AttrUnresolved.
+//
+// Two constraints on the shape, both load-bearing: AttrUnresolved is
+// comma-joined at the root and re-split by internal/graph/coverage.go with no
+// escaping, so the token must be comma-free; and the line scanner permits a
+// 4 MB line, so it must be length-bounded before it reaches a graph attribute.
+// Truncation is rune-aware so a multi-byte character is never cut in half.
+func unparseableToken(line string) string {
+	const max = 60
+	t := strings.TrimSpace(line)
+	t = strings.ReplaceAll(t, ",", " ")
+	if r := []rune(t); len(r) > max {
+		t = string(r[:max]) + "…"
+	}
+	return "<unparseable: " + t + ">"
+}
+
 // parseRequirements reads a fully pinned requirements file. Only `==` pins are
 // treated as resolved; a loose specifier (>=, ~=, unpinned) is NOT resolved,
 // because guessing which version a range would install is exactly the resolver
@@ -167,7 +185,11 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 	// via AttrFlatResolution.
 	hasProvenance := false
 
-	sc := bufio.NewScanner(strings.NewReader(string(raw)))
+	// Strip a leading UTF-8 BOM: `pip freeze > requirements.txt` under Windows
+	// PowerShell 5.1 (and any Notepad save) emits one, and strings.TrimSpace
+	// does not remove U+FEFF — it is category Cf, not White_Space — so the
+	// first dependency in the file would otherwise fail to parse.
+	sc := bufio.NewScanner(strings.NewReader(strings.TrimPrefix(string(raw), "\uFEFF")))
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	var cur *entry
@@ -226,6 +248,13 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 
 		name, version, pinned, marker := pep508.Split(body)
 		if name == "" {
+			// pep508.Split could not read this line as a requirement at all — a
+			// bare URL or local path, a name violating PEP 508's grammar, a
+			// stray fragment. That is a coverage gap, not an absent dependency,
+			// so it is DISCLOSED rather than silently dropped (D-24). Folding it
+			// into `unpinned` reuses the existing AttrUnresolved channel, so it
+			// degrades coverage exactly like any other unresolved requirement.
+			unpinned = append(unpinned, unparseableToken(body))
 			continue
 		}
 		if !pinned {

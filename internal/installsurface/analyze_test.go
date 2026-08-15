@@ -424,3 +424,124 @@ raise RuntimeError("""
 		}
 	}
 }
+
+// TestMatchBuildBackendRequiresCompound covers the report's PLAUSIBLE call site
+// (HoneyBadger Vanguard, iHBV-TM-022, §4). "setuptools>=64,<70" is the ordinary
+// way a real pyproject.toml bounds its build backend. Pre-fix, pep508.Split
+// returned the name as "setuptools>=64," from that entry, so the match against
+// the backend module "setuptools" failed and analyzeBuildBackend stamped a
+// FALSE "missing-requires-entry" on a backend that was in fact declared.
+func TestMatchBuildBackendRequiresCompound(t *testing.T) {
+	cases := []struct {
+		name     string
+		backend  string
+		requires []string
+		want     string
+		ok       bool
+	}{
+		{"compound", "setuptools.build_meta", []string{"setuptools>=64,<70"}, "setuptools>=64,<70", true},
+		{"single clause control", "setuptools.build_meta", []string{"setuptools>=64"}, "setuptools>=64", true},
+		{"compound non-standard backend", "evil_backend.api", []string{"evil-backend>=1,<2"}, "evil-backend>=1,<2", true},
+		{"compound with extras", "hatchling.build", []string{"hatchling[extra]>=1.0,<2"}, "hatchling[extra]>=1.0,<2", true},
+		{"genuinely absent", "setuptools.build_meta", []string{"wheel>=0.4,<1"}, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok, ambiguous := MatchBuildBackendRequires(c.backend, c.requires)
+			if ambiguous {
+				t.Fatalf("MatchBuildBackendRequires(%q, %v) reported ambiguous", c.backend, c.requires)
+			}
+			if ok != c.ok || got != c.want {
+				t.Errorf("MatchBuildBackendRequires(%q, %v) = (%q, %v), want (%q, %v)",
+					c.backend, c.requires, got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
+// TestAnalyzeBuildBackendCompoundRequiresIsNotMissing asserts the evidence tag
+// for a compound requires entry names the matched entry rather than falsely
+// claiming the backend was never declared.
+func TestAnalyzeBuildBackendCompoundRequiresIsNotMissing(t *testing.T) {
+	toml := `
+[build-system]
+requires = ["evil-backend>=1.0,<2.0"]
+build-backend = "evil_backend.api"
+`
+	s := AnalyzePython("", toml, nil)
+	if len(s.Hooks) != 1 {
+		t.Fatalf("hooks = %d, want 1", len(s.Hooks))
+	}
+	var sawMatched, sawMissing bool
+	for _, e := range s.Hooks[0].Evidence {
+		if e == "build-backend-requires:evil-backend>=1.0,<2.0" {
+			sawMatched = true
+		}
+		if e == "missing-requires-entry" {
+			sawMissing = true
+		}
+	}
+	if sawMissing {
+		t.Error("compound requires entry produced a FALSE missing-requires-entry")
+	}
+	if !sawMatched {
+		t.Errorf("evidence = %v, want it to name the matched compound entry", s.Hooks[0].Evidence)
+	}
+}
+
+// TestExtractBuildRequiresCompoundNotShredded guards a defect found while
+// testing the PEP 508 parser fix: ExtractBuildRequires split the TOML array on
+// every comma, including commas INSIDE a quoted element. A compound specifier
+// is the ordinary way a real pyproject.toml bounds its backend, so
+// "setuptools>=64,<70" became two bogus entries.
+//
+// The second case is the material one. "evil-backend==64.0.0,!=64.1" fragmented
+// into "evil-backend==64.0.0", which pep508.Split reads as an exact PIN — so a
+// range was resolved to a guessed concrete version and buildbackend.go then
+// fetched and analyzed that version. D-01 forbids exactly that.
+func TestExtractBuildRequiresCompoundNotShredded(t *testing.T) {
+	cases := []struct {
+		name string
+		toml string
+		want []string
+	}{
+		{
+			"compound bound",
+			"[build-system]\nrequires = [\"setuptools>=64,<70\"]\n",
+			[]string{"setuptools>=64,<70"},
+		},
+		{
+			"compound containing ==",
+			"[build-system]\nrequires = [\"evil-backend==64.0.0,!=64.1\"]\n",
+			[]string{"evil-backend==64.0.0,!=64.1"},
+		},
+		{
+			"several elements, one compound",
+			"[build-system]\nrequires = [\"setuptools>=64,<70\", \"wheel\"]\n",
+			[]string{"setuptools>=64,<70", "wheel"},
+		},
+		{
+			"multi-line with a compound",
+			"[build-system]\nrequires = [\n  \"setuptools>=64,<70\",\n  \"cython>=3,<4\",\n]\n",
+			[]string{"setuptools>=64,<70", "cython>=3,<4"},
+		},
+		{
+			"single quotes",
+			"[build-system]\nrequires = ['setuptools>=64,<70']\n",
+			[]string{"setuptools>=64,<70"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ExtractBuildRequires(c.toml)
+			if len(got) != len(c.want) {
+				t.Fatalf("ExtractBuildRequires = %q, want %q", got, c.want)
+			}
+			for i := range c.want {
+				if got[i] != c.want[i] {
+					t.Errorf("entry %d = %q, want %q", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}

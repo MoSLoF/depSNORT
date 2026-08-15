@@ -174,3 +174,52 @@ build-backend = "evil_backend.api"
 		t.Errorf("%s = %q, want \"1\"", graph.AttrUnresolvedCount, consumer.Attr[graph.AttrUnresolvedCount])
 	}
 }
+
+// TestResolveBuildBackendCompoundRequiresIsUnpinned covers the report's second
+// PLAUSIBLE call site (HoneyBadger Vanguard, iHBV-TM-022, §4) plus the
+// ExtractBuildRequires shredding defect found alongside it.
+//
+// "evil-backend==64.0.0,!=64.1" is a RANGE. Two separate bugs previously turned
+// it into an exact pin: ExtractBuildRequires split the TOML array on the inner
+// comma, yielding the fragment "evil-backend==64.0.0"; and pep508.Split read a
+// comma-joined specifier's "==" clause as a pin. Either one alone would make
+// depSNORT fetch and analyze a concrete version the range never named — a D-01
+// violation, and one that would have minted a graph node asserting that version
+// was what would install.
+//
+// Correct behavior: no backend node, no edge, and the backend disclosed as an
+// unresolved dependency of the consumer.
+func TestResolveBuildBackendCompoundRequiresIsUnpinned(t *testing.T) {
+	pyproject := `
+[build-system]
+requires = ["evil-backend==64.0.0,!=64.1"]
+build-backend = "evil_backend.api"
+`
+	// Any fetch at all would be a failure of the D-01 refusal, so the fetcher
+	// is given nothing to serve: reaching it would surface as a gap.
+	a := &Adapter{Sdist: fetcherWith(map[string][]byte{})}
+
+	g, consumer := consumerNode()
+	before := g.Len()
+	processed := map[string]bool{}
+	var gaps instsurf.Gaps
+	a.resolveBuildBackend(context.Background(), g, consumer, pyproject, processed, &gaps)
+
+	if g.Len() != before {
+		t.Errorf("nodes = %d, want %d: a compound specifier is a range and must mint no backend node", g.Len(), before)
+	}
+	for _, e := range g.SortedEdges() {
+		if e.Type == graph.EdgeBuildBackend {
+			t.Errorf("build-backend edge %s -> %s was drawn for an unpinned backend", e.From, e.To)
+		}
+	}
+	if got := consumer.Attr[graph.AttrUnresolved]; got != "evil-backend" {
+		t.Errorf("%s = %q, want %q", graph.AttrUnresolved, got, "evil-backend")
+	}
+	if got := consumer.Attr[graph.AttrUnresolvedCount]; got != "1" {
+		t.Errorf("%s = %q, want \"1\"", graph.AttrUnresolvedCount, got)
+	}
+	if err := gaps.Err(); err != nil {
+		t.Errorf("declining an unpinned backend must not register a fetch gap: %v", err)
+	}
+}

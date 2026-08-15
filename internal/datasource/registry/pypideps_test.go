@@ -37,9 +37,12 @@ func TestParseRequiresDistFiltersExtrasAndNormalizes(t *testing.T) {
 		"aiohttp ; extra == \"async\"",
 		"pywin32 ; sys_platform == \"win32\" and extra == \"windows\""
 	]}}`
-	names, err := parseRequiresDist([]byte(raw))
+	names, unparsed, err := parseRequiresDist([]byte(raw))
 	if err != nil {
 		t.Fatalf("parseRequiresDist: %v", err)
+	}
+	if unparsed != 0 {
+		t.Errorf("unparsed = %d, want 0 (every entry here is well-formed)", unparsed)
 	}
 	want := map[string]bool{"flask-sqlalchemy": true, "urllib3": true}
 	if len(names) != len(want) {
@@ -53,7 +56,7 @@ func TestParseRequiresDistFiltersExtrasAndNormalizes(t *testing.T) {
 }
 
 func TestParseRequiresDistBadJSON(t *testing.T) {
-	if _, err := parseRequiresDist([]byte("not json")); err == nil {
+	if _, _, err := parseRequiresDist([]byte("not json")); err == nil {
 		t.Error("expected an error for malformed JSON")
 	}
 }
@@ -139,5 +142,61 @@ func TestRequiresDistServerErrorDegrades(t *testing.T) {
 	}
 	if c.Stats.Gaps != 1 || c.Stats.NotFound != 0 {
 		t.Errorf("stats = %+v, want gaps=1 notfound=0", c.Stats)
+	}
+}
+
+// TestParseRequiresDistRealRequestsCompoundSpecifiers is the regression test for
+// the reported finding (HoneyBadger Vanguard, iHBV-TM-022). These four entries
+// are verbatim from requests' published PyPI requires_dist metadata. Three of
+// them are comma-joined compound specifiers, which the previous operator-scanning
+// parser corrupted into "charset-normalizer<4,", "idna<4," and "urllib3<3," —
+// names that then failed to match their real graph nodes, so genuine transitive
+// dependencies were stamped pypi.parent_status "root-level" (depSNORT's own
+// "confidently a direct dependency" claim) with nothing disclosed.
+func TestParseRequiresDistRealRequestsCompoundSpecifiers(t *testing.T) {
+	raw := `{"info":{"requires_dist":[
+		"charset_normalizer<4,>=2",
+		"idna<4,>=2.5",
+		"urllib3<3,>=1.26",
+		"certifi>=2017.4.17"
+	]}}`
+	names, unparsed, err := parseRequiresDist([]byte(raw))
+	if err != nil {
+		t.Fatalf("parseRequiresDist: %v", err)
+	}
+	if unparsed != 0 {
+		t.Errorf("unparsed = %d, want 0", unparsed)
+	}
+	want := []string{"charset-normalizer", "idna", "urllib3", "certifi"}
+	if len(names) != len(want) {
+		t.Fatalf("names = %v, want %v", names, want)
+	}
+	for i, w := range want {
+		if names[i] != w {
+			t.Errorf("names[%d] = %q, want %q", i, names[i], w)
+		}
+	}
+}
+
+// TestParseRequiresDistCountsUnparsedSeparatelyFromExtras locks the D-24
+// distinction: an extras-gated entry is a deliberate documented exclusion, an
+// unparseable one is a missing edge. They were previously conflated in a single
+// skip, hiding the second behind the first.
+func TestParseRequiresDistCountsUnparsedSeparatelyFromExtras(t *testing.T) {
+	raw := `{"info":{"requires_dist":[
+		"click>=8",
+		"aiohttp ; extra == \"async\"",
+		"https://example.invalid/x/foo-1.0.tar.gz",
+		"-not-a-name"
+	]}}`
+	names, unparsed, err := parseRequiresDist([]byte(raw))
+	if err != nil {
+		t.Fatalf("parseRequiresDist: %v", err)
+	}
+	if len(names) != 1 || names[0] != "click" {
+		t.Errorf("names = %v, want [click]", names)
+	}
+	if unparsed != 2 {
+		t.Errorf("unparsed = %d, want 2 (the URL and the invalid name; the extras-gated entry is NOT unparsed)", unparsed)
 	}
 }

@@ -32,6 +32,12 @@ func TestImportSnapshotRoundTrips(t *testing.T) {
 
 	cache := NewCache(filepath.Join(dir, "cache"), 24*time.Hour)
 	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	// The import stamps entries with `now`, so the freshness read must use the
+	// same clock. Without this the entry is written at a fixed date but judged
+	// against the wall clock, so the test passed only while real time happened
+	// to be within TTL of that date and began failing for good once it was not
+	// — exactly the race Cache.Now exists to prevent.
+	cache.Now = func() time.Time { return now }
 	n, err := ImportSnapshot(cache, snapshotPath, now)
 	if err != nil {
 		t.Fatalf("ImportSnapshot: %v", err)

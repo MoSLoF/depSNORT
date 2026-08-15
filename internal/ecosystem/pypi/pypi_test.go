@@ -1,6 +1,7 @@
 package pypi
 
 import (
+	"strings"
 	"testing"
 
 	"ihbv.io/depsnort/internal/graph"
@@ -256,5 +257,101 @@ func TestPyPIResolveIsDeterministic(t *testing.T) {
 				t.Fatalf("run %d differs at edge %d", i, j)
 			}
 		}
+	}
+}
+
+// TestCompoundSpecifiersAreDisclosedWithCleanNames covers the requirements.txt
+// side of the reported parser finding (HoneyBadger Vanguard, iHBV-TM-022).
+//
+// The fixture holds one ordinary pin, one comma-joined range, one compound
+// whose first clause is "==" , and one bare URL. Pre-fix the parser reported
+// the range as "urllib3<3," in depsnort.unresolved_names, minted a node with
+// the malformed PURL "pkg:pypi/foo@1.0,!=1.0.1" for the "==" compound, and
+// silently dropped nothing only because it mangled the URL into a name.
+func TestCompoundSpecifiersAreDisclosedWithCleanNames(t *testing.T) {
+	g, err := (&Adapter{}).Resolve("testdata/compound")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	var root *graph.Node
+	for _, id := range g.Roots {
+		root = g.Get(id)
+	}
+	if root == nil {
+		t.Fatal("root missing")
+	}
+
+	// Only the single genuine pin becomes a node.
+	if g.Len() != 2 {
+		var ids []string
+		for _, n := range g.SortedNodes() {
+			ids = append(ids, n.ID)
+		}
+		t.Fatalf("nodes = %d, want 2 (root + flask); got %v", g.Len(), ids)
+	}
+	if g.Get(purl.NewPyPI("flask", "2.0.1").String()) == nil {
+		t.Error("flask==2.0.1 was not resolved")
+	}
+
+	// A compound specifier is a RANGE (D-01) — never a pin, even when one of
+	// its clauses is "==" — so no node may be minted from it.
+	for _, n := range g.SortedNodes() {
+		if strings.ContainsAny(n.Version, ",<>=!") {
+			t.Errorf("node %q carries a malformed version %q", n.ID, n.Version)
+		}
+		if strings.ContainsAny(n.Name, ",<>=!") {
+			t.Errorf("node %q carries a corrupted name %q", n.ID, n.Name)
+		}
+	}
+
+	unresolved := root.Attr[graph.AttrUnresolved]
+	for _, want := range []string{"urllib3", "foo"} {
+		var found bool
+		for _, got := range strings.Split(unresolved, ",") {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s = %q, want it to disclose %q as a clean bare name", graph.AttrUnresolved, unresolved, want)
+		}
+	}
+	if strings.Contains(unresolved, "urllib3<3") {
+		t.Errorf("%s = %q, still carries the corrupted name", graph.AttrUnresolved, unresolved)
+	}
+	// The bare URL is not a requirement at all; it must be DISCLOSED as
+	// unparseable rather than silently dropped (D-24).
+	if !strings.Contains(unresolved, "<unparseable:") {
+		t.Errorf("%s = %q, want an <unparseable:...> token for the bare URL line", graph.AttrUnresolved, unresolved)
+	}
+	if root.Attr[graph.AttrUnresolvedCount] != "3" {
+		t.Errorf("%s = %q, want \"3\" (urllib3, foo, and the unparseable URL)",
+			graph.AttrUnresolvedCount, root.Attr[graph.AttrUnresolvedCount])
+	}
+}
+
+// TestUTF8BOMDoesNotDropFirstDependency guards the regression the anchored
+// parser would otherwise have introduced: strings.TrimSpace does not strip
+// U+FEFF, so a requirements.txt written by `pip freeze` under Windows
+// PowerShell 5.1 would have failed the anchored name match on line 1 and lost
+// that dependency with no disclosure at all.
+func TestUTF8BOMDoesNotDropFirstDependency(t *testing.T) {
+	g, err := (&Adapter{}).Resolve("testdata/bom")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if n := g.Get(purl.NewPyPI("requests", "2.31.0").String()); n == nil {
+		t.Error("the BOM-prefixed first dependency was dropped")
+	}
+	if n := g.Get(purl.NewPyPI("click", "8.0.1").String()); n == nil {
+		t.Error("click==8.0.1 was not resolved")
+	}
+	var root *graph.Node
+	for _, id := range g.Roots {
+		root = g.Get(id)
+	}
+	if root != nil && root.Attr[graph.AttrUnresolvedCount] != "" {
+		t.Errorf("a BOM must not register as a coverage gap, got %s = %q",
+			graph.AttrUnresolvedCount, root.Attr[graph.AttrUnresolvedCount])
 	}
 }
