@@ -79,9 +79,10 @@ func (c *PyPIDepsClient) RequiresDist(ctx context.Context, coords []datasource.C
 	for _, coord := range coords {
 		key := c.cacheKey(coord)
 		if raw, fresh, ok := c.Cache.GetRaw(key); ok && (fresh || c.Offline) {
-			if names, err := parseRequiresDist(raw); err == nil {
+			if names, unparsed, err := parseRequiresDist(raw); err == nil {
 				out[coord.Key()] = names
 				c.Stats.FromCache++
+				c.Stats.UnparsedEntries += unparsed
 				continue
 			}
 		}
@@ -96,10 +97,11 @@ func (c *PyPIDepsClient) RequiresDist(ctx context.Context, coords []datasource.C
 	}
 
 	type result struct {
-		coord datasource.Coord
-		names []string
-		raw   []byte
-		err   error
+		coord    datasource.Coord
+		names    []string
+		unparsed int
+		raw      []byte
+		err      error
 	}
 	var (
 		mu      sync.Mutex
@@ -119,8 +121,8 @@ func (c *PyPIDepsClient) RequiresDist(ctx context.Context, coords []datasource.C
 				results[i] = result{coord: coord, err: err}
 				return
 			}
-			names, err := parseRequiresDist(raw)
-			results[i] = result{coord: coord, names: names, raw: raw, err: err}
+			names, unparsed, err := parseRequiresDist(raw)
+			results[i] = result{coord: coord, names: names, unparsed: unparsed, raw: raw, err: err}
 		}(i, coord)
 	}
 	wg.Wait()
@@ -139,6 +141,7 @@ func (c *PyPIDepsClient) RequiresDist(ctx context.Context, coords []datasource.C
 		}
 		out[r.coord.Key()] = r.names
 		c.Stats.FromNet++
+		c.Stats.UnparsedEntries += r.unparsed
 		_ = c.Cache.PutRaw(c.cacheKey(r.coord), r.raw, now())
 	}
 	if len(errsBy) > 0 {
@@ -183,18 +186,29 @@ type pypiDepsResponse struct {
 // parseRequiresDist extracts info.requires_dist and reduces each PEP 508
 // requirement string to a plain, PEP-503-normalized dependency name,
 // dropping anything extras-gated (see RequiresDist's doc comment for why).
-func parseRequiresDist(raw []byte) ([]string, error) {
+// It also reports how many entries could not be parsed at all. That count is
+// kept DISTINCT from the extras-gated skip below: an extras-gated entry is a
+// deliberate, documented exclusion, whereas an unparseable one is a dependency
+// edge silently missing from the graph. Conflating them — as one combined
+// `name == "" || GatedByExtra(marker)` skip did — hid the second behind the
+// first (Decision D-24).
+func parseRequiresDist(raw []byte) (names []string, unparsed int, err error) {
 	var resp pypiDepsResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, fmt.Errorf("pypi-requires-dist: parsing response: %w", err)
+		return nil, 0, fmt.Errorf("pypi-requires-dist: parsing response: %w", err)
 	}
-	var names []string
 	for _, entry := range resp.Info.RequiresDist {
 		name, _, _, marker := pep508.Split(entry)
-		if name == "" || pep508.GatedByExtra(marker) {
+		if name == "" {
+			// Unreadable specifier: whatever edge it described is now missing.
+			unparsed++
+			continue
+		}
+		if pep508.GatedByExtra(marker) {
+			// Deliberate: this tool never knows which extras were requested.
 			continue
 		}
 		names = append(names, purl.NormalizePyPI(name))
 	}
-	return names, nil
+	return names, unparsed, nil
 }

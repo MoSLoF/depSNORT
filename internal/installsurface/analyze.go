@@ -982,13 +982,51 @@ func ExtractBuildRequires(toml string) []string {
 		return nil
 	}
 	var out []string
-	for _, part := range strings.Split(s[start+1:end], ",") {
+	for _, part := range splitTOMLArray(s[start+1 : end]) {
 		part = strings.Trim(strings.TrimSpace(part), `"'`)
 		if part != "" {
 			out = append(out, part)
 		}
 	}
 	return out
+}
+
+// splitTOMLArray splits a TOML inline-array body on the commas that separate
+// its ELEMENTS, ignoring commas inside quoted strings.
+//
+// A plain strings.Split on "," shreds any element containing one, and a
+// compound PEP 440 specifier is exactly that: `requires = ["setuptools>=64,<70"]`
+// — the ordinary way a real pyproject.toml bounds its build backend — became
+// the two bogus entries "setuptools>=64" and "<70". That is not merely cosmetic.
+// `requires = ["evil-backend==64.0.0,!=64.1"]` fragmented into
+// "evil-backend==64.0.0", which parses as an exact PIN, so a range was resolved
+// to a guessed concrete version and that version was fetched and analyzed —
+// precisely what D-01 forbids.
+func splitTOMLArray(body string) []string {
+	var (
+		out   []string
+		cur   strings.Builder
+		quote byte
+	)
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+			cur.WriteByte(c)
+		case c == '"' || c == '\'':
+			quote = c
+			cur.WriteByte(c)
+		case c == ',':
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	return append(out, cur.String())
 }
 
 // normalizePEP503 applies PEP 503 name normalization (lowercase; runs of -,

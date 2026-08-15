@@ -688,7 +688,10 @@ func cmdScan(args []string) int {
 		if depsCov.Error != "" {
 			fmt.Fprintf(os.Stderr, "depsnort: warning: %s coverage degraded: %v\n", depsCov.Name, depsCov.Error)
 		}
-		if depsCov.Error != "" || depsCov.Stats.Gaps > 0 {
+		// UnparsedEntries counts too: a requires_dist entry this tool could not
+		// read is a dependency edge missing from the graph, which must degrade
+		// coverage rather than pass as a clean reconstruction (D-24).
+		if depsCov.Error != "" || depsCov.Stats.Gaps > 0 || depsCov.Stats.UnparsedEntries > 0 {
 			dataSourceGaps = append(dataSourceGaps, depsCov.Name)
 		}
 		info.DataSources = append(info.DataSources, depsCov)

@@ -194,3 +194,66 @@ func TestReconstructDepthRootsAreIndependent(t *testing.T) {
 		t.Errorf("y should remain a direct dependency of root B: %+v", n)
 	}
 }
+
+// TestReconstructDepthRealRequestsTreeFromCompoundSpecifiers is the end-to-end
+// regression test for the reported finding (HoneyBadger Vanguard, iHBV-TM-022).
+//
+// It reproduces the exact scenario the report observed: a flat, provenance-free
+// pip-freeze pin of requests plus its four real dependencies, with requests'
+// verbatim published requires_dist. Three of those four entries are comma-joined
+// compound specifiers.
+//
+// Pre-fix, pep508.Split corrupted those three names ("idna<4," etc.), so they
+// failed the name match in reconstructRoot, fell through to the "no parent
+// found" branch, and were stamped pypi.parent_status "root-level" at depth 1 —
+// depSNORT's own "confidently a direct dependency" claim — while certifi (the
+// single-clause control) resolved correctly. Nothing was disclosed.
+func TestReconstructDepthRealRequestsTreeFromCompoundSpecifiers(t *testing.T) {
+	g := graph.New()
+	deps := []string{"charset-normalizer", "idna", "urllib3", "certifi"}
+	root := flatRoot(g, append([]string{"requests"}, deps...)...)
+	requests := purl.NewPyPI("requests", "1.0.0").String()
+
+	// The names as parseRequiresDist yields them post-fix, from requests'
+	// real metadata: ["charset_normalizer<4,>=2", "idna<4,>=2.5",
+	// "urllib3<3,>=1.26", "certifi>=2017.4.17"].
+	requiresDist := map[string][]string{
+		coordKey(g.Get(requests)): deps,
+	}
+	for _, d := range deps {
+		requiresDist[coordKey(g.Get(purl.NewPyPI(d, "1.0.0").String()))] = nil
+	}
+
+	ReconstructDepth(g, []*graph.Node{root}, requiresDist)
+
+	for _, d := range deps {
+		id := purl.NewPyPI(d, "1.0.0").String()
+		n := g.Get(id)
+		if n == nil {
+			t.Fatalf("%s missing from the graph", d)
+		}
+		if got := n.Attr[AttrParentStatus]; got != "resolved" {
+			t.Errorf("%s parent_status = %q, want \"resolved\" (the reported bug stamped these \"root-level\")", d, got)
+		}
+		if n.Depth != 2 {
+			t.Errorf("%s depth = %d, want 2", d, n.Depth)
+		}
+		if n.Direct {
+			t.Errorf("%s is still marked Direct; it is a transitive dependency of requests", d)
+		}
+		if !hasEdge(g, requests, id, graph.EdgeDependsOn) {
+			t.Errorf("missing requests -> %s edge", d)
+		}
+		if hasEdge(g, root.ID, id, graph.EdgeDependsOn) {
+			t.Errorf("synthetic root -> %s edge was not retired", d)
+		}
+	}
+
+	// requests itself genuinely is top-level here.
+	if got := g.Get(requests).Attr[AttrParentStatus]; got != "root-level" {
+		t.Errorf("requests parent_status = %q, want \"root-level\"", got)
+	}
+	if g.Get(requests).Depth != 1 {
+		t.Errorf("requests depth = %d, want 1", g.Get(requests).Depth)
+	}
+}
