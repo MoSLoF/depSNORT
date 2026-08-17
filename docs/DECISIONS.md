@@ -1002,3 +1002,149 @@ read `0.7.4` — publishing a fully signed Release built from thirteen-commit-ol
 code. The gate compares a tag to the version at the commit it points to, which
 protects against a mislabelled release and not at all against publishing the
 wrong commit. Pushing one tag by name is what protects against that.
+
+## D-40 — state transition is a first-class axis, and it never blocks
+
+Every check that existed before this release evaluates a version as an isolated
+event. VC-002 judges a hook by what it can do. VC-005 judges a burst against the
+package's own cadence. VC-001 judges a coordinate against a feed. None of them
+can answer the question an operator actually asks during a dependency update:
+*did anything security-relevant change?*
+
+An external market review named the same gap from the outside, calling
+version-to-version capability drift the clearest competitive difference between
+depSNORT and the tools it sits beside. It also named the two things drift needs
+to be more than a diff: version-level publisher identity, and a persistent
+known-good record to compare against.
+
+Four pieces, and a deliberate boundary on each.
+
+**`internal/profile` — the comparable form of a package@version.** Capabilities,
+the hooks carrying them, remote hosts reached, credential sinks touched,
+publisher, source class, and a digest of direct dependencies. It is built from
+the install-time subgraph the scan already materialized, so a profile costs
+nothing beyond the scan. Two properties are load-bearing and both have tests
+that fail loudly if they regress:
+
+*Determinism.* Every slice is sorted and nothing derives from wall-clock or map
+order, because a baseline is meant to be committed — and a profile that varies
+between runs would report phantom drift on every scan until the file was
+ignored. Remote artifacts contribute their HOST rather than their URL for the
+same reason: a cache-busting query string changing between releases is not a
+security event, a new destination is.
+
+*Unobserved is not empty.* A profile built over an install surface that could
+not be read records that fact. Without it, a baseline captured under degraded
+coverage would launder itself into a known-good record asserting "this package
+has no capabilities" — the exact all-clear-over-nothing failure the coverage
+model exists to prevent (D-24), one layer up.
+
+**Publisher lineage.** `ReleaseHistory.Maintainers` answers "who *can* publish
+this package today?" and reads identically before and after a stolen token
+pushes a release, so it could never anchor an actor signal. npm's packument
+carries `_npmUser` per version and crates.io's versions endpoint carries
+`published_by`; both are inside documents the temporal axis already fetches and
+caches, so lineage costs no extra request and works offline. The other four
+registries expose nothing, and where that is true `PriorPublishers` returns a
+`known: false` flag rather than an empty set — because "we cannot see who
+published the earlier versions" cannot support "this publisher is new", and a
+check that conflated those two would be confidently wrong exactly where data is
+thinnest.
+
+**Baselines are files, not inferences.** The obvious alternative — take the
+previous version from the registry and diff against that — fails on its own
+premise: it means trusting whatever the registry serves right now, which is
+precisely what is under suspicion when an account is compromised, and it makes
+the verdict depend on network state instead of on something a human approved. A
+committed file is reviewable, diffable, signable, and identical on every runner
+including air-gapped ones. Nothing promotes itself; `baseline create` writes what
+you point it at, and warns when it is recording over incomplete coverage,
+because a capability that was never read must not be baselined as absent.
+
+**Drift never blocks.** This is the substantive judgement of the four. Block
+class belongs to checks that judge a shape directly on its own evidence: a known
+malicious release (VC-001), the operator's own confirmed indicator (VC-003), a
+credential-exfiltration or download-cradle install path (VC-002d/f). A drift
+finding rests on a *comparison*, and the baseline side of that comparison is a
+file depSNORT cannot verify — it may have been recorded over an unread install
+surface, or promoted from a version that was already compromised. Gate-eligible
+is the honest ceiling for a conclusion resting on an operator-supplied input.
+Nothing is lost by the restraint: if the drifted capability really is a
+block-class shape, VC-002d/f reaches that verdict independently and blocks on its
+own evidence.
+
+The weighting is the package's own version number, because a version is a claim
+about how much should have changed. A major release that adds network access is
+doing what major releases do; the same addition in a patch release contradicts
+the claim the release itself made, and that contradiction — not the capability —
+is the signal.
+
+VC-011 gets the same restraint for the same reason. Handovers, co-maintainer
+first releases, and CI token migrations all produce a first-time publisher, so
+actor change alone stays advisory and escalates only alongside an install hook or
+an ended dormancy. A check that gated on new publishers would be muted within a
+week, including for the case it exists for.
+
+The composition is the deliverable. One VC-010 finding now states the capability
+change, the actor change, and the temporal context together — "1.6.3 gained a
+credential sink and network egress relative to 1.6.2 in a patch release,
+published by an account that has never published this package, after 420 days of
+dormancy" — rather than three findings an operator has to assemble by
+cross-referencing.
+
+## D-41 — a dependency's source is coverage state, not a footnote
+
+A field review of a Rust project (`psmux`, 246 lockfile nodes) had to
+reconstruct by hand something depSNORT already parsed and then discarded: which
+dependencies came from a registry. That single classification carried the whole
+risk picture. 243 crates were routine advisory work; the two vendored forks were
+the only ones worth reading, and they are precisely the ones no advisory feed has
+ever indexed.
+
+Every adapter had the fact and threw it away. Cargo read `source` into an
+ecosystem-private attribute nothing consumed — and a crate with *no* source line,
+which is exactly how Cargo encodes a vendored path dependency, was
+indistinguishable from crates.io. Bundler states a gem's origin outright by
+grouping specs under `GEM`/`GIT`/`PATH`; the parser tracked the section header and
+dropped it. npm's `resolved` was stored raw and read only by VC-007.
+
+So an OSV lookup for a vendored fork returned nothing, and nothing rendered as
+clean. That is the one thing this tool promises not to do (D-24), and it had a
+blind spot in it the entire time.
+
+Provenance is now recorded on ecosystem-neutral node attributes, for the same
+reason the coverage keys are ecosystem-neutral: verifiability is a property of
+the scan, and the verdict layer must read it without knowing which adapter
+produced the graph. A non-registry package raises VC-009 *and* degrades scan
+coverage, so it can reach exit 3 under `-fail-on-incomplete` — the finding names
+what could not be verified, the coverage axis makes it gate.
+
+**VC-009 is advisory alone, deliberately.** The field report argued that
+vendoring those two crates in-tree was a *stronger* posture than git
+dependencies would have been: pinned, in-repo, reviewable in the same pull
+request as everything else, and immune to an upstream force-push swapping code
+underneath a build. That argument is correct, and a check that called it a risk
+would be wrong. What is not defensible is a clean report that cannot be told
+apart from one over packages nothing could have checked. It escalates to
+gate-eligible only when the same package also carries install-time code: a
+mutable upstream plus a mechanism to act on the change is the composed shape,
+not either half.
+
+Two false-positive guards, both inherited from how D-24 already handles this
+class of problem:
+
+**Roots are never charged.** The project being scanned is local source by
+definition, and Cargo records no `source` for it. Charging that would flag every
+scan of every project on day one.
+
+**A class is recorded only on positive evidence.** An npm v1 lockfile carries no
+`resolved` field on nested entries; recording those as "unknown" would
+manufacture a scan-wide gap for every legacy project, which is the same mistake
+as reporting a flat lockfile format as a resolver defect. A private or mirrored
+registry URL stays registry-class for the same reason — it still has a
+name@version a feed can answer about, and flagging every enterprise Artifactory
+mirror would be exactly the warning tax that gets a detector muted.
+
+PyPI needed no adapter change: a PEP 508 direct reference is already unpinned and
+already degrades coverage through that path, and adding a second signal for the
+same fact would double-count it.

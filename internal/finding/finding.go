@@ -50,6 +50,13 @@ const (
 	AxisWeather         Axis = "weather"          // recent-compromise, temporal
 	AxisVuln            Axis = "vuln"             // ordinary disclosed CVEs
 	AxisHygiene         Axis = "hygiene"          // provenance / attestation gaps
+	// AxisDrift is state transition: what changed between a known-good release
+	// and the candidate one (Decision D-40). Distinct from weather because the
+	// subject is different — weather asks whether a release is anomalous for
+	// this package's own history, drift asks whether the package still does
+	// what it did when someone approved it. A finding on this axis is always
+	// relative to a baseline, and says nothing at all without one.
+	AxisDrift Axis = "drift"
 )
 
 // GateClass is the exit-code semantics of a finding — distinct from RiskState.

@@ -184,6 +184,8 @@ func resolveV2(g *graph.Graph, lf *lockfile) {
 				n.Attr = map[string]string{}
 			}
 			n.Attr["npm.resolved"] = pkg.Resolved
+			class, ref := classifyResolved(pkg.Resolved)
+			n.SetSource(class, ref)
 		}
 		if pkg.Dev {
 			if n.Attr == nil {
@@ -454,6 +456,37 @@ func mergeKeys(maps ...map[string]string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// classifyResolved maps a package-lock `resolved` value onto an
+// ecosystem-neutral provenance class (Decision D-41).
+//
+// npm's shapes that matter are the non-HTTP ones. A `git+https://…` or
+// `github:owner/repo#ref` dependency is code npm clones and builds — commonly
+// WITH lifecycle scripts, and pinned to a ref an upstream force-push can
+// replace. A `file:`/`link:` dependency is local source that was never
+// published anywhere.
+//
+// An https URL is treated as a registry coordinate whether or not the host is
+// npmjs.org, because a private or mirrored registry is still a registry: the
+// package has a name@version an advisory feed can be asked about, which is the
+// only property this classification is about. Flagging every enterprise
+// Artifactory URL as unverifiable would be exactly the warning tax that gets a
+// detector muted, and it would say something false besides.
+func classifyResolved(resolved string) (class, ref string) {
+	r := strings.TrimSpace(resolved)
+	if r == "" {
+		return "", ""
+	}
+	switch c := graph.ClassifyRef(r); c {
+	case graph.SourceGit, graph.SourcePath:
+		return c, r
+	}
+	if strings.HasPrefix(strings.ToLower(r), "http://") ||
+		strings.HasPrefix(strings.ToLower(r), "https://") {
+		return graph.SourceRegistry, r
+	}
+	return graph.SourceUnknown, r
 }
 
 func firstNonEmpty(vals ...string) string {

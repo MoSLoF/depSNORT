@@ -1,169 +1,420 @@
 # depSNORT
 
-**An IDS for the dependency supply chain.** Dependabot tells you what's outdated;
-Snort matches traffic against a rule pack. depSNORT does the second thing to
-your dependency tree: it statically resolves everything a repo pulls in, then
-runs it against a modular pack of vector checks — **before a single package is
-installed.**
+**A pre-install IDS for the dependency supply chain.**
+
+Dependabot tells you what is outdated. Traditional SCA tells you what is already
+known to be vulnerable. Package malware scanners inspect artifacts for suspicious
+code. Repository firewalls control what may enter an organization.
+
+depSNORT asks a different question:
+
+> Has this dependency, release, or install path deviated in a way that is
+> consistent with supply-chain compromise — **before package code executes**?
+
+It resolves dependency trees, enriches them with threat intelligence and release
+history, reconstructs install-time behavior statically, compares the result
+against a known-good baseline where one exists, and runs everything through a
+modular pack of vector checks. The output is an explainable verdict: **advisory,
+gate-eligible, block, or incomplete coverage**.
 
 > Design rationale and the full decision log live in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
-Six ecosystems (npm, PyPI, RubyGems, Cargo, Composer, NuGet); a modular pack of
-vector checks spanning known-compromise advisories, install-hook capability
-(network / credentials / obfuscation / download-cradle), temporal "weather"
-(dormancy, release bursts), typosquatting, dependency confusion, an operator IOC
-ledger, and disclosed CVEs; a static install-surface analyzer that reads
-lifecycle hooks **without ever running them**; and Neo4j/Cypher, SARIF, DOT, and
-PDF output. It compiles, it is tested against an adversarial fixture corpus, and
-it does the thing it claims.
+## Why depSNORT exists
 
-## Ethos (non-negotiable)
+No single supply-chain signal is enough.
 
-- **Zero execution.** depSNORT never runs a package manager and never fires a
-  lifecycle hook. It parses lockfiles and manifests statically. The whole point
-  is to see the tree *before* anything with a `preinstall`/`postinstall` runs.
-- **Dogfooded footprint.** The tool has **zero third-party dependencies** — pure
-  Go standard library. A supply-chain-safety tool must pass its own audit. Run
-  `make self-audit` (or `go list -m all`) and confirm the list is one line, or
-  `./depsnort sbom` for the machine-readable version: a CycloneDX SBOM generated
-  from the module graph the linker actually embedded, whose `components` array is
-  empty. CI fails if that ever stops being true.
-- **Sovereign, modular ruleset.** Vector checks are plugins that implement one
-  contract. The built-in pack is simply the first pack.
+- A new release is not malicious because it is new.
+- An install hook is not malicious because it reaches the network.
+- A dormant package is not compromised because it woke up.
+- A new publisher is not an attacker because they are new.
+- A CVE does not mean a release is part of an active supply-chain attack.
 
-## Layout
+The useful signal appears when evidence **composes**.
 
 ```
-cmd/depsnort/                 CLI entry + exit-code contract
-internal/finding/             severity · axis · gate-class · risk-state · Finding
-internal/purl/                canonical package-url identity
-internal/graph/               the dual-tree graph model (declared + install-time)
-internal/ecosystem/           Adapter seam (multi-ecosystem from day one)
-internal/ecosystem/npm/       npm: package-lock.json resolver
-internal/ecosystem/pypi/      PyPI: requirements.txt / Pipfile.lock resolver + sdist analysis
-internal/ecosystem/rubygems/  RubyGems: Gemfile.lock resolver
-internal/ecosystem/cargo/     Cargo: Cargo.lock resolver
-internal/ecosystem/composer/  Composer: composer.lock resolver + vendor/ analysis
-internal/ecosystem/nuget/     NuGet: packages.lock.json resolver
-internal/datasource/registry/ shared registry-metadata client (RubyGems, Cargo, Composer, NuGet)
-internal/installsurface/      static install-time capability analysis (all ecosystems)
-internal/check/               vector-check plugin contract + registry
-internal/check/builtin/       the v0 ruleset (VC-001 through VC-008)
-internal/verdict/             findings -> node risk state + process exit code
-internal/emit/                output emitters (JSON, SARIF, DOT, Cypher, PDF)
+lockfiles / manifests
+        |
+        v
+declared dependency graph
+        |
+        +--------------------+--------------------+
+        |                    |                    |
+        v                    v                    v
+threat intelligence    release lineage      known-good baseline
+OSV / IOC ledger       cadence / dormancy   capability profile
+                       publisher identity   publisher / topology
+        |                    |                    |
+        +--------------------+--------------------+
+                             |
+                             v
+                  static install surface
+              hooks -> exec -> fetch -> sinks
+                             |
+                             v
+                   modular vector checks
+                             |
+                             v
+           advisory / gate / block / coverage gap
 ```
 
-## Build & run
+That is the IDS analogy: depSNORT treats dependency state and package releases as
+security events, correlates them against deterministic rules and context, and
+reports the evidence that produced the verdict.
 
-Requires Go 1.24+. No network needed (no external modules to fetch).
+## What depSNORT is — and is not
 
-```
-go build -o depsnort ./cmd/depsnort      # Windows: go build -o depsnort.exe ./cmd/depsnort
-./depsnort checks                        # list registered vector checks
-./depsnort sbom                          # emit depsnort's OWN CycloneDX SBOM
-./depsnort scan ./path/to/project        # analyze; emits JSON to stdout
-./depsnort scan -fail-on-eligible .      # let gate-eligible warnings fail CI
-./depsnort scan -offline .               # OSV cache only; never touch the network
-./depsnort scan -no-osv .                # skip the OSV data-source layer
-./depsnort scan -internal-scopes @acme . # enable dependency-confusion (VC-007)
-```
+**depSNORT is:**
 
-> **Check which build you have.** `./depsnort version` and every report header
-> carry the baked-in version (`v0.7.5`). If a report header or the flag list does
-> not match what you expect, the source tree on disk is stale — re-extract before
-> debugging anything else.
+- a local, pre-install dependency IDS;
+- a static install-surface analyzer;
+- a release-lineage and publisher-lineage anomaly detector;
+- a state-transition detector: what changed since you approved this tree;
+- a dependency-graph correlation engine;
+- a CI gating primitive;
+- an explainable rules engine that can operate offline.
 
-> **Build with CGO disabled.** depSNORT is pure Go; build it as a static
-> binary (`CGO_ENABLED=0`, already set in the Makefile). One-time for manual
-> builds: `go env -w CGO_ENABLED=0`. This yields a no-libc static binary
-> (Decision D-10) and sidesteps the missing-C-headers trap on minimal Linux/WSL.
+**depSNORT is not:**
 
-### Structural checks (offline, no network)
+- a replacement for SCA or vulnerability management;
+- a dynamic malware sandbox;
+- a repository proxy/firewall;
+- a proof that a package is safe;
+- an ML classifier that hides its reasoning behind a score.
 
-Two checks need no data source at all. **VC-006** flags package names that are a
-near-miss of a popular package — typosquats — as *advisory* (surfaced, never
-gates). It is calibrated against real-world data: scoped packages are skipped
-(a scope is explicit provenance, not impersonation), an evidence-driven
-allowlist exonerates legitimate near-neighbours like `preact` and `scapy`,
-distance-2 matches require a name of at least 10 characters, and a package
-pulled in by an established parent is vouched for. See D-17. **VC-007** flags a dependency matching one of your
-declared internal scopes/names (`-internal-scopes`, `-internal-names`) that
-resolves from a *public* registry — a dependency-confusion substitution — as
-*gate-eligible*. VC-007 is a no-op until you declare something internal, so it
-raises zero false alarms by default.
+The project is intentionally narrow: detect supply-chain intrusion indicators
+before dependency code gets a chance to run.
 
-### Data sources (OSV)
+## Current coverage
 
-`scan` cross-checks every resolved `package@version` against OSV.dev, splitting
-the result across the two axes: **VC-001** flags known-malicious releases
-(`MAL-*` advisories → FLAG / block / exit 1), and **VC-008** reports ordinary
-CVEs (advisory / never-gate, so vuln noise cannot fail the build). Advisories
-are fetched once, up front, and **cached on disk** (`-osv-cache`, default under
-your user cache dir); `-offline` runs entirely from that cache for
-deterministic, air-gapped gating. Degraded coverage (offline misses, network
-errors) is reported under `data_sources` in the JSON — a partial run is never
-mistaken for a clean one.
+Six ecosystems share the same graph, check, verdict, and output model:
 
-The OSV client honors the standard `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`
-environment variables (Go's default HTTP transport reads them), so a
-sandboxed or corporate runner can reach `api.osv.dev` through an egress
-proxy without any depSNORT-specific configuration — just allowlist the host
-in your proxy policy.
+| Ecosystem | Lockfile(s) | PURL type | Install-time surface |
+|-----------|-------------|-----------|----------------------|
+| **npm** | `package-lock.json` (v1–v3) | `pkg:npm/` | `preinstall`/`postinstall` and related lifecycle scripts |
+| **PyPI** | `requirements.txt`, `Pipfile.lock` | `pkg:pypi/` | `setup.py`, PEP 517 build backends, `.pth` files |
+| **RubyGems** | `Gemfile.lock` | `pkg:gem/` | `extconf.rb` / native-extension install paths |
+| **Cargo** | `Cargo.lock` | `pkg:cargo/` | `build.rs` and compile-time code paths |
+| **Composer** | `composer.lock` | `pkg:composer/` | scripts, plugin packages, plugin entrypoints |
+| **NuGet** | `packages.lock.json` | `pkg:nuget/` | install/init scripts and package build assets |
 
-When no network path to `api.osv.dev` exists at all — a fully air-gapped CI
-runner or sandbox — `-osv-snapshot <file>` imports a JSON advisory snapshot
-into the OSV cache before the scan runs, so `-offline` has real coverage on
-a first run instead of an empty cache. The snapshot is a JSON array of
-`{"ecosystem", "name", "version", "advisories": [...]}` records (the same
-`Advisory` shape OSV itself returns); a container image or CI cache can ship
-a periodically-refreshed snapshot file alongside the repo:
+The built-in pack currently covers:
 
-```
-./depsnort scan -osv-snapshot advisories-snapshot.json -offline .
-```
+- **VC-001** — known malicious releases: OSV malicious-package advisories;
+- **VC-002 family** — install-surface behavior: network egress, named credential
+  access, decode/execute indirection, credential-exfiltration shapes, and
+  download/execute cradles;
+- **VC-003** — operator IOC ledger: explicit package/version indicators supplied
+  by the operator;
+- **VC-004** — dormancy: a recent release cluster following prolonged inactivity;
+- **VC-005** — anomalous release burst: release density measured against the
+  package's own historical cadence;
+- **VC-006** — typosquatting: calibrated near-name detection;
+- **VC-007** — dependency confusion: internal names/scopes resolving from a
+  public registry;
+- **VC-008** — disclosed CVEs: vulnerability context that remains advisory by
+  design;
+- **VC-009** — unverifiable dependency source: a package resolved from a git URL,
+  a local path, or a direct artifact URL, which no advisory feed indexes;
+- **VC-010** — capability drift: install-time capability gained relative to a
+  known-good baseline, weighted by what the version number claimed;
+- **VC-011** — publisher lineage: a version published by an account with no
+  prior release of that package.
 
-That snapshot file doesn't have to be hand-written. `-osv-export <file>` writes
-the results of a NORMAL, network-connected scan out in the same format — run it
-once somewhere with network access, then ship the resulting file to every
-air-gapped environment that needs `-osv-snapshot`:
+`./depsnort checks` prints the live registry — it is generated from the same
+single registration point the adversarial corpus builds from (D-37), so the list
+cannot drift from what actually runs.
+
+## The differentiator: correlation, not a single detector
+
+Individual signals in depSNORT are not claimed to be unique. The differentiator
+is their combination in one pre-install model:
 
 ```
-# once, with network access: scan and capture what OSV said
+release lineage  +  install-time capability  +  state transition since known-good
+                 +  dependency-graph context +  known threat intelligence
+                 +  explicit coverage state
+                 =  explainable supply-chain verdict
+```
+
+Three examples illustrate the model.
+
+**Dormancy is context, not guilt.** VC-004 identifies a release published after
+prolonged dormancy, but dormancy alone stays advisory. It becomes gate-eligible
+when the awakening release also declares an install hook. The check walks
+backward through a rapid release cluster to find the actual dormancy boundary, so
+a short sequence of patch releases after the dormant period does not erase the
+signal.
+
+**A burst is only anomalous relative to its own package.** VC-005 does not use a
+global rule such as "three releases in 24 hours is suspicious." It calculates the
+package's own median inter-release interval and asks whether the cluster around
+the pinned version is abnormal *for that package*. A package that normally ships
+several times a day is not penalized for doing so.
+
+**Drift is a claim about change, not about capability.** VC-002 asks what a
+package can do. VC-010 asks what it can do that it could not do when you approved
+it — and weights the answer by the package's own version number, because a
+version is a claim about how much should have changed. A composed drift finding
+reads:
+
+```
+depsnort-fixture-drift gained install-time capability since 1.6.2 (patch release)
+  1.6.2 -> 1.6.3 (patch): new capabilit(ies): credentials, network;
+  new credential sink(s): NPM_TOKEN; new remote host(s): telemetry.example.invalid;
+  published by mallory, where the baseline version was published by alice;
+  the drifted release also arrived after 420 days of dormancy
+```
+
+That is one claim an operator can act on, not three findings they have to
+assemble themselves.
+
+## Zero execution is a design invariant
+
+depSNORT **never** runs a package manager and never intentionally executes
+package code.
+
+It parses lockfiles and manifests, reads registry metadata, and statically
+examines install-time source and package assets. The objective is to characterize
+the path that *would* execute before allowing that path to execute.
+
+This intentionally differs from dynamic package-analysis systems. Dynamic
+sandboxes answer "what did this package do when detonated?" depSNORT answers
+"what install-time behavior is exposed, and is the release context consistent
+with compromise?" The two approaches are complementary.
+
+## The dual-tree model
+
+A lockfile describes the tree the developer selected. Install-time code can
+create a second, undeclared execution graph. depSNORT models both:
+
+```
+declared graph
+  package -> depends-on -> package
+
+install-time graph
+  package -> declares-hook -> hook
+  hook    -> execs         -> artifact
+  hook    -> fetches       -> URL
+  hook    -> reads-env     -> credential sink
+```
+
+Both subgraphs are populated when the relevant source or package assets are
+available. Risk propagates through the install-time path that explains the
+finding — the hook, the files it executes, the URLs it reaches, the sinks it
+touches — but it does **not** flow across ordinary `depends-on` edges. A bad
+dependency does not turn its entire transitive tree red.
+
+## Install-surface extraction
+
+The VC-002 family scores *where an install path reaches*:
+
+- **VC-002b** — network egress → gate-eligible;
+- **VC-002c** — named credential access → gate-eligible;
+- **VC-002e** — decode-and-execute indirection → gate-eligible;
+- **VC-002d** — named credentials **plus** network egress → **block**;
+- **VC-002f** — download-and-execute cradle (`curl … | sh`,
+  `iex (…).DownloadString`, `certutil -urlcache`, and kin) → **block**.
+
+When a cradle is present, VC-002b defers to VC-002f so the reach is reported
+once, at the higher gate class, rather than twice.
+
+Precision matters more than reach here. Broad environment access
+(`process.env`, `os.environ`, `ENV[]`) is deliberately *not* a credential signal
+— it is recorded as the weaker `env` capability — because legitimate native-build
+hooks read environment variables and download prebuilt binaries constantly.
+Treating that as exfiltration would flag `sharp`, `bcrypt`, and `sqlite3`, and
+earn the tool a mute. Only *named* secrets (`NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`,
+`GEM_HOST_API_KEY`, `.npmrc`, `AWS_SECRET_ACCESS_KEY`, `id_rsa`, …) count. A
+fixture pair locks this in: a worm-shaped package that must flag, and a benign
+native-build package that must not.
+
+```
+./depsnort scan -no-osv internal/ecosystem/npm/testdata/wormy
+```
+
+The bundled adversarial fixture produces the full install-time subgraph and a
+block verdict without executing the package.
+
+## Release-lineage telemetry
+
+A lockfile pins one version; it contains no release history. depSNORT therefore
+reads publish metadata from ecosystem registries and builds a `ReleaseHistory`
+for each package. Registry metadata supplies:
+
+- version publish timestamps;
+- package-specific release cadence;
+- dormancy boundaries;
+- release-burst clustering;
+- recency decay;
+- **per-version publisher identity**, where the registry exposes it.
+
+Only metadata is fetched for the temporal axis — never a tarball, never an
+install. Results are cached; `-offline` uses the cache exclusively and
+`-no-registry` disables registry enrichment entirely.
+
+Temporal findings use exponential recency decay with a 90-day half-life:
+`score = severity × confidence × recency_decay`. "Recent" is a curve rather than
+a cliff, so a three-year-old dormancy event scores near zero instead of shouting
+as loudly as one from last week.
+
+**Publisher lineage.** A package-level maintainer list answers "who *can* publish
+this today?" — it reads identically before and after a stolen token pushes a
+release. VC-011 needs the other question: who published version N versus N+1. Two
+of the six registries state it (npm's `_npmUser`, crates.io's `published_by`),
+both inside documents the temporal axis already fetches and caches. Where a
+registry exposes nothing, depSNORT records the absence as coverage state and the
+check does not fire — "we cannot see who published the earlier versions" cannot
+support "this publisher is new".
+
+## Known-good baselines and capability drift
+
+A baseline is a file you commit and review, not an inferred "last good version".
+Inferring it from a registry would mean trusting whatever that registry served
+most recently — precisely the thing under suspicion when an account is
+compromised — and would make the verdict depend on network state instead of on
+something an operator approved.
+
+```
+# record what the tree looks like now, having decided it is good
+./depsnort baseline create -o depsnort-baseline.json .
+
+# later: what changed, and does the change fit what the version claimed?
+./depsnort scan -baseline depsnort-baseline.json .
+```
+
+Each profile records the package's install-time capabilities, the hooks carrying
+them, the remote hosts they reach, the credential sinks they touch, its publisher
+identity, its source class, and a digest of its direct dependencies. Profiles are
+byte-stable, so two `baseline create` runs over an unchanged tree differ only in
+their `created` line and a committed baseline does not generate diff churn.
+
+Drift weighting follows the version number: a patch or minor release that gains
+credential access, a cradle, or obfuscation is gate-eligible and high severity; a
+major release making the same addition is advisory, because a major release makes
+no claim that nothing structural changed. **VC-010 never blocks.** Block class
+belongs to checks that judge a shape on its own evidence; a drift finding rests
+on a comparison whose baseline side is a file depSNORT cannot verify.
+
+Without `-baseline` the drift axis is simply inactive, and the run says so on
+stderr. A scan that could not have reported drift should not read like one that
+looked and found none.
+
+## Dependency source provenance
+
+A lockfile records not only which version was selected but **where it came
+from**, and the two carry very different amounts of verifiability. A crate pinned
+to crates.io has a global coordinate an advisory feed can answer about. A crate
+vendored in-tree as a path dependency, or pulled from a git URL, has no such
+coordinate — an OSV lookup for it can only ever return nothing.
+
+Every adapter now classifies that fact (`registry` / `git` / `path` / `url`) from
+evidence its own lockfile already carries, and a non-registry package both raises
+**VC-009** and degrades scan coverage. Vendoring is not a smell — it is often a
+*stronger* posture than a git dependency, being pinned, in-repo, and immune to an
+upstream force-push. What is not acceptable is a clean report that cannot be
+distinguished from one over packages nothing could have checked.
+
+VC-009 is advisory alone and escalates to gate-eligible when the same package
+also declares install-time code: a mutable upstream *plus* a mechanism that runs
+on install is the composed shape, not either half.
+
+## Threat-intelligence tiers
+
+Every resolved `package@version` can be cross-checked against OSV. depSNORT
+separates malicious-package intelligence from ordinary vulnerability context:
+**VC-001** known-malicious releases can block; **VC-008** ordinary CVEs remain
+advisory and cannot fail a build by themselves.
+
+The OSV path is tiered:
+
+```
+on-disk cache -> live OSV -> bundled malicious-package snapshot -> typed gap
+```
+
+The bundled snapshot exists so a first scan in a sandbox or air-gapped runner
+still has meaningful malicious-package coverage rather than an empty cache and a
+silent gap. A bundled hit is real coverage — a known-malicious package does not
+stop being malicious because the data is a few weeks old — and its age and use
+are disclosed in output, never mistaken for a live check:
+
+```json
+{"name": "osv", "stats": {"from_bundled": 1, "bundled_dataset_generated_at": "2026-08-01T00:00:00Z"}}
+```
+
+`-no-osv-bundled` disables the tier entirely. The dataset is scoped deliberately
+narrow — `MAL-*` advisories plus CVEs for a small maintained list of popular
+packages — and is regenerated with `make refresh-bundled-snapshot` (see
+[`docs/RELEASING.md`](docs/RELEASING.md)). Embedding the entire OSV corpus is not
+feasible; embedding the bounded, high-signal malicious-package feed is.
+
+For disconnected environments, a connected system can export a snapshot:
+
+```
+# once, with network access
 ./depsnort scan -osv-export advisories-snapshot.json .
 
 # everywhere else: bootstrap from that file, zero network calls
 ./depsnort scan -osv-snapshot advisories-snapshot.json -offline .
 ```
 
-`-osv-export` requires a live OSV query to have something to export, so it's
-rejected together with `-offline` or `-no-osv` (exit 64, usage error) rather
-than silently writing an empty or stale file. If the live query itself fails
-partway through, the export is skipped with a warning instead of writing a
-snapshot that looks complete but isn't.
+`-osv-export` needs a live query to have anything to export, so it is rejected
+alongside `-offline`/`-no-osv` rather than silently writing an empty file, and a
+live query that fails partway through skips the export instead of writing a
+snapshot that looks complete but is not.
 
-**A third tier runs automatically, with no flag needed.** Every scan resolves
-each coordinate through: on-disk cache → live `api.osv.dev` query → a small
-known-malicious-package dataset **compiled into the binary itself** → a typed
-gap. That third tier only fires for coordinates the first two couldn't
-answer (an offline cache miss, or a live query that failed outright), so a
-sandbox with no network path to OSV still gets real known-malicious-package
-coverage on a first run — not an empty cache and a silent gap. A bundled hit
-is real coverage (a known-malicious package doesn't stop being malicious
-because the data is a few weeks old) and is disclosed explicitly, never
-mistaken for a live check:
+The OSV client honors `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`, so a sandboxed
+or corporate runner can reach `api.osv.dev` through an egress proxy with no
+depSNORT-specific configuration.
 
-```json
-{"name": "osv", "stats": {"from_bundled": 1, "bundled_dataset_generated_at": "2026-08-01T00:00:00Z"}}
+## Coverage is part of the verdict
+
+A scanner must not confuse *nothing found* with *nothing inspected*.
+
+| Exit | Meaning |
+|------|---------|
+| `0`  | clean, or advisory-only findings |
+| `1`  | block-class finding present |
+| `2`  | gate-eligible finding present **and** `-fail-on-eligible` was requested |
+| `3`  | coverage degraded **and** `-fail-on-incomplete` was requested |
+| `64` | usage error |
+| `70` | internal / operational error |
+
+Unpinned specifiers, datasource failures, unreadable subtrees, offline cache
+misses, failed workspace projects, partial install-surface extraction, and
+non-registry package sources are all disclosed. A partial run is never silently
+promoted to clean. Precedence is:
+
+```
+block > gate-eligible > incomplete > advisory
 ```
 
-`-no-osv-bundled` disables this tier entirely, for anyone who wants zero
-non-live data under any circumstances. The bundled dataset is scoped
-deliberately narrow — known-malicious (`MAL-*`) advisories only, plus
-ordinary CVEs for a small, maintained list of popular packages — and is
-regenerated with `make refresh-bundled-snapshot` (needs real network access;
-see `docs/RELEASING.md`). Embedding the *entire* OSV corpus isn't feasible
-(it's 300k+ records and grows weekly); embedding the bounded, high-signal
-malicious-package feed is.
+**Advisory findings never change the exit code**, regardless of policy — a
+structural guarantee enforced in `internal/verdict` (D-06), not a configurable
+default.
+
+## Quick start
+
+Requires Go 1.24+.
+
+```
+go build -o depsnort ./cmd/depsnort      # Windows: depsnort.exe
+./depsnort version
+./depsnort checks
+./depsnort sbom
+./depsnort scan ./path/to/project
+./depsnort scan -fail-on-eligible .
+./depsnort scan -fail-on-incomplete .
+./depsnort scan -offline .
+./depsnort scan -no-osv .
+./depsnort scan -internal-scopes @acme .
+./depsnort baseline create -o depsnort-baseline.json .
+./depsnort scan -baseline depsnort-baseline.json .
+```
+
+**Check which build you have.** `./depsnort version` and every report header
+carry the baked-in version (`v0.7.5`). If a report header or the flag list does
+not match what you expect, the source tree on disk is stale — re-extract before
+debugging anything else.
 
 Try it against the bundled fixtures:
 
@@ -174,244 +425,220 @@ Try it against the bundled fixtures:
 # ChainDrop-shaped worm: blocks, exit 1, full install-time subgraph
 ./depsnort scan -no-osv -no-registry internal/ecosystem/npm/testdata/wormy
 
+# vendored + git dependencies: no findings, but coverage says so
+./depsnort scan -no-osv -no-registry internal/ecosystem/cargo/testdata/vendored
+
 # real packages, real CVEs — hits live OSV + npm registry, then caches
 ./depsnort scan internal/ecosystem/npm/testdata/realworld
 ```
 
 The `realworld` fixture pins ten genuine npm packages to genuine vulnerable
 versions (none malicious — just outdated). A live run resolves ~66 real
-advisories in about a second and then works entirely from cache with `-offline`.
+advisories in about a second, then works entirely from cache with `-offline`.
 
-## Exit-code contract
+## Static build
 
-The CLI is the primitive; a CI gate and a pre-commit hook are thin wrappers over
-these codes (Decision D-09).
-
-| code | meaning |
-|------|---------|
-| `0`  | clean, or only **advisory** findings present |
-| `1`  | a **block**-class finding (FLAG) was present |
-| `2`  | a **gate-eligible** finding was present **and** `-fail-on-eligible` was set |
-| `3`  | resolution **coverage was degraded** **and** `-fail-on-incomplete` was set |
-| `64` | usage error |
-| `70` | internal / operational error |
-
-**Advisory findings never change the exit code**, regardless of policy — this is
-a structural guarantee enforced in `internal/verdict` (Decision D-06).
-
-Exit `3` is coverage as a first-class verdict axis (D-24): *"we found nothing"*
-and *"we could not look"* are different answers. When resolution degrades —
-unpinned specifiers, an offline OSV miss, an unreadable subtree — the run reports
-it under `data_sources`/`coverage` and, **only** if you opt in with
-`-fail-on-incomplete`, gates on it. A partial scan is never silently promoted to
-a clean one. Precedence when several apply is block > gate-eligible > incomplete.
-
-### Install-surface extraction (the VC-002 family)
-
-`scan` statically reads each package's install-time code — npm lifecycle hooks,
-Python `setup.py`/`build-backend`/`.pth` files, Ruby `extconf.rb`, Rust
-`build.rs`, PHP Composer scripts and plugin types, NuGet `install.ps1` — and
-materializes the **install-time subgraph**: `install-hook`,
-`referenced-artifact`, and `sink` nodes joined by `declares-hook`, `hook-execs`,
-`hook-fetches`, and `hook-reads-env` edges. Nothing is executed: it reads text
-and pattern-matches (Decision D-04). Hook source is read from on-disk trees,
-fetched from package registries (PyPI sdists), or skipped when unavailable.
-
-The family scores *where the chain reaches*: **VC-002b** network egress
-(gate-eligible), **VC-002c** named credentials (gate-eligible), and **VC-002e**
-decode-and-execute indirection (gate-eligible). Two shapes are promoted to
-**block**: **VC-002d** — named credentials **plus** network egress, the
-credential-harvesting shape — and **VC-002f**, a download-and-execute cradle
-(`curl … | sh`, `iex (…).DownloadString`, `certutil -urlcache`, and kin) fetching
-remote code from an install hook. When a cradle is present, VC-002b defers to
-VC-002f so the reach is reported once, at the higher gate class, not twice.
-
-Precision matters more than reach here. Broad env access (`process.env`,
-`os.environ`, `ENV[]`) is deliberately *not* a credential signal (it is recorded
-as the weaker `env` capability), because legitimate native-build hooks read env
-vars and download prebuilt binaries; treating that as exfil would flag `sharp`,
-`bcrypt`, `sqlite3` and earn the tool a mute. Only *named* secrets
-(`NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`, `GEM_HOST_API_KEY`, `.npmrc`,
-`AWS_SECRET_ACCESS_KEY`, `id_rsa`, …) count. A fixture pair in `testdata/wormy`
-locks this in: a worm-shaped package that must FLAG, and a benign native-build
-package that must not.
-
-Run `./depsnort scan -no-osv internal/ecosystem/npm/testdata/wormy` to see the
-full install-time subgraph and a block verdict (exit 1).
-
-### Ecosystems
-
-Six ecosystems, each with its own lockfile parser and install-surface analysis:
-
-| Ecosystem | Lockfile(s) | PURL type | Install-time vector |
-|-----------|-------------|-----------|---------------------|
-| **npm** | `package-lock.json` (v1–v3) | `pkg:npm/` | `preinstall`/`postinstall` scripts |
-| **PyPI** | `requirements.txt`, `Pipfile.lock` | `pkg:pypi/` | `setup.py`, `build-backend`, `.pth` files |
-| **RubyGems** | `Gemfile.lock` | `pkg:gem/` | `extconf.rb` (native extensions) |
-| **Cargo** | `Cargo.lock` | `pkg:cargo/` | `build.rs` (build scripts) |
-| **Composer** | `composer.lock` | `pkg:composer/` | `composer.json` scripts, plugin packages |
-| **NuGet** | `packages.lock.json` | `pkg:nuget/` | `install.ps1`, `init.ps1` (legacy) |
-
-All six share the same graph model, check contract, verdict engine, and emitters.
-Adding an ecosystem requires only a lockfile parser and name normalization —
-the VC-002 family fires on install-time subgraph nodes regardless of ecosystem.
-
-**PyPI specifics.** Names are normalized per **PEP 503** (lowercase; runs of
-`-`, `_`, `.` collapse to one `-`), so `Flask_SQLAlchemy` and
-`flask-sqlalchemy` resolve to one node. pip-compile's `# via <parent>` comments
-are parsed into real depends-on edges. Unpinned specifiers are **not** resolved
-(D-01) but are disclosed as `pypi.unresolved` so partial coverage is never
-hidden. `poetry.lock` and `uv.lock` are TOML; they wait for a minimal in-tree
-reader (D-10).
-
-**Composer specifics.** The **root** project's `composer.json` is always read
-from the project directory — its own lifecycle scripts and `composer-plugin` type
-(which auto-executes during every Composer operation) are examined even when no
-`vendor/` tree is present (D-27). Transitive packages are read from
-`vendor/<pkg>/composer.json` when installed. When a package is a plugin, its
-resolved PHP entrypoint (PSR-4) is statically scanned for a download-cradle so an
-auto-loaded plugin that fetches and runs a payload is caught (D-27/D-28).
-
-**Cargo specifics.** Cargo.lock is parsed with a line-by-line scanner (no TOML
-dependency, D-10). Multiple versions of the same crate are supported.
-
-### The temporal axis (recent-compromise weather)
-
-A lockfile pins one version and knows nothing about release history, so the
-temporal checks read publish timestamps from each ecosystem's registry API
-(metadata only — never a tarball, never an install). All five registries are
-queried: npm (packument `time` map), RubyGems (`/api/v1/versions`), crates.io
-(`/api/v1/crates/.../versions`), Packagist (`/p2/` metadata), and NuGet
-(registration index with catalog entries). Results are cached to disk;
-`-offline` serves the cache exclusively, and `-no-registry` disables all sources.
-
-**VC-005** flags a release burst around the pinned version — the republish
-signature, where a worm patch-bumps and republishes every package it infects.
-The window is centered, not backward-looking, because the pinned version may be
-anywhere in the cluster. Anomaly is judged against the package's **own** median
-cadence: a package that ships three times a day is not suspicious for shipping
-three times a day, while three releases in an hour from a package that normally
-ships twice a year is. **VC-004** flags a version published after prolonged
-dormancy — the account-takeover shape. It is *advisory* alone, because healthy
-packages go quiet and then ship maintenance releases; it escalates to
-gate-eligible only when the awakening release also declares an install hook.
-
-Both are decay-scored: `score = severity × confidence × recency_decay`, with an
-exponential 90-day half-life (`datasource.DefaultHalfLife`). "Recent" is a curve,
-not a cliff — a three-year-old dormancy event scores near zero instead of
-shouting as loudly as one from last week.
-
-Confidence also **composes**: a burst on a package that declares an install hook
-scores higher than either signal alone. That composition is what separates the
-ChainDrop shape from ordinary release noise.
-
-### Output formats
+depSNORT is pure Go and has **zero third-party runtime/build dependencies** in
+its module graph. Build with CGO disabled (`CGO_ENABLED=0`, already set in the
+Makefile) for a static, no-libc binary — which also sidesteps the
+missing-C-headers trap on minimal Linux/WSL.
 
 ```
-./depsnort scan -format json   .              # machine-readable (default)
-./depsnort scan -format sarif  .              # CI dashboards / GitHub code scanning
-./depsnort scan -format dot    . | dot -Tsvg -o tree.svg
-./depsnort scan -format cypher . > load.cypher && cypher-shell -f load.cypher
-./depsnort scan -format pdf    . > report.pdf   # human-readable report
+make self-audit
+./depsnort sbom
 ```
 
-### Workspace scanning
+The CycloneDX SBOM generated from depSNORT's own embedded Go module graph should
+contain an empty `components` array. CI fails if that ever stops being true: a
+supply-chain-safety tool must pass its own audit.
 
-`-recursive` treats the path as a workspace root, discovers every supported
-project beneath it, and merges them into **one graph with multiple roots**:
+## Workspace scanning
+
+`-recursive` treats a path as a workspace root, discovers supported projects
+beneath it, and merges them into one graph with multiple roots.
 
 ```
 ./depsnort scan -recursive -o ./reports /path/to/repos
 # depsnort: discovered 23 project(s) under /path/to/repos
 ```
 
-Because identity is the PURL, a package at the same version in two repos is one
-node — so a flagged dependency shows its **blast radius across every project
-that pulls it in**, rather than being rediscovered N times in N reports.
+PURL identity deduplicates the same package/version across repositories, so one
+flagged dependency exposes its blast radius across the whole workspace instead of
+being rediscovered independently in each project.
 
 Discovery skips `node_modules`, `.git`, `vendor`, `venv`, `site-packages`,
-`target` (Rust build output), and similar (a vendored lockfile is not a project),
-caps depth at 8, and skips
-unreadable subtrees rather than aborting. Two checkouts declaring the same
-`name@version` merge into a single root; when that happens the run says so
-explicitly rather than leaving a gap between the discovered count and the root
-count.
+`target`, and similar (a vendored lockfile is not a project), caps depth at 8, and
+skips unreadable subtrees rather than aborting. Two checkouts declaring the same
+`name@version` merge into a single root, and the run says so explicitly rather
+than leaving an unexplained gap between the discovered count and the root count.
+
+## Output formats
+
+```
+./depsnort scan -format json   .
+./depsnort scan -format sarif  .
+./depsnort scan -format dot    . | dot -Tsvg -o tree.svg
+./depsnort scan -format cypher . > load.cypher
+./depsnort scan -format pdf    . > report.pdf
+```
+
+JSON is the default machine-readable output. SARIF targets CI/code-scanning
+workflows. DOT and Cypher expose the graph. PDF renders a human-readable verdict
+report — banner, scope, data-source coverage, findings ordered block →
+gate-eligible → advisory and by score within each class, and a package risk
+table — written by an in-tree PDF writer using base-14 fonts, because buying a
+PDF dependency for a supply-chain-safety tool would undercut its own thesis
+(D-10).
+
+Output content is designed to remain deterministic. Timestamps live in generated
+file paths rather than in report content, so identical scans of identical data
+stay byte-comparable.
 
 ### Output files
 
-By default output goes to stdout so it stays pipeable. Pass `-o` (or `-out`) to
-write files instead. Point it at an output **root** and reports land in a dated
-tree using a stable naming convention:
+By default output goes to stdout so it stays pipeable. `-o` (or `-out`) writes
+files instead; point it at a root and reports land in a dated tree:
 
 ```
 ./depsnort scan -format pdf -o ./reports .
 # -> reports/20260807/Report-202608071826UTC.pdf
 ```
 
-The layout is `<root>/YYYYMMDD/Report-<DTG>.<ext>`. The date folder groups a
-day's scans; the DTG — `YYYYMMDDHHMM` plus timezone abbreviation — keeps each run
-distinct and stays self-describing if the file is moved out of its folder.
-Stamps are **UTC by default**, and deliberately so. A local stamp alternates its
-abbreviation across daylight saving (`CDT`/`CST`), which breaks lexical sorting
-of a report tree — and on the fall-back night the same wall-clock hour occurs
-*twice*, so two genuinely different scans can produce an identical filename and
-one silently overwrites the other. UTC has neither problem. `-local` opts back
-into wall-clock stamps when readability matters more than ordering; note that
-converting rolls the date folder too, so a 22:30 CDT scan correctly files under
-the next UTC day.
-
-A path **with a file extension** bypasses the tree and is used verbatim:
+The layout is `<root>/YYYYMMDD/Report-<DTG>.<ext>`. Stamps are **UTC by default**
+and deliberately so: a local stamp alternates its abbreviation across daylight
+saving (`CDT`/`CST`), which breaks lexical sorting, and on the fall-back night the
+same wall-clock hour occurs twice, so two different scans can produce one filename
+and silently overwrite each other. `-local` opts back into wall-clock stamps when
+readability matters more than ordering. A path **with a file extension** bypasses
+the tree and is used verbatim:
 
 ```
 ./depsnort scan -format pdf -o ./oneoff.pdf .   # -> ./oneoff.pdf
 ```
 
-Resolution is minute-level, so two scans in the same minute share a name and the
-second overwrites the first. Note where the timestamp lives: in the **path**,
-never in the file. Report content stays byte-reproducible (D-13), so the tree
-sorts chronologically while two scans of an unchanged tree still diff clean. The
-written path is announced on stderr so stdout stays clean, and output is rendered
-to a buffer before it touches disk — a failed emit leaves no truncated report to
-be mistaken for a complete scan.
+The written path is announced on stderr so stdout stays clean, and output is
+rendered to a buffer before it touches disk — a failed emit leaves no truncated
+report to be mistaken for a complete scan.
 
-**PDF** renders the human-readable report: verdict banner, scope, data-source
-coverage (including an explicit warning when coverage was incomplete, and a
-separate `not-published` count for packages the registry has no record of),
-findings
-ordered block → gate-eligible → advisory and by score within each class, and a
-package risk table. It is written by an in-tree PDF writer using base-14 fonts —
-no third-party library, because buying a PDF dependency for a supply-chain-safety
-tool would undercut its own thesis (D-10). The report carries **no timestamp**,
-so two scans of identical data produce identical bytes (D-13).
+## CI integration
 
-Risk propagates through the install-time subgraph: when a package is flagged,
-the hook, the files it executes, the URLs it reaches, and the credential sinks
-it touches are flagged too, because they are the *reason* for the verdict. It
-only ever raises, never softens, and it does **not** cross `depends-on` edges —
-a bad package does not turn its whole transitive tree red.
+The CLI is the primitive; the CI gate and pre-commit hook in [`scripts/`](scripts/)
+are thin wrappers over the exit-code contract, not a second implementation of it
+(D-09/D-30):
 
-## The dual-tree model
+```
+scripts/depsnort-ci-gate.sh        # CI gate over the exit codes above
+scripts/depsnort-pre-commit.sh     # local pre-commit hook
+scripts/github-actions.example.yml # workflow example, actions pinned by digest
+```
 
-A lockfile is the tree the *developer* wrote. An install hook is the tree the
-*attacker* wrote — an undeclared manifest. The graph models both from day one:
-`depends-on` edges for the declared subgraph, and
-`declares-hook / hook-execs / hook-fetches / hook-reads-env / exfil / republish`
-for the install-time subgraph. v0 populates only the declared subgraph; the
-install-time kinds and edges already exist so that install-surface extraction
-(build-queue step 5) drops in without a schema change.
+## Project layout
 
-## Roadmap (prioritized build queue)
+```
+cmd/depsnort/                 CLI + exit-code contract
+internal/finding/             severity / axis / gate class / risk state
+internal/purl/                canonical package-url identity
+internal/graph/               declared + install-time graph model, coverage, provenance
+internal/ecosystem/           ecosystem adapters
+internal/datasource/          OSV, registry metadata, publisher lineage, IOC, cache
+internal/installsurface/      static install-time analysis
+internal/profile/             capability profiles and the deterministic drift engine
+internal/baseline/            known-good baseline file format
+internal/check/               vector-check contract + registry
+internal/check/builtin/       built-in VC rules
+internal/verdict/             findings -> node state + process exit
+internal/emit/                JSON / SARIF / DOT / Cypher / PDF
+```
 
-1. ✅ Canonical graph model + PURL + npm `package-lock` parser
-2. ✅ CLI shell + exit-code contract + JSON emitter
-3. ✅ Data-source layer: OSV (incl. malware) + local cache → VC-001, VC-008
-4. ✅ Structural + temporal checks → VC-004 (dormancy), VC-005 (patch-burst), VC-006 (typosquat), VC-007 (dependency-confusion)
-5. ✅ **Install-surface extraction + hook subgraph** → the VC-002 family (catches the ChainDrop shape before any feed)
-6. ✅ Recent-compromise layer → registry metadata for all 6 ecosystems + decay scoring + **VC-003** (operator IOC-ledger match, `-ioc`, block-class)
-7. ✅ Emitters: SARIF · DOT · Neo4j/Cypher · PDF
-8. ✅ Six ecosystem adapters — npm, PyPI, RubyGems, Cargo, Composer, NuGet
-9. 🟡 Fine-tuning: URL-metadata false positives, typosquat corpora for non-npm ecosystems
-10. ⬜ deps.dev manifest resolution + third-party plugin loading
+## Market position
+
+depSNORT sits between several established security categories:
+
+| Category | Primary question | depSNORT relationship |
+|----------|------------------|-----------------------|
+| SCA | "Is this dependency known to be vulnerable?" | consumes CVE context, but does not treat CVEs as its core detection model |
+| Package malware scanner | "Does this artifact contain suspicious behavior?" | overlaps through static install-surface analysis |
+| Behavioral package analysis | "What does this package do?" | complements dynamic systems with a zero-execution pre-install view |
+| Release differential analysis | "What security-relevant behavior changed from N to N+1?" | baseline-relative capability drift (VC-010) |
+| Repository firewall / curation | "Should this package be allowed into the organization?" | supplies a verdict; is not itself an enforcement proxy |
+| Supply-chain IDS | "Does this dependency/release state match known or anomalous compromise patterns?" | depSNORT's intended operating model |
+
+The project does not claim that individual heuristics are novel. Its
+differentiation is the intersection of:
+
+- package-specific release-history anomaly detection;
+- static install-time attack-path reconstruction;
+- state-transition analysis against an operator-promoted baseline;
+- dependency-graph context;
+- deterministic rule composition and gating;
+- explicit incomplete-coverage semantics;
+- local and air-gapped operation.
+
+## Roadmap
+
+**Completed foundations:**
+
+- ✅ canonical graph model + PURL identity;
+- ✅ CLI + verdict/exit-code contract;
+- ✅ OSV malicious-package and CVE enrichment, with a compiled-in fallback tier;
+- ✅ structural checks: typosquat and dependency confusion;
+- ✅ temporal checks: dormancy and package-relative release bursts;
+- ✅ static install-surface extraction and VC-002 attack paths;
+- ✅ operator IOC ledger;
+- ✅ JSON, SARIF, DOT, Cypher, and PDF emitters;
+- ✅ six ecosystem adapters;
+- ✅ recursive workspace scanning and blast-radius graphing;
+- ✅ dependency-source provenance as explicit coverage state (VC-009);
+- ✅ capability profiles, persistent known-good baselines, and version-to-version
+  capability drift (VC-010);
+- ✅ version-level publisher lineage where registries expose it (VC-011).
+
+**Current hardening:**
+
+- 🟡 reduce URL-metadata and ecosystem-specific false positives;
+- 🟡 expand calibrated typosquat corpora outside npm;
+- 🟡 deepen candidate-package install-surface recovery where registries expose
+  incomplete metadata.
+
+**Planned, not implemented:**
+
+- ⬜ drift without a baseline file: recovering a previous release's install
+  surface directly from the registry, so a first scan can diff N against N-1
+  (npm hook-level drift is already available from packument metadata; capability
+  -level drift for other ecosystems needs artifact retrieval);
+- ⬜ PR-native dependency delta: summarize only newly introduced dependencies,
+  versions, capabilities, and gate changes in pull requests;
+- ⬜ Maven/Gradle and Go module adapters; pnpm, Yarn Berry, Poetry, and uv locks;
+- ⬜ policy-as-code for thresholds, allowlists, and approved publishers, over
+  fixed safety invariants;
+- ⬜ enforcement integrations: feed verdicts into artifact-manager, admission, or
+  package-proxy policy without turning the core scanner into a mandatory service;
+- ⬜ provenance/attestation verification of scanned dependencies as an additional
+  integrity axis;
+- ⬜ published precision/recall benchmarks against a public malicious-package
+  corpus;
+- ⬜ deps.dev manifest resolution and third-party rule-pack loading.
+
+The long-term goal is not "more alerts." It is better stateful correlation:
+
+```
+known-good package profile
+  |
+  +-- normal cadence
+  +-- publisher lineage
+  +-- historical install capabilities
+  +-- dependency topology
+  +-- prior threat state
+  |
+  v
+candidate release
+  |
+  v
+security-relevant delta + temporal context
+  |
+  v
+explainable IDS verdict
+```
 
 ## Verifying a release
 
@@ -433,9 +660,8 @@ gh attestation verify depsnort-v0.7.5-linux-amd64 --repo MoSLoF/depSNORT
 ./depsnort sbom
 ```
 
-Checksums and the SBOM are byte-reproducible: rebuilding the same tag produces
-identical bytes, so two people can independently confirm they got the same
-artifact (D-13).
+Checksums and SBOM output are byte-reproducible for the same tag, so two people
+can independently confirm they got the same artifact (D-13).
 
 ## Testing
 
@@ -446,20 +672,18 @@ gofmt -l .               # should print nothing
 go test -race ./...
 ```
 
-**Fuzzing.** There are **19** native Go fuzz targets covering the six lockfile
-parsers, the PURL identity layer, semver, the five install-surface analyzers, the
-edit-distance optimization, the sdist archive reader, and path containment. They
-are not decoration — fuzzing found and fixed two real identity bugs in the PURL
-parser (see D-33). The `securefs` target asserts the security invariant directly:
-no generated path may ever return content from outside the scan root.
+**Fuzzing.** The repository maintains native Go fuzz targets across the six
+lockfile parsers, the PURL identity layer, semver, the install-surface analyzers,
+the edit-distance optimization, the sdist archive reader, and path containment.
+They are not decoration — fuzzing found and fixed two real identity bugs in the
+PURL parser (D-33). The `securefs` target asserts the security invariant
+directly: no generated path may ever return content from outside the scan root.
 
 Every seed corpus — including the crashers fuzzing already found — runs as an
-ordinary regression test on `go test`. CI additionally spends a bounded 25s
-actively fuzzing **9** of the 19: the containment primitive, PURL, the
-edit-distance differential, and the six lockfile parsers. Those are the targets
-that consume untrusted input directly or guard an invariant a silent regression
-would hide; the analyzer and semver targets are covered by their seeds in CI and
-by out-of-band campaigns.
+ordinary regression test on `go test`. CI additionally spends a bounded budget
+actively fuzzing the targets that consume untrusted input directly or guard an
+invariant a silent regression would hide: the containment primitive, PURL, the
+edit-distance differential, and the six lockfile parsers.
 
 ```
 go test ./internal/securefs -run=XXX -fuzz=FuzzReadFileContainment -fuzztime=60s
@@ -472,3 +696,20 @@ go test ./internal/purl     -run=XXX -fuzz=FuzzParse                -fuzztime=60
 ```
 go test ./cmd/depsnort/ ./internal/ecosystem/npm/ -run=XXX -bench=. -benchmem
 ```
+
+## Design principles
+
+1. **Zero execution.** Analyze the install path without intentionally running it.
+2. **Precision over alert volume.** A detector that operators mute is not a detector.
+3. **Composition over single signals.** Weak indicators become useful when correlated.
+4. **Unknown is not clean.** Coverage loss is explicit security state.
+5. **Deterministic where possible.** Identical evidence should produce identical output.
+6. **Sovereign rules.** The built-in vector pack is only the first pack; the rule
+   contract is the product boundary.
+7. **Dogfood the thesis.** depSNORT's own dependency footprint stays auditable and
+   minimal.
+
+---
+
+depSNORT does not try to prove that software is safe. It tries to make suspicious
+dependency state visible **before trust becomes execution**.

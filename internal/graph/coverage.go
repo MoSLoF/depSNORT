@@ -96,7 +96,25 @@ type Coverage struct {
 	// FailedProjects counts workspace projects (under -recursive) that did not
 	// resolve at all, so their whole subtree is missing from the graph.
 	FailedProjects int `json:"failed_projects,omitempty"`
+
+	// UnverifiableSources counts resolved packages whose origin is not a
+	// registry — git URLs, local paths, direct artifact URLs (Decision D-41).
+	// These packages have no coordinate an advisory feed indexes, so the OSV
+	// pass over them returned nothing it could ever have returned anything
+	// else for. Counting that as coverage rather than cleanliness is the same
+	// invariant as the rest of this struct, applied to provenance.
+	UnverifiableSources int `json:"unverifiable_sources,omitempty"`
+	// UnverifiableSourceDetails is a bounded sample naming what could not be
+	// verified ("pkg:cargo/vt100-psmux@0.16.9 [path]"). Capped like
+	// ExtractorGapDetails so a heavily vendored tree does not produce a
+	// thousand-line report; the count above is never capped.
+	UnverifiableSourceDetails []string `json:"unverifiable_source_details,omitempty"`
 }
+
+// maxUnverifiableDetails bounds the sample above. Chosen to match the
+// install-surface gap sample: enough to characterize the shape of the problem,
+// not enough to become the report.
+const maxUnverifiableDetails = 10
 
 // Incomplete reports whether coverage is degraded for ANY reason — graph
 // resolution OR a scan-level gap. This is the single fact the verdict gates on
@@ -109,7 +127,8 @@ func (c Coverage) Incomplete() bool {
 	return c.Degraded ||
 		len(c.DataSourceGaps) > 0 ||
 		c.ExtractorGaps > 0 ||
-		c.FailedProjects > 0
+		c.FailedProjects > 0 ||
+		c.UnverifiableSources > 0
 }
 
 // IncompleteSummary renders "coverage is incomplete" as one sentence, shared
@@ -124,6 +143,13 @@ func (c Coverage) IncompleteSummary() string {
 	if len(c.ExtractorGapReasons) > 0 {
 		fmt.Fprintf(&b, " [%s]", strings.Join(c.ExtractorGapReasons, ", "))
 	}
+	if c.UnverifiableSources > 0 {
+		fmt.Fprintf(&b, ", %d package(s) from a non-registry source (no advisory coverage)",
+			c.UnverifiableSources)
+		if len(c.UnverifiableSourceDetails) > 0 {
+			fmt.Fprintf(&b, " [%s]", strings.Join(c.UnverifiableSourceDetails, ", "))
+		}
+	}
 	if len(c.DataSourceGaps) > 0 {
 		fmt.Fprintf(&b, ", degraded data source(s): %s", strings.Join(c.DataSourceGaps, ", "))
 	}
@@ -136,9 +162,27 @@ func (g *Graph) Coverage() Coverage {
 	cov := Coverage{Orphans: len(g.Orphans())}
 	flat := map[string]bool{}
 
+	isRoot := make(map[string]bool, len(g.Roots))
+	for _, r := range g.Roots {
+		isRoot[r] = true
+	}
+
 	for _, n := range g.SortedNodes() {
 		if len(n.Attr) == 0 {
 			continue
+		}
+		// Provenance (D-41). Roots are excluded: the project being scanned is
+		// not a dependency of itself, and a checkout is a local path by
+		// definition — charging the scan for that would flag every scan of
+		// every workspace.
+		if n.Kind == KindPackage && !isRoot[n.ID] {
+			if class := n.Attr[AttrSourceClass]; class != "" && !Verifiable(class) {
+				cov.UnverifiableSources++
+				if len(cov.UnverifiableSourceDetails) < maxUnverifiableDetails {
+					cov.UnverifiableSourceDetails = append(cov.UnverifiableSourceDetails,
+						fmt.Sprintf("%s [%s]", n.ID, class))
+				}
+			}
 		}
 		rc := RootCoverage{NodeID: n.ID}
 		if raw := n.Attr[AttrUnresolvedCount]; raw != "" {
@@ -166,6 +210,6 @@ func (g *Graph) Coverage() Coverage {
 	sort.Strings(cov.FlatEcosystems) // determinism (D-13)
 
 	cov.Degraded = cov.Unresolved > 0 || cov.Orphans > 0
-	cov.Complete = !cov.Degraded && len(cov.FlatEcosystems) == 0
+	cov.Complete = !cov.Incomplete() && len(cov.FlatEcosystems) == 0
 	return cov
 }

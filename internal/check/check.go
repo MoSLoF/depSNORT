@@ -11,6 +11,7 @@ import (
 	"ihbv.io/depsnort/internal/datasource/ioc"
 	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
+	"ihbv.io/depsnort/internal/profile"
 )
 
 // Meta is a check's self-description. It is declared, not inferred, so the
@@ -50,7 +51,17 @@ type Context struct {
 	// IOC is the operator's indicator ledger, keyed by node ID (canonical PURL).
 	// Populated by the orchestrator when -ioc is set; consumed by VC-003. Empty
 	// when no ledger was supplied, in which case VC-003 simply does not fire.
-	IOC         map[string]ioc.Indicator
+	IOC map[string]ioc.Indicator
+	// Baseline is the operator-promoted known-good record, keyed by
+	// baseline.Key(ecosystem, name) — NOT by PURL, because the whole point is
+	// to compare a candidate against a DIFFERENT version of the same package
+	// (Decision D-40). Empty when no -baseline was supplied, in which case the
+	// drift checks do not fire.
+	Baseline map[string]profile.Profile
+	// Profiles is the candidate side: one profile per resolved package in this
+	// scan, keyed by PURL. Populated only when a baseline was supplied, since
+	// nothing else reads it.
+	Profiles    map[string]profile.Profile
 	DataSources map[string]any // reserved for future feeds
 }
 

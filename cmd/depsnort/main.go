@@ -26,6 +26,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"ihbv.io/depsnort/internal/baseline"
 	"ihbv.io/depsnort/internal/check"
 	"ihbv.io/depsnort/internal/check/builtin"
 	"ihbv.io/depsnort/internal/datasource"
@@ -75,6 +76,8 @@ func run(args []string) int {
 		return cmdScan(args[1:])
 	case "checks":
 		return cmdChecks()
+	case "baseline":
+		return cmdBaseline(args[1:])
 	case "banner":
 		fmt.Fprint(os.Stdout, banner(os.Stdout))
 		return 0
@@ -116,6 +119,8 @@ func usage() {
 usage:
   depsnort scan [flags] [path]     resolve and analyze a project (default path ".")
                                    with -recursive, a workspace of projects
+  depsnort baseline create [path]  record a known-good profile per package, for
+                                   later comparison with scan -baseline
   depsnort checks                  list the registered vector checks
   depsnort sbom [-release]         emit this binary's own CycloneDX SBOM
                                    (-release: platform-neutral, for release artifacts)
@@ -138,6 +143,9 @@ scan flags:
   -internal-names string   comma-separated internal package names (VC-007)
   -ioc string              path to an IOC ledger feed (JSON); enables VC-003 —
                            a resolved package on the ledger blocks (exit 1)
+  -baseline string         path to a known-good baseline file; enables the drift
+                           axis (VC-010 capability drift, VC-011 publisher
+                           lineage). Without it those checks do not fire.
   -o, -out string          output root: writes
                            <root>/YYYYMMDD/Report-<DTG>.<ext>
                            a path WITH an extension is used verbatim
@@ -456,6 +464,68 @@ func reconstructPyPIDepth(g *graph.Graph, client *registry.PyPIDepsClient, roots
 	return cov
 }
 
+// resolveResult is what one pass over a project list produced: the merged
+// graph plus every way that pass fell short of seeing the whole tree.
+type resolveResult struct {
+	Graph         *graph.Graph
+	Failures      int
+	ExtractorGaps int
+	GapReasons    map[string]int
+	GapDetails    []string
+}
+
+// resolveProjects resolves each project and merges the results into a single
+// multi-root graph. A package at the same version in two repos becomes ONE
+// node, so shared dependencies collapse and a flagged package shows its blast
+// radius across the workspace.
+//
+// Shared by `scan` and `baseline create` so the two cannot drift: a baseline
+// must be built by exactly the pipeline that later scans compare against, or
+// the first drift report would be an artifact of the tool disagreeing with
+// itself about how to read a tree.
+func resolveProjects(projects []discovered, extractSurface bool) resolveResult {
+	out := resolveResult{Graph: graph.New(), GapReasons: map[string]int{}}
+	for _, p := range projects {
+		sub, err := p.Adapter.Resolve(p.Path)
+		if err != nil {
+			out.Failures++
+			fmt.Fprintf(os.Stderr, "depsnort: warning: resolve %s (%s): %v\n", p.Path, p.Adapter.Name(), err)
+			continue
+		}
+
+		// Install-surface extraction: statically read lifecycle hooks and the
+		// files they reference, adding the install-time subgraph. Never executes
+		// anything (Decision D-04). Adapters that do not implement it are skipped.
+		if extractSurface {
+			if ex, ok := p.Adapter.(ecosystem.InstallSurfaceExtractor); ok {
+				if err := ex.ExtractInstallSurface(p.Path, sub); err != nil {
+					// Typed gaps (R-01) carry one entry per unexamined file, so
+					// count them individually and keep their reasons; anything
+					// else is one opaque partial extraction.
+					if gs := instsurf.GapsOf(err); len(gs) > 0 {
+						out.ExtractorGaps += len(gs)
+						for _, gp := range gs {
+							out.GapReasons[string(gp.Reason)]++
+							if len(out.GapDetails) < maxGapDetails {
+								out.GapDetails = append(out.GapDetails, p.Path+": "+gp.String())
+							}
+						}
+					} else {
+						out.ExtractorGaps++
+						out.GapReasons["extraction-error"]++
+						if len(out.GapDetails) < maxGapDetails {
+							out.GapDetails = append(out.GapDetails, p.Path+": "+err.Error())
+						}
+					}
+					fmt.Fprintf(os.Stderr, "depsnort: warning: install surface not fully examined for %s: %v\n", p.Path, err)
+				}
+			}
+		}
+		out.Graph.Merge(sub)
+	}
+	return out
+}
+
 func cmdScan(args []string) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	format := fs.String("format", "json", "output format: "+strings.Join(emit.Formats(), " | "))
@@ -474,6 +544,7 @@ func cmdScan(args []string) int {
 	internalScopes := fs.String("internal-scopes", "", "comma-separated internal scopes for dependency-confusion (e.g. @ihbv,@acme)")
 	internalNames := fs.String("internal-names", "", "comma-separated internal package names for dependency-confusion")
 	iocPath := fs.String("ioc", "", "path to an IOC ledger feed (JSON); enables VC-003")
+	baselinePath := fs.String("baseline", "", "path to a known-good baseline file (see `depsnort baseline create`); enables the drift axis (VC-010/VC-011)")
 	var outSpec string
 	fs.StringVar(&outSpec, "o", "", "output root: writes <root>/YYYYMMDD/Report-<DTG>.<ext>; a path with an extension is used verbatim (default: stdout)")
 	fs.StringVar(&outSpec, "out", "", "alias for -o")
@@ -524,51 +595,10 @@ func cmdScan(args []string) int {
 		projects = []discovered{{Path: path, Adapter: adapter}}
 	}
 
-	// Resolve each project and merge into a single multi-root graph. A package
-	// at the same version in two repos becomes ONE node, so shared dependencies
-	// collapse and a flagged package shows its blast radius across the workspace.
-	g := graph.New()
-	var resolveFailures, extractorGaps int
-	gapReasonCounts := map[string]int{}
-	var gapDetails []string
-	for _, p := range projects {
-		sub, err := p.Adapter.Resolve(p.Path)
-		if err != nil {
-			resolveFailures++
-			fmt.Fprintf(os.Stderr, "depsnort: warning: resolve %s (%s): %v\n", p.Path, p.Adapter.Name(), err)
-			continue
-		}
-
-		// Install-surface extraction: statically read lifecycle hooks and the
-		// files they reference, adding the install-time subgraph. Never executes
-		// anything (Decision D-04). Adapters that do not implement it are skipped.
-		if !*noInstallSurface {
-			if ex, ok := p.Adapter.(ecosystem.InstallSurfaceExtractor); ok {
-				if err := ex.ExtractInstallSurface(p.Path, sub); err != nil {
-					// Typed gaps (R-01) carry one entry per unexamined file, so
-					// count them individually and keep their reasons; anything
-					// else is one opaque partial extraction.
-					if gs := instsurf.GapsOf(err); len(gs) > 0 {
-						extractorGaps += len(gs)
-						for _, gp := range gs {
-							gapReasonCounts[string(gp.Reason)]++
-							if len(gapDetails) < maxGapDetails {
-								gapDetails = append(gapDetails, p.Path+": "+gp.String())
-							}
-						}
-					} else {
-						extractorGaps++
-						gapReasonCounts["extraction-error"]++
-						if len(gapDetails) < maxGapDetails {
-							gapDetails = append(gapDetails, p.Path+": "+err.Error())
-						}
-					}
-					fmt.Fprintf(os.Stderr, "depsnort: warning: install surface not fully examined for %s: %v\n", p.Path, err)
-				}
-			}
-		}
-		g.Merge(sub)
-	}
+	pass := resolveProjects(projects, !*noInstallSurface)
+	g := pass.Graph
+	resolveFailures, extractorGaps := pass.Failures, pass.ExtractorGaps
+	gapReasonCounts, gapDetails := pass.GapReasons, pass.GapDetails
 	if g.Len() == 0 {
 		fmt.Fprintf(os.Stderr, "depsnort: no projects resolved (%d failure(s))\n", resolveFailures)
 		return exitInternal
@@ -729,6 +759,30 @@ func cmdScan(args []string) int {
 		ctx.IOC = matched
 		fmt.Fprintf(os.Stderr, "depsnort: IOC ledger: %d indicator(s), %d match(es)\n",
 			feed.Len(), len(matched))
+	}
+
+	// Baseline stage: the operator-promoted known-good record the drift axis
+	// compares against (D-40). Loaded AFTER the registry stage so the candidate
+	// profiles carry publisher identity, and before the checks run because
+	// VC-010/VC-011 read it from the context.
+	if *baselinePath != "" {
+		base, err := baseline.Load(*baselinePath)
+		if err != nil {
+			// A baseline that cannot be read is a usage error, never a silent
+			// downgrade to "no drift found": the operator asked for drift to be
+			// evaluated and must not get a clean exit for a scan that skipped it.
+			fmt.Fprintf(os.Stderr, "depsnort: %v\n", err)
+			return exitUsage
+		}
+		ctx.Baseline = baseline.Index(base)
+		ctx.Profiles = profileGraph(g, ctx.Releases)
+		fmt.Fprintf(os.Stderr, "depsnort: baseline: %d known-good profile(s) from %s\n",
+			len(base), *baselinePath)
+	} else {
+		// Not a coverage gap — nothing failed — but never silent either: a scan
+		// that could not have reported drift should not read as one that looked
+		// for it and found none.
+		fmt.Fprintln(os.Stderr, "depsnort: drift axis inactive (no -baseline)")
 	}
 
 	findings := checks.RunAll(ctx)

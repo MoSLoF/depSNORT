@@ -80,6 +80,18 @@ type composerPkg struct {
 	Version string            `json:"version"`
 	Type    string            `json:"type"`
 	Require map[string]string `json:"require"`
+	// Dist and Source record where the package came from (D-41). Composer
+	// writes both: `dist` is the artifact actually installed, `source` the
+	// repository behind it. A path repository and a git-only package are
+	// visible here and nowhere else.
+	Dist   composerRef `json:"dist"`
+	Source composerRef `json:"source"`
+}
+
+type composerRef struct {
+	Type      string `json:"type"` // "zip", "git", "path", ...
+	URL       string `json:"url"`
+	Reference string `json:"reference"`
 }
 
 func parseComposerLock(path string, raw []byte) (*graph.Graph, error) {
@@ -106,11 +118,12 @@ func parseComposerLock(path string, raw []byte) (*graph.Graph, error) {
 			if p.Type != "" {
 				attr["composer.type"] = p.Type
 			}
-			g.AddNode(&graph.Node{
+			n := g.AddNode(&graph.Node{
 				ID: id, Ecosystem: "composer", Name: p.Name, Version: version,
 				Direct: true, Depth: 1,
 				Attr: attr,
 			})
+			n.SetSource(classifyPkgSource(p))
 			byName[p.Name] = id
 			g.AddEdge(root.ID, id, graph.EdgeDependsOn)
 		}
@@ -157,6 +170,38 @@ func parseComposerLock(path string, raw []byte) (*graph.Graph, error) {
 
 	assignDepths(g, root.ID)
 	return g, nil
+}
+
+// classifyPkgSource maps a composer.lock entry's dist/source blocks onto an
+// ecosystem-neutral provenance class (Decision D-41).
+//
+// dist wins when both are present because dist is what Composer actually
+// installs: a package with a git `source` and a Packagist `dist` zip was
+// installed from the zip, and the zip is the artifact an advisory feed indexes.
+// A `path` dist is a local repository — symlinked or copied source that was
+// never published. A package with only a `source` block was cloned, so the
+// repository IS the artifact.
+func classifyPkgSource(p composerPkg) (class, ref string) {
+	switch p.Dist.Type {
+	case "path":
+		return graph.SourcePath, p.Dist.URL
+	case "git", "hg", "svn":
+		return graph.SourceGit, p.Dist.URL
+	case "zip", "tar", "gzip", "phar", "rar", "xz":
+		return graph.SourceRegistry, p.Dist.URL
+	}
+	if p.Dist.Type == "" {
+		switch p.Source.Type {
+		case "git", "hg", "svn":
+			return graph.SourceGit, p.Source.URL
+		case "path":
+			return graph.SourcePath, p.Source.URL
+		}
+	}
+	if p.Dist.URL != "" {
+		return graph.ClassifyRef(p.Dist.URL), p.Dist.URL
+	}
+	return "", ""
 }
 
 // composerManifest is the subset of a composer.json we read for install-surface.
