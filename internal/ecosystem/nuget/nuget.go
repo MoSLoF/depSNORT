@@ -146,11 +146,20 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 				"nuget.tfm":    tfm,
 				"nuget.type":   entry.Type,
 			}
-			g.AddNode(&graph.Node{
+			n := g.AddNode(&graph.Node{
 				ID: id, Ecosystem: "nuget", Name: lowerName, Version: entry.Resolved,
 				Direct: isDirect,
 				Attr:   attr,
 			})
+			// Provenance (D-41). NuGet's lock records the origin in the entry
+			// type: "Project" is a sibling project in the solution — local
+			// source that nuget.org has never seen — while Direct/Transitive
+			// entries came from a feed.
+			if strings.EqualFold(entry.Type, "Project") {
+				n.SetSource(graph.SourcePath, "")
+			} else {
+				n.SetSource(graph.SourceRegistry, "")
+			}
 			byNameVer[key] = id
 			if isDirect {
 				g.AddEdge(root.ID, id, graph.EdgeDependsOn)

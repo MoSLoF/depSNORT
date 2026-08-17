@@ -81,6 +81,9 @@ func coverageReason(cov graph.Coverage) string {
 	if cov.ExtractorGaps > 0 {
 		parts = append(parts, fmt.Sprintf("%d partial install-surface extraction(s)", cov.ExtractorGaps))
 	}
+	if cov.UnverifiableSources > 0 {
+		parts = append(parts, fmt.Sprintf("%d package(s) from a non-registry source", cov.UnverifiableSources))
+	}
 	if len(cov.DataSourceGaps) > 0 {
 		parts = append(parts, fmt.Sprintf("degraded data source(s): %s", strings.Join(cov.DataSourceGaps, ", ")))
 	}
@@ -200,6 +203,15 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 				"%d install-surface extraction(s) were partial; the install-time subgraph for those "+
 					"projects is a lower bound, so a hook that was not read is not the same as a hook "+
 					"that is not there.", cov.ExtractorGaps), fontRegular, 8.5, colGate, 0, 11)
+		}
+		if cov.UnverifiableSources > 0 {
+			d.wrapped(fmt.Sprintf(
+				"%d package(s) resolved from a non-registry source (git, local path, or direct URL). "+
+					"They have no registry coordinate, so the advisory pass over them could never have "+
+					"returned a finding: that silence is missing coverage, not a clean result. %s",
+				cov.UnverifiableSources,
+				strings.Join(cov.UnverifiableSourceDetails, "; ")),
+				fontRegular, 8.5, colGate, 0, 11)
 		}
 		if len(cov.DataSourceGaps) > 0 {
 			d.wrapped(fmt.Sprintf(

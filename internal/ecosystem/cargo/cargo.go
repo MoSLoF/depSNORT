@@ -181,10 +181,12 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 		if e.source != "" {
 			attr["cargo.registry"] = e.source
 		}
-		g.AddNode(&graph.Node{
+		n := g.AddNode(&graph.Node{
 			ID: id, Ecosystem: "cargo", Name: e.name, Version: e.version,
 			Attr: attr,
 		})
+		class, ref := classifySource(e.source)
+		n.SetSource(class, ref)
 		byKey[key{e.name, e.version}] = id
 		byName[e.name] = append(byName[e.name], id)
 	}
@@ -241,6 +243,37 @@ func rootNode(g *graph.Graph, path string, first cargoEntry) *graph.Node {
 	})
 	g.MarkRoot(id)
 	return n
+}
+
+// classifySource maps a Cargo.lock `source` value onto an ecosystem-neutral
+// provenance class (Decision D-41).
+//
+// Cargo's encoding is unusually clean here, and the ABSENT case is the load-
+// bearing one: Cargo.lock omits `source` entirely for path dependencies and
+// workspace members. A crate with no source line is vendored — its code lives
+// in the repository, it was never published to crates.io, and no advisory feed
+// has ever seen it. That is precisely the crate a reviewer must read by hand,
+// and before this it was indistinguishable from the 243 registry crates around
+// it.
+//
+// `sparse+` is the newer protocol for the same thing as `registry+` and must
+// classify identically; missing it would report every project on a sparse
+// index as entirely unverifiable.
+func classifySource(source string) (class, ref string) {
+	s := strings.TrimSpace(source)
+	if s == "" {
+		// No source line: path dependency or workspace member.
+		return graph.SourcePath, ""
+	}
+	switch {
+	case strings.HasPrefix(s, "registry+"), strings.HasPrefix(s, "sparse+"):
+		return graph.SourceRegistry, s
+	case strings.HasPrefix(s, "git+"):
+		return graph.SourceGit, s
+	case strings.HasPrefix(s, "path+"):
+		return graph.SourcePath, s
+	}
+	return graph.ClassifyRef(s), s
 }
 
 // extractTOMLString extracts the value from a simple `key = "value"` line.

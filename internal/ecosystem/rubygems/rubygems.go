@@ -68,6 +68,13 @@ type gemEntry struct {
 	name    string
 	version string
 	deps    []string
+	// section and remote record WHERE the gem came from: Bundler groups specs
+	// under GEM (a registry), GIT (a repository), or PATH (local source), and
+	// names the origin on the section's `remote:` line. Both were parsed and
+	// discarded before D-41 — a gem pinned to a git ref read exactly like a
+	// rubygems.org gem to every stage downstream.
+	section string
+	remote  string
 }
 
 // parseGemfileLock parses a Bundler Gemfile.lock.
@@ -97,6 +104,7 @@ func parseGemfileLock(path string, raw []byte) (*graph.Graph, error) {
 		gems    []gemEntry
 		directs = map[string]bool{}
 		section string
+		remote  string
 		inSpecs bool
 		curGem  *gemEntry
 	)
@@ -121,6 +129,7 @@ func parseGemfileLock(path string, raw []byte) (*graph.Graph, error) {
 				section = trimmed
 			}
 			inSpecs = false
+			remote = ""
 			curGem = nil
 			continue
 		}
@@ -137,6 +146,11 @@ func parseGemfileLock(path string, raw []byte) (*graph.Graph, error) {
 				continue
 			}
 			if !inSpecs {
+				// The section preamble names the origin: "remote: <url>" for
+				// GEM/GIT, "remote: ." for PATH.
+				if r, ok := strings.CutPrefix(trimmed, "remote:"); ok {
+					remote = strings.TrimSpace(r)
+				}
 				continue
 			}
 			indent := countIndent(line)
@@ -144,7 +158,10 @@ func parseGemfileLock(path string, raw []byte) (*graph.Graph, error) {
 				// Package entry: "    name (version)"
 				name, version := parseGemSpec(trimmed)
 				if name != "" && version != "" {
-					gems = append(gems, gemEntry{name: name, version: version})
+					gems = append(gems, gemEntry{
+						name: name, version: version,
+						section: section, remote: remote,
+					})
 					curGem = &gems[len(gems)-1]
 				} else {
 					curGem = nil
@@ -177,11 +194,12 @@ func parseGemfileLock(path string, raw []byte) (*graph.Graph, error) {
 	for _, e := range gems {
 		id := purl.NewGem(e.name, e.version).String()
 		isDirect := directs[e.name]
-		g.AddNode(&graph.Node{
+		n := g.AddNode(&graph.Node{
 			ID: id, Ecosystem: "gem", Name: e.name, Version: e.version,
 			Direct: isDirect,
 			Attr:   map[string]string{"gem.source": gemfileLockName},
 		})
+		n.SetSource(classifySection(e.section, e.remote))
 		byName[e.name] = id
 	}
 
@@ -219,6 +237,21 @@ func parseGemfileLock(path string, raw []byte) (*graph.Graph, error) {
 
 	assignDepths(g, root.ID)
 	return g, nil
+}
+
+// classifySection maps a Gemfile.lock section onto an ecosystem-neutral
+// provenance class (Decision D-41). Bundler states this outright — a gem's
+// section IS its origin — so no heuristics are needed.
+func classifySection(section, remote string) (class, ref string) {
+	switch section {
+	case "GEM":
+		return graph.SourceRegistry, remote
+	case "GIT":
+		return graph.SourceGit, remote
+	case "PATH":
+		return graph.SourcePath, remote
+	}
+	return "", ""
 }
 
 // parseGemSpec splits "name (version)" into name and version.
