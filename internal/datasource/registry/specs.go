@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -131,6 +132,16 @@ type cargoResponse struct {
 type cargoVersion struct {
 	Num       string `json:"num"`
 	CreatedAt string `json:"created_at"`
+	// PublishedBy is crates.io's per-version publisher. It is the second of
+	// the six ecosystems to expose one (npm is the other), and the only reason
+	// the actor axis can be evaluated for Rust at all (D-40).
+	PublishedBy *cargoPublisher `json:"published_by"`
+}
+
+type cargoPublisher struct {
+	ID    int64  `json:"id"`
+	Login string `json:"login"`
+	Name  string `json:"name"`
 }
 
 func parseCargoVersions(name string, raw []byte) (*datasource.ReleaseHistory, error) {
@@ -145,9 +156,39 @@ func parseCargoVersions(name string, raw []byte) (*datasource.ReleaseHistory, er
 			continue
 		}
 		h.Releases = append(h.Releases, datasource.Release{Version: v.Num, Published: t})
+		// published_by is null for releases predating crates.io recording it,
+		// and for versions published by a token whose owner was since deleted.
+		// Absent stays absent: an unknown publisher must never be filled in.
+		if v.PublishedBy == nil || (v.PublishedBy.Login == "" && v.PublishedBy.ID == 0) {
+			continue
+		}
+		if h.Publishers == nil {
+			h.Publishers = map[string]datasource.Publisher{}
+		}
+		id := v.PublishedBy.Login
+		if v.PublishedBy.ID != 0 {
+			// Prefer the numeric account ID: logins can be renamed and reused,
+			// and an identity that changes when a name changes would report a
+			// publisher transition that never happened.
+			id = strconv.FormatInt(v.PublishedBy.ID, 10)
+		}
+		h.Publishers[v.Num] = datasource.Publisher{
+			ID:     id,
+			Name:   firstNonEmpty(v.PublishedBy.Login, v.PublishedBy.Name),
+			Source: "crates.published_by",
+		}
 	}
 	h.Sort()
 	return h, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // ---------- Composer (Packagist) ----------

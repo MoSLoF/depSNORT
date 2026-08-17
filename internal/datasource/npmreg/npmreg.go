@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"ihbv.io/depsnort/internal/datasource"
+	"ihbv.io/depsnort/internal/installsurface"
 )
 
 // DefaultEndpoint is the public npm registry.
@@ -79,6 +80,24 @@ type packument struct {
 	Name        string            `json:"name"`
 	Time        map[string]string `json:"time"`
 	Maintainers []maintainer      `json:"maintainers"`
+	// Versions is the per-version manifest map. Two facts are taken from it and
+	// everything else is discarded at decode time:
+	//
+	//   _npmUser — the account that published THAT version. The package-level
+	//   Maintainers list above cannot answer this, and it reads identically
+	//   before and after a stolen token pushes a release (D-40).
+	//
+	//   scripts — the version's declared lifecycle hooks. This is the only
+	//   drift signal available with no baseline file and no artifact download:
+	//   the packument is one request this scan already makes and already
+	//   caches, and it states outright that 1.6.3 declares a postinstall that
+	//   1.6.2 did not.
+	Versions map[string]packumentVersion `json:"versions"`
+}
+
+type packumentVersion struct {
+	NpmUser maintainer        `json:"_npmUser"`
+	Scripts map[string]string `json:"scripts"`
 }
 
 type maintainer struct {
@@ -251,5 +270,51 @@ func parsePackument(name string, raw []byte) (*datasource.ReleaseHistory, error)
 	for _, m := range p.Maintainers {
 		h.Maintainers = append(h.Maintainers, m.Name)
 	}
+
+	for version, v := range p.Versions {
+		if v.NpmUser.Name != "" {
+			if h.Publishers == nil {
+				h.Publishers = map[string]datasource.Publisher{}
+			}
+			// npm exposes no stable numeric account ID on _npmUser, so the
+			// login IS the identity here. Recorded in both fields rather than
+			// left half-empty so Key() behaves the same across ecosystems.
+			h.Publishers[version] = datasource.Publisher{
+				ID:     v.NpmUser.Name,
+				Name:   v.NpmUser.Name,
+				Email:  v.NpmUser.Email,
+				Source: "npm._npmUser",
+			}
+		}
+		if hooks := installHooksOf(v.Scripts); len(hooks) > 0 {
+			if h.Hooks == nil {
+				h.Hooks = map[string][]string{}
+			}
+			h.Hooks[version] = hooks
+		}
+	}
 	return h, nil
+}
+
+// installHooksOf returns the install-time lifecycle hooks a version's scripts
+// block declares, sorted.
+//
+// Only install-time names count: a `test` or `build` script is not something
+// `npm install` fires, and treating every scripts entry as a hook would make
+// the drift signal fire on essentially every release of every package.
+func installHooksOf(scripts map[string]string) []string {
+	if len(scripts) == 0 {
+		return nil
+	}
+	var out []string
+	for name, body := range scripts {
+		if strings.TrimSpace(body) == "" {
+			continue
+		}
+		if installsurface.IsInstallHook(name) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
