@@ -30,5 +30,8 @@ func Default() *check.Registry {
 		Typosquat{},           // VC-006
 		DependencyConfusion{}, // VC-007
 		KnownVuln{},           // VC-008
+		UnverifiableSource{},  // VC-009
+		CapabilityDrift{},     // VC-010
+		PublisherLineage{},    // VC-011
 	)
 }

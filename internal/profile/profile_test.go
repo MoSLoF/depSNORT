@@ -216,3 +216,27 @@ func TestFromGraphRejectsNonPackageNodes(t *testing.T) {
 		t.Error("FromGraph(nil, nil) must return the zero profile")
 	}
 }
+
+// TestRemoteArtifactIsNotACoverageGap: depSNORT never fetches what a hook would
+// download (D-04), so a remote artifact is unread BY DESIGN. Marking that as
+// degraded coverage would make nearly every hook-bearing profile claim to be a
+// lower bound, which would make the marker meaningless where it matters.
+func TestRemoteArtifactIsNotACoverageGap(t *testing.T) {
+	surface := installsurface.Surface{Hooks: []installsurface.Hook{{
+		Name:    "postinstall",
+		Command: "node ./fetch.js",
+		Artifacts: []installsurface.Artifact{
+			{Ref: "https://cdn.example.invalid/blob.bin", Remote: true, Read: false},
+		},
+	}}}
+	g, n := pkgGraph(t, "pkg:npm/acme-widget@1.2.3", surface)
+
+	p := FromGraph(g, n)
+	if containsString(p.Unobserved, UnobservedInstallSurface) {
+		t.Errorf("Unobserved = %v; an unfetched REMOTE artifact is the zero-execution "+
+			"model working, not a coverage gap", p.Unobserved)
+	}
+	if len(p.RemoteHosts) != 1 {
+		t.Errorf("RemoteHosts = %v; the destination must still be recorded", p.RemoteHosts)
+	}
+}

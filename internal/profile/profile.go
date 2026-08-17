@@ -172,8 +172,14 @@ func FromGraph(g *graph.Graph, n *graph.Node) Profile {
 					if h := hostOf(target.Name); h != "" {
 						hosts[h] = true
 					}
+					// A remote artifact is unread BY DESIGN — depSNORT never
+					// fetches what a hook would download (D-04). That is a
+					// permanent property of the zero-execution model, not a
+					// gap in this scan, and marking it would make nearly every
+					// hook-bearing profile claim degraded coverage.
+					continue
 				}
-				// An artifact the extractor could not read is the specific
+				// A LOCAL artifact the extractor could not read is the real
 				// shape of "absent capability might mean unread source".
 				if target.Attr["artifact.read"] == "false" {
 					surfaceUnread = true
