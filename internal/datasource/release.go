@@ -12,6 +12,41 @@ type Release struct {
 	Published time.Time `json:"published"`
 }
 
+// Publisher is the identity that published one specific version.
+//
+// This is deliberately distinct from ReleaseHistory.Maintainers, which is a
+// CURRENT package-level list. A maintainer list answers "who can publish this
+// package today?" and cannot answer "who published version N versus N+1?" —
+// and the second question is the one that matters when an account is taken
+// over: the maintainer list looks identical before and after a stolen token
+// pushes a release (Decision D-40).
+type Publisher struct {
+	// ID is the registry's stable identifier where one exists, else the login.
+	ID string `json:"id,omitempty"`
+	// Name is the human-readable login/username.
+	Name string `json:"name,omitempty"`
+	// Email is recorded only when the registry publishes it.
+	Email string `json:"email,omitempty"`
+	// Source names WHERE this identity came from ("npm._npmUser",
+	// "crates.published_by") — provenance of the provenance, so a reader can
+	// tell a registry-asserted identity from an inferred one.
+	Source string `json:"source,omitempty"`
+}
+
+// IsZero reports whether no publisher identity was recorded. Callers must treat
+// this as "unknown", never as "unchanged".
+func (p Publisher) IsZero() bool { return p == Publisher{} }
+
+// Key is the identity used to compare publishers across versions. The registry
+// ID is preferred because logins can be renamed and reused; the login is the
+// fallback for registries that expose no stable ID.
+func (p Publisher) Key() string {
+	if p.ID != "" {
+		return p.ID
+	}
+	return p.Name
+}
+
 // ReleaseHistory is a package's publish timeline — the substrate of the
 // temporal ("recent-compromise weather") axis. A lockfile pins exactly one
 // version and carries no history, so this can only come from a registry.
@@ -20,6 +55,54 @@ type ReleaseHistory struct {
 	Ecosystem   string    `json:"ecosystem"`
 	Releases    []Release `json:"releases"` // sorted oldest -> newest
 	Maintainers []string  `json:"maintainers,omitempty"`
+	// Publishers maps version -> the identity that published it, where the
+	// registry exposes per-version provenance (npm and crates.io do; the other
+	// four do not). An absent entry is a coverage fact, not a claim of
+	// continuity.
+	Publishers map[string]Publisher `json:"publishers,omitempty"`
+	// Hooks maps version -> the install-time lifecycle hook names that version
+	// DECLARES, where registry metadata carries the manifest (npm's packument
+	// embeds each version's package.json). This is the one drift signal
+	// available without a baseline file, because it needs no artifact download.
+	Hooks map[string][]string `json:"hooks,omitempty"`
+}
+
+// PublisherAt returns the identity that published version, when known.
+func (h *ReleaseHistory) PublisherAt(version string) (Publisher, bool) {
+	if h == nil || len(h.Publishers) == 0 {
+		return Publisher{}, false
+	}
+	p, ok := h.Publishers[version]
+	if !ok || p.IsZero() {
+		return Publisher{}, false
+	}
+	return p, true
+}
+
+// PriorPublishers returns the set of publisher keys seen STRICTLY BEFORE
+// version in the release timeline, along with whether the history was rich
+// enough to answer at all.
+//
+// The second return value is what keeps VC-011 honest: a package whose earlier
+// releases carry no publisher data cannot support the claim "this publisher is
+// new", and must produce no finding rather than a confident one built on
+// missing data.
+func (h *ReleaseHistory) PriorPublishers(version string) (keys map[string]bool, known bool) {
+	if h == nil || len(h.Publishers) == 0 {
+		return nil, false
+	}
+	idx := h.IndexOf(version)
+	if idx < 0 {
+		return nil, false
+	}
+	keys = map[string]bool{}
+	for _, r := range h.Releases[:idx] {
+		if p, ok := h.Publishers[r.Version]; ok && !p.IsZero() {
+			keys[p.Key()] = true
+			known = true
+		}
+	}
+	return keys, known
 }
 
 // Sort orders releases oldest to newest.
