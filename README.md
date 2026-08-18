@@ -263,10 +263,11 @@ satisfying the accumulated constraints) and labels it: every node carries
 reported but **never gate** — a block on a version nobody installed is a false
 positive with a build failure attached. `-no-expand` restores the
 manifest-only posture; `-expand-depth=N` steps through the tree one layer at a
-time. Expansion covers PyPI (PEP 440), npm (semver ranges), and Cargo (crates.io,
-where a bare requirement means caret) today; the other three ecosystems stay
-at the frontier until each grows its version grammar, rather than being
-presumed wrongly. A dependency the lockfile records as git-, path-, or
+time. Expansion covers PyPI (PEP 440), npm (semver ranges), Cargo (crates.io, where
+a bare requirement means caret), and NuGet (interval ranges like `[1.0,2.0)`,
+where a bare version is a minimum and the resolver picks the LOWEST satisfying
+version, not the newest) today; RubyGems and Composer stay at the frontier
+until each grows its version grammar, rather than being presumed wrongly. A dependency the lockfile records as git-, path-, or
 url-sourced is never walked against a registry — its name could collide with a
 real package, and grafting that package’s tree onto a local fork is the
 confusion the source class exists to prevent.

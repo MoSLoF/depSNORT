@@ -1382,9 +1382,21 @@ judges with PEP 440 (`internal/pep440`); npm reads the packument's per-version
 (caret, tilde, x-ranges, hyphen ranges, AND/OR); Cargo reads the crates.io
 per-version dependencies endpoint and judges with `SatisfiesCargo`, which shares
 that evaluator's caret/tilde math but flips two defaults — a bare requirement is
-caret, not exact, and AND is a comma. All reuse the registry clients
-VC-004/VC-005 already run; the deps clients share one `coordFetcher` for the
-cache/concurrency/coverage plumbing. Cargo also keeps build-dependencies (they
+caret, not exact, and AND is a comma. NuGet reads dependency groups from the
+registration index (the one document that also carries the version list) and
+judges with `internal/nugetver`, a separate version model because NuGet needs
+what semver cannot give: four-part versions (`1.2.3.4`) and interval ranges
+(`[1.0,2.0)`), where a bare version is a MINIMUM, not exact and not caret. All
+reuse the registry clients VC-004/VC-005 already run; the per-coordinate deps
+clients share one `coordFetcher` for the cache/concurrency/coverage plumbing.
+
+NuGet also forced the walk to stop assuming a universal selection direction. npm,
+PyPI, and Cargo install the HIGHEST version satisfying a constraint; NuGet
+installs the LOWEST. Presuming the highest for NuGet would model a restore no
+client performs, so an ecosystem now declares its direction through the optional
+`LowestResolver` interface, and the walk sorts candidates accordingly — highest
+by default, lowest when the declarer says so. The selection is the installer's,
+not the tool's. Cargo also keeps build-dependencies (they
 run build.rs at compile time — the install-time subgraph's own subject, D-02)
 and drops dev-dependencies, which Cargo never compiles transitively. The other
 three ecosystems expand as each grows its own range grammar; until one does, its

@@ -149,6 +149,18 @@ type Presumer interface {
 	CompareVersions(a, b string) int
 }
 
+// LowestResolver is an optional refinement of Presumer: an ecosystem whose
+// installer picks the LOWEST version satisfying a constraint rather than the
+// highest. NuGet does this — "1.0" means "the lowest published version >= 1.0",
+// not the newest — so a walk that presumed the highest would model a restore
+// no NuGet client performs. npm, PyPI, and Cargo take the highest and do not
+// implement this; the walk defaults to highest.
+type LowestResolver interface {
+	Presumer
+	// PrefersLowest reports true to select the lowest satisfying candidate.
+	PrefersLowest() bool
+}
+
 // Options bound the walk.
 type Options struct {
 	// MaxDepth stops expansion beyond this distance from the root. Zero means
@@ -485,7 +497,20 @@ func (w *Walker) presume(ctx context.Context, d Declarer, p *pending, opts Optio
 		// incompatible ranges. The walk does not pick a side.
 		return "", graph.TruthContested, 0
 	}
-	sort.Slice(ok, func(i, j int) bool { return pr.CompareVersions(ok[i], ok[j]) > 0 })
+	// Selection direction is the installer's, not a universal. Most resolvers
+	// take the highest satisfying version; NuGet takes the lowest. An ecosystem
+	// says which by implementing LowestResolver; the default is highest.
+	lowest := false
+	if lr, ok := d.(LowestResolver); ok {
+		lowest = lr.PrefersLowest()
+	}
+	sort.Slice(ok, func(i, j int) bool {
+		c := pr.CompareVersions(ok[i], ok[j])
+		if lowest {
+			return c < 0
+		}
+		return c > 0
+	})
 	return ok[0], graph.TruthPresumed, len(ok)
 }
 

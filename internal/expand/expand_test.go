@@ -354,3 +354,61 @@ func TestNonRegistrySourceIsNotWalked(t *testing.T) {
 		t.Errorf("discovered = %d from a non-registry node, want 0", res.Discovered)
 	}
 }
+
+// lowestFake is a Presumer that also implements LowestResolver, to prove the
+// selection direction is per-ecosystem: the same candidate set resolves to the
+// lowest here and the highest for a plain Presumer.
+type lowestFake struct{ *fakePyPI }
+
+func (lowestFake) Ecosystem() string   { return "nuget" }
+func (lowestFake) PrefersLowest() bool { return true }
+func (f lowestFake) Identify(name, version string) (string, string) {
+	id := "pkg:nuget/" + name
+	if version != "" {
+		id += "@" + version
+	}
+	return id, name
+}
+
+func TestSelectionDirectionIsPerEcosystem(t *testing.T) {
+	// Same shape, two ecosystems: highest-wins (fakePyPI) vs lowest-wins.
+	mk := func() (*graph.Graph, *graph.Node) {
+		g := graph.New()
+		root := g.AddNode(&graph.Node{ID: "root", Kind: graph.KindPackage})
+		g.MarkRoot(root.ID)
+		return g, root
+	}
+
+	hi := &fakePyPI{
+		table:    map[string][]expand.Declaration{"pypi|a|1.0.0": {{Name: "dep", Constraint: ">=1.0"}}},
+		versions: map[string][]string{"dep": {"1.0.0", "1.5.0", "2.0.0"}},
+	}
+	g, root := mk()
+	root.Ecosystem = "pypi"
+	pin := g.AddNode(&graph.Node{ID: "pkg:pypi/a@1.0.0", Kind: graph.KindPackage, Ecosystem: "pypi", Name: "a", Version: "1.0.0", Depth: 1})
+	g.AddEdge(root.ID, pin.ID, graph.EdgeDependsOn)
+	if _, err := expand.NewWalker(hi).ExpandRoot(context.Background(), g, pin, expand.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if g.Get("pkg:pypi/dep@2.0.0") == nil {
+		t.Error("highest-wins ecosystem did not take the newest satisfying version")
+	}
+
+	lo := lowestFake{&fakePyPI{
+		table:    map[string][]expand.Declaration{"nuget|a|1.0.0": {{Name: "dep", Constraint: ">=1.0"}}},
+		versions: map[string][]string{"dep": {"1.0.0", "1.5.0", "2.0.0"}},
+	}}
+	g2, root2 := mk()
+	root2.Ecosystem = "nuget"
+	pin2 := g2.AddNode(&graph.Node{ID: "pkg:nuget/a@1.0.0", Kind: graph.KindPackage, Ecosystem: "nuget", Name: "a", Version: "1.0.0", Depth: 1})
+	g2.AddEdge(root2.ID, pin2.ID, graph.EdgeDependsOn)
+	if _, err := expand.NewWalker(lo).ExpandRoot(context.Background(), g2, pin2, expand.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if g2.Get("pkg:nuget/dep@1.0.0") == nil {
+		t.Error("lowest-wins ecosystem did not take the oldest satisfying version")
+	}
+	if g2.Get("pkg:nuget/dep@2.0.0") != nil {
+		t.Error("lowest-wins ecosystem wrongly took the newest")
+	}
+}
