@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"ihbv.io/depsnort/internal/graph"
@@ -69,7 +70,47 @@ type cargoEntry struct {
 	name    string
 	version string
 	source  string
-	deps    []string
+	deps    []cargoDep
+}
+
+// cargoDep is one entry from a [[package]] dependencies list.
+//
+// Cargo writes the MINIMUM needed to disambiguate: "name" when the name is
+// unique in the lock, "name version" when several versions are present, and
+// "name version (source)" when the same name+version exists from more than one
+// source. Keeping only the name — which this parser used to do — throws away
+// exactly the information Cargo added because it was needed (finding
+// DS-REV-02).
+// cargoKey identifies one locked package: Cargo allows several versions of the
+// same crate, so a name alone is not an identity.
+type cargoKey struct{ name, version string }
+
+type cargoDep struct {
+	name    string
+	version string // empty when the lock did not need to disambiguate
+	source  string // empty unless the lock qualified by source too
+}
+
+// parseDepSpec splits a dependency string into its name, version, and source.
+func parseDepSpec(spec string) cargoDep {
+	// The source, when present, is parenthesized and always last.
+	var source string
+	if i := strings.IndexByte(spec, '('); i >= 0 {
+		if j := strings.LastIndexByte(spec, ')'); j > i {
+			source = strings.TrimSpace(spec[i+1 : j])
+		}
+		spec = strings.TrimSpace(spec[:i])
+	}
+	fields := strings.Fields(spec)
+	d := cargoDep{}
+	if len(fields) > 0 {
+		d.name = fields[0]
+	}
+	if len(fields) > 1 {
+		d.version = fields[1]
+	}
+	d.source = source
+	return d
 }
 
 // parseCargoLock parses a Cargo.lock file. The format is a subset of TOML with
@@ -116,11 +157,8 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 			dep := strings.Trim(trimmed, `",`)
 			dep = strings.TrimSpace(dep)
 			if dep != "" {
-				// Dependencies can be "name", "name version", or
-				// "name version (source)". We only need the name.
-				parts := strings.Fields(dep)
-				if len(parts) > 0 {
-					cur.deps = append(cur.deps, parts[0])
+				if d := parseDepSpec(dep); d.name != "" {
+					cur.deps = append(cur.deps, d)
 				}
 			}
 			continue
@@ -136,13 +174,13 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 			if strings.HasSuffix(trimmed, "]") {
 				// Single-line dependencies = []
 				inner := trimmed[len("dependencies = [") : len(trimmed)-1]
-				for _, d := range strings.Split(inner, ",") {
-					dep := strings.Trim(strings.TrimSpace(d), `"`)
-					if dep != "" {
-						parts := strings.Fields(dep)
-						if len(parts) > 0 {
-							cur.deps = append(cur.deps, parts[0])
-						}
+				for _, raw := range strings.Split(inner, ",") {
+					dep := strings.Trim(strings.TrimSpace(raw), `"`)
+					if dep == "" {
+						continue
+					}
+					if d := parseDepSpec(dep); d.name != "" {
+						cur.deps = append(cur.deps, d)
 					}
 				}
 			} else {
@@ -161,22 +199,52 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 	// The first [[package]] in Cargo.lock is typically the project itself.
 	root := rootNode(g, path, entries[0])
 
-	// Build nodes. Track by "name version" for deduplication (Cargo allows
+	// Build nodes. Track by (name, version) for deduplication (Cargo allows
 	// multiple versions of the same crate).
-	type key struct{ name, version string }
-	byKey := map[key]string{}
-	byName := map[string][]string{} // name -> [node IDs] for dep resolution
+	byKey := map[cargoKey]string{}
+	byName := map[string][]string{}     // name -> [node IDs], for name-only deps
+	bySource := map[cargoKey]string{}   // (name, version) -> that node's source
+	unresolved := map[string][]string{} // parent node ID -> ambiguous dep names
 
 	for i, e := range entries {
 		if e.name == "" || e.version == "" {
 			continue
 		}
 		if i == 0 && e.name == root.Name {
-			byKey[key{e.name, e.version}] = root.ID
+			byKey[cargoKey{e.name, e.version}] = root.ID
 			byName[e.name] = append(byName[e.name], root.ID)
+			bySource[cargoKey{e.name, e.version}] = e.source
 			continue
 		}
 		id := purl.NewCargo(e.name, e.version).String()
+		k := cargoKey{e.name, e.version}
+
+		// Same name@version from a DIFFERENT source — a registry crate and a
+		// git fork of it, say. Node identity across this tool is the PURL
+		// string, and a PURL carries no source, so the graph cannot represent
+		// these as two nodes without changing what identity means everywhere
+		// (IOC ledger keys, baseline keys, workspace dedup, the PURL parser's
+		// forging invariants from D-33).
+		//
+		// What it can do is refuse to pretend it knows which one this is. The
+		// node keeps its first-seen position deterministically, and its
+		// provenance becomes UNKNOWN rather than whichever source happened to
+		// be parsed last — so it is not verifiable, VC-009 names it, and the
+		// scan's coverage degrades (D-41). A confident wrong source class here
+		// would be worse than an admitted ambiguous one: it decides whether an
+		// advisory lookup meant anything.
+		if prev, seen := byKey[k]; seen {
+			if prevSrc := bySource[k]; prevSrc != e.source {
+				if n := g.Get(prev); n != nil {
+					n.SetSource(graph.SourceUnknown,
+						"ambiguous: "+firstNonEmpty(prevSrc, "(no source)")+" and "+
+							firstNonEmpty(e.source, "(no source)"))
+					n.Attr["cargo.source_collision"] = "true"
+				}
+			}
+			continue
+		}
+
 		attr := map[string]string{"cargo.source": cargoLockName}
 		if e.source != "" {
 			attr["cargo.registry"] = e.source
@@ -187,29 +255,59 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 		})
 		class, ref := classifySource(e.source)
 		n.SetSource(class, ref)
-		byKey[key{e.name, e.version}] = id
+		byKey[k] = id
 		byName[e.name] = append(byName[e.name], id)
+		bySource[k] = e.source
 	}
 
-	// Build edges.
+	// Build edges by DEPENDENCY IDENTITY, not by name (finding DS-REV-02).
+	//
+	// This loop used to add an edge to every node sharing the dependency's
+	// name. Cargo qualifies a dependency with a version precisely when several
+	// versions are present, so the over-connection happened exactly in the case
+	// the qualification exists to prevent: a lock selecting "dupe 1.0.0" while
+	// also holding dupe 2.0.0 produced edges to BOTH. Every downstream
+	// conclusion drawn from the graph — reachability, depth, direct vs
+	// transitive, blast radius, the topology digest a baseline diff compares —
+	// inherits that error silently.
 	for _, e := range entries {
-		fromID, ok := byKey[key{e.name, e.version}]
+		fromID, ok := byKey[cargoKey{e.name, e.version}]
 		if !ok {
 			continue
 		}
 		for _, dep := range e.deps {
-			// Try to resolve dependency. The dep string is just a name;
-			// Cargo.lock usually only has one version per crate.
-			targets := byName[dep]
-			if len(targets) == 0 {
+			toID, ok := resolveDep(dep, byKey, byName, bySource)
+			if !ok {
+				// Ambiguous: a bare name with more than one candidate. Cargo
+				// does not normally emit this, so it means a hand-edited or
+				// malformed lock. Disclose it as unresolved coverage rather
+				// than guess — a guessed edge is indistinguishable from a real
+				// one once it is in the graph (D-24).
+				if len(byName[dep.name]) > 1 {
+					unresolved[fromID] = appendUnique(unresolved[fromID], dep.name)
+				}
 				continue
 			}
-			for _, toID := range targets {
-				if toID != fromID {
-					g.AddEdge(fromID, toID, graph.EdgeDependsOn)
-				}
+			if toID != fromID {
+				g.AddEdge(fromID, toID, graph.EdgeDependsOn)
 			}
 		}
+	}
+
+	// Record ambiguity on the parent, through the same coverage keys every
+	// other adapter uses, so it reaches Coverage.Degraded -> Incomplete() and
+	// can fail a run under -fail-on-incomplete without a new concept.
+	for nodeID, names := range unresolved {
+		n := g.Get(nodeID)
+		if n == nil {
+			continue
+		}
+		sort.Strings(names)
+		if n.Attr == nil {
+			n.Attr = map[string]string{}
+		}
+		n.Attr[graph.AttrUnresolved] = strings.Join(names, ",")
+		n.Attr[graph.AttrUnresolvedCount] = strconv.Itoa(len(names))
 	}
 
 	// Mark direct dependencies (deps of root).
@@ -223,6 +321,58 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 
 	assignDepths(g, root.ID)
 	return g, nil
+}
+
+// resolveDep maps one dependency spec onto exactly one node, or reports that it
+// cannot be resolved unambiguously.
+//
+// Resolution is strictly most-specific-first, and never widens:
+//
+//  1. (name, version) when the lock qualified by version. A version-qualified
+//     dependency names one package; if that exact pair is absent the dependency
+//     is unresolvable, NOT an invitation to fall back to the name.
+//  2. name alone, only when exactly one candidate carries that name.
+//
+// When the spec also carries a source, it must match the candidate's source —
+// same name and version from a registry and from a git fork are different
+// packages with different contents, and treating them as one defeats the
+// provenance model (D-41) at the graph layer.
+func resolveDep(dep cargoDep, byKey map[cargoKey]string,
+	byName map[string][]string, bySource map[cargoKey]string,
+) (string, bool) {
+	if dep.version != "" {
+		k := cargoKey{dep.name, dep.version}
+		id, ok := byKey[k]
+		if !ok {
+			return "", false
+		}
+		if dep.source != "" && bySource[k] != "" && bySource[k] != dep.source {
+			return "", false
+		}
+		return id, true
+	}
+	if ids := byName[dep.name]; len(ids) == 1 {
+		return ids[0], true
+	}
+	return "", false
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func appendUnique(list []string, s string) []string {
+	for _, v := range list {
+		if v == s {
+			return list
+		}
+	}
+	return append(list, s)
 }
 
 func rootNode(g *graph.Graph, path string, first cargoEntry) *graph.Node {
