@@ -653,6 +653,15 @@ func cmdScan(args []string) int {
 			cov.Error = qErr.Error()
 			fmt.Fprintf(os.Stderr, "depsnort: warning: OSV coverage degraded: %v\n", qErr)
 		}
+		// A bundled entry with no malicious-package advisory is disclosed
+		// separately from a real bundled hit: it is present in the dataset but
+		// answered nothing about malware, and it counts as a gap (DS-REV-01).
+		if cov.Stats.BundledNonMalicious > 0 {
+			fmt.Fprintf(os.Stderr,
+				"depsnort: warning: %d coordinate(s) matched the embedded fallback dataset but carry no "+
+					"malicious-package advisory — CVE context only, NOT malicious-package coverage\n",
+				cov.Stats.BundledNonMalicious)
+		}
 		if cov.Stats.FromBundled > 0 {
 			age := ""
 			if cov.Stats.BundledDatasetAt != nil {

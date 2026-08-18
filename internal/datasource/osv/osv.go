@@ -177,19 +177,54 @@ func (c *Client) QueryBatch(ctx context.Context, coords []datasource.Coord) ([][
 // written into the on-disk cache: doing so would stamp it with "now" and make
 // a build-time dataset indistinguishable from a fresh live check on the very
 // next run.
+//
+// A hit only counts as COVERAGE when the entry carries malicious-package
+// intelligence (finding DS-REV-01). The tier is documented, and reported, as
+// the offline substitute for a live VC-001 check; an entry holding nothing but
+// ordinary CVEs cannot answer the question that tier exists to answer, however
+// many advisories it contains. Before this, any hit incremented FromBundled and
+// suppressed the gap, so a coordinate present with GHSA records alone returned
+// exit 0 — a clean bill of health from a dataset that had never looked for
+// malware.
+//
+// The advisories are still returned either way: VC-008 context is real and
+// there is no reason to discard it. What changes is the accounting — the
+// coordinate is ALSO recorded as a gap, so it reaches
+// Coverage.Incomplete() and can fail a run under -fail-on-incomplete, which is
+// the honest answer to "was this checked for malicious packages?".
 func (c *Client) resolveFromBundledOrGap(out [][]datasource.Advisory, i int, coord datasource.Coord) {
 	if c.Bundled != nil {
 		if adv, generatedAt, ok := c.Bundled(coord.Key()); ok {
 			out[i] = adv
-			c.Stats.FromBundled++
 			c.tally(adv)
 			at := generatedAt
 			c.Stats.BundledDatasetAt = &at
+			if hasMalicious(adv) {
+				c.Stats.FromBundled++
+				return
+			}
+			// Present, but not as malicious-package coverage.
+			c.Stats.BundledNonMalicious++
+			c.Stats.Gaps++
 			return
 		}
 	}
 	out[i] = nil
 	c.Stats.Gaps++
+}
+
+// hasMalicious reports whether a bundled entry carries at least one
+// malicious-package advisory. Reads the Malicious flag the snapshot format
+// already carries, falling back to the ID classifier so a hand-authored or
+// older snapshot whose flag was never set is judged on the same rule the live
+// path uses (datasource.ClassifyMalicious).
+func hasMalicious(adv []datasource.Advisory) bool {
+	for _, a := range adv {
+		if a.Malicious || datasource.ClassifyMalicious(a.ID) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) tally(adv []datasource.Advisory) {

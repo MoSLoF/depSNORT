@@ -240,3 +240,67 @@ type erroringDoer struct{}
 func (*erroringDoer) Do(*http.Request) (*http.Response, error) {
 	return nil, context.DeadlineExceeded
 }
+
+// TestBundledCVEOnlyHitIsStillAGap is the DS-REV-01 accounting guard at the
+// client level: an entry the dataset DOES hold, carrying only ordinary
+// vulnerabilities, has answered nothing about malicious packages. Its CVE
+// context is still returned — that data is real — but the coordinate counts as
+// a gap so it reaches Coverage.Incomplete() and can fail a run under
+// -fail-on-incomplete.
+//
+// Before this, any bundled hit incremented FromBundled and suppressed the gap.
+// The reviewer's reproduction was an offline scan of chardet==3.0.4 returning
+// from_bundled=1, gaps=0, clean, exit 0 — from a dataset entry that held zero
+// advisories at all.
+func TestBundledCVEOnlyHitIsStillAGap(t *testing.T) {
+	genAt := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	target := datasource.Coord{Ecosystem: "pypi", Name: "ordinary-pkg", Version: "1.0.0"}
+	c := &Client{
+		HTTP:    &fakeDoer{},
+		Cache:   datasource.NewCache(t.TempDir(), time.Hour),
+		Offline: true,
+		Bundled: fakeBundled(target.Key(),
+			[]datasource.Advisory{{ID: "GHSA-xxxx-yyyy-zzzz", Source: "osv"}}, genAt),
+	}
+
+	got, err := c.QueryBatch(context.Background(), []datasource.Coord{target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got[0]) != 1 {
+		t.Fatalf("the CVE context must still be returned, got %+v", got[0])
+	}
+	if c.Stats.FromBundled != 0 {
+		t.Errorf("Stats.FromBundled = %d; a CVE-only entry is not malicious-package coverage",
+			c.Stats.FromBundled)
+	}
+	if c.Stats.BundledNonMalicious != 1 {
+		t.Errorf("Stats.BundledNonMalicious = %d, want 1", c.Stats.BundledNonMalicious)
+	}
+	if c.Stats.Gaps != 1 {
+		t.Errorf("Stats.Gaps = %d, want 1: nothing checked this coordinate for malware", c.Stats.Gaps)
+	}
+	// The dataset was consulted, so its age is still disclosed.
+	if c.Stats.BundledDatasetAt == nil {
+		t.Error("BundledDatasetAt must be set whenever the dataset was consulted")
+	}
+}
+
+// TestBundledEmptyEntryIsAGap: an entry present with NO advisories is the exact
+// shape the reviewer scanned. It must never read as coverage.
+func TestBundledEmptyEntryIsAGap(t *testing.T) {
+	target := datasource.Coord{Ecosystem: "pypi", Name: "chardet-like", Version: "3.0.4"}
+	c := &Client{
+		HTTP:    &fakeDoer{},
+		Cache:   datasource.NewCache(t.TempDir(), time.Hour),
+		Offline: true,
+		Bundled: fakeBundled(target.Key(), nil, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)),
+	}
+	if _, err := c.QueryBatch(context.Background(), []datasource.Coord{target}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Stats.FromBundled != 0 || c.Stats.Gaps != 1 {
+		t.Errorf("empty bundled entry: FromBundled=%d Gaps=%d, want 0 and 1",
+			c.Stats.FromBundled, c.Stats.Gaps)
+	}
+}
