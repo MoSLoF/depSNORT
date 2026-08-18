@@ -326,6 +326,20 @@ VC-009 is advisory alone and escalates to gate-eligible when the same package
 also declares install-time code: a mutable upstream *plus* a mechanism that runs
 on install is the composed shape, not either half.
 
+A non-registry package also carries its origin in its **identity**, not just in
+its attributes:
+
+```
+pkg:cargo/some-crate@1.0.0                                   # registry
+pkg:cargo/some-crate@1.0.0?source=git&source_ref=git+https…  # a fork of it
+```
+
+They are different code, so they are different nodes. Registry packages keep the
+bare coordinate — that is already globally unique, and qualifying it would
+change the identity of nearly every package in every tree for no gain. Where a
+lockfile genuinely cannot tell two artifacts apart (two Cargo path crates, which
+the lock records no path for), the ambiguity is disclosed rather than guessed.
+
 ## Threat-intelligence tiers
 
 Every resolved `package@version` can be cross-checked against OSV. depSNORT

@@ -1199,14 +1199,9 @@ in the graph.
 
 Writing the fixture surfaced a second defect: two entries with the same
 name@version from different sources collapsed into one node whose source class
-was whichever was parsed last. Node identity across this tool IS the PURL
-string, and a PURL carries no source, so representing both would change what
-identity means for IOC keys, baseline keys, workspace dedup, and the PURL
-parser's forging invariants (D-33). Under a release hold that trade is not
-worth taking, so the graph keeps one node and refuses to claim a source for it:
-provenance becomes unknown, which is unverifiable, which VC-009 names and
-coverage counts. Distinct nodes need PURL qualifiers and are follow-up work,
-recorded rather than quietly skipped.
+was whichever was parsed last. That was first deferred and then closed in the
+same series — see D-43, which also explains why the deferral was the right call
+for about an hour and the wrong one after that.
 
 **DS-REV-03 — "deterministic" is not "correct".** `baseline.Index` kept one
 profile per package by PURL order and my comment called that deterministic. It
@@ -1261,3 +1256,63 @@ index that returns a profile, a history that has an entry, a test job that
 executed — each reported success while answering nothing. Where a component
 cannot answer, the honest outputs are a disclosed gap and a refusal to conclude,
 and every one of these fixes is one of those two.
+
+
+## D-43 — a package's origin is part of its identity
+
+D-42 deferred half of DS-REV-02: a registry crate and a git fork of it at the
+same name@version stayed one node, because node identity across this tool is
+the PURL string and a PURL carried no origin. The graph kept whichever entry
+the parser reached first, and the other silently overwrote its provenance. A
+registry package could report as git-sourced; a fork could be masked as
+registry and never reach VC-009 at all. That one attribute decides whether the
+advisory lookup for a package meant anything, so the node was answering a
+question it had no basis to answer — the D-42 pattern, one layer down.
+
+The deferral was correct while three release blockers were open and this was a
+fourth thing to change underneath them. It stopped being correct the moment
+they were closed, because the same defect was then confirmed in npm: a registry
+copy hoisted at the top of a tree and a git fork nested under a dependency that
+pinned it share a name@version, and `resolved` distinguishes them while the
+identity did not. A mechanism that fixes a proven bug in two adapters is not
+follow-up work.
+
+**Non-registry origins are qualified; registry ones are not.** A fork renders as
+`pkg:cargo/name@1.0.0?source=git&source_ref=<origin>`. A registry package keeps
+its bare coordinate, and that asymmetry is the whole design: qualifying registry
+packages would change the identity of essentially every package in every tree —
+breaking transitive dedupe, committed baselines, and IOC ledgers — to fix a case
+that does not exist, because a registry coordinate is already globally unique.
+The blast radius is confined to exactly the packages that had the bug.
+
+Two custom qualifier keys rather than the spec's `vcs_url` and `download_url`:
+one rule ("a non-registry package carries its class, and its origin when the
+lockfile records one") is easier to hold than three keys chosen per class, and
+these strings are internal identity rather than an interop surface.
+
+**What the fuzzer found, immediately.** Giving `?` and `#` meaning in a PURL
+made them structural, and `encodeSegment` did not escape them — so a package
+named `a?source=git` rendered a PURL that parsed back with a FORGED qualifier,
+letting a hostile lockfile mint the identity of a differently-sourced package.
+That is precisely the identity-forging shape D-33 closed for name and version
+segments, reopened by extending the grammar. FuzzParse produced it in under
+twenty seconds, alongside a second bug where unpadded hex made one string
+render two identities on successive passes.
+
+The lesson is narrower than "fuzzing is good": **every time the identity grammar
+gains a character, every encoder that writes into it becomes wrong until proven
+otherwise.** The invariant is not "escape these five characters", it is "no
+value may render structure it does not own", and the fuzz target is what makes
+that invariant enforceable rather than aspirational.
+
+**One consequence, closed in the same change.** Baseline lookup keys on
+ecosystem+name, so a baseline can now hold a registry package and its fork at
+the same name AND version — identical on every field except identity. Lookup
+tries the full PURL first, and a version collision among several candidates
+resolves to nothing rather than to a guess: the same refusal DS-REV-03
+installed, arriving by a new route.
+
+What remains genuinely indistinguishable is two path crates, because Cargo.lock
+records no path for them. They keep the ambiguity disclosure. The rule holds:
+where the lockfile can tell two artifacts apart, so does the identity; where it
+cannot, nothing pretends otherwise.
