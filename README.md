@@ -299,6 +299,14 @@ Without `-baseline` the drift axis is simply inactive, and the run says so on
 stderr. A scan that could not have reported drift should not read like one that
 looked and found none.
 
+The same rule applies per package. A baseline can legitimately hold several
+approved versions of one package — two projects in a workspace pinning
+differently — and no ordering of versions can say which one a candidate belongs
+to. Rather than pick, depSNORT declines: drift for that package is reported as
+**unevaluated**, named in the scan output and on stderr, and counted as missing
+coverage so `-fail-on-incomplete` can gate on it. A candidate is never compared
+against another project's approved version.
+
 ## Dependency source provenance
 
 A lockfile records not only which version was selected but **where it came
@@ -333,19 +341,27 @@ on-disk cache -> live OSV -> bundled malicious-package snapshot -> typed gap
 
 The bundled snapshot exists so a first scan in a sandbox or air-gapped runner
 still has meaningful malicious-package coverage rather than an empty cache and a
-silent gap. A bundled hit is real coverage — a known-malicious package does not
-stop being malicious because the data is a few weeks old — and its age and use
-are disclosed in output, never mistaken for a live check:
+silent gap. It holds **only `MAL-*` records** — the most recent malicious
+coordinates per ecosystem, across all six — because that is the one question
+this tier exists to answer offline. A hit is real coverage (a known-malicious
+package does not stop being malicious because the data is a few weeks old), and
+its age and use are disclosed in output, never mistaken for a live check:
 
 ```json
-{"name": "osv", "stats": {"from_bundled": 1, "bundled_dataset_generated_at": "2026-08-01T00:00:00Z"}}
+{"name": "osv", "stats": {"from_bundled": 1, "bundled_dataset_generated_at": "2026-08-18T00:00:00Z"}}
 ```
 
-`-no-osv-bundled` disables the tier entirely. The dataset is scoped deliberately
-narrow — `MAL-*` advisories plus CVEs for a small maintained list of popular
-packages — and is regenerated with `make refresh-bundled-snapshot` (see
-[`docs/RELEASING.md`](docs/RELEASING.md)). Embedding the entire OSV corpus is not
-feasible; embedding the bounded, high-signal malicious-package feed is.
+**A hit counts as coverage only if it carries a malicious advisory.** An entry
+holding nothing but ordinary CVEs returns that CVE context — it is real and
+worth having — but still records a gap, because nothing checked that coordinate
+for malware. Reporting it as covered would be an all-clear from a dataset that
+never looked, which is exactly what an earlier revision of this tier did.
+
+`-no-osv-bundled` disables the tier entirely. The dataset is regenerated with
+`make refresh-bundled-snapshot` (see [`docs/RELEASING.md`](docs/RELEASING.md)),
+which fails closed rather than writing a dataset with no malicious records or
+fewer than two ecosystems. Embedding the entire OSV corpus is not feasible;
+embedding the bounded, high-signal malicious-package feed is.
 
 For disconnected environments, a connected system can export a snapshot:
 

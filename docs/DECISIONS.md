@@ -1148,3 +1148,116 @@ mirror would be exactly the warning tax that gets a detector muted.
 PyPI needed no adapter change: a PEP 508 direct reference is already unpinned and
 already degrades coverage through that path, and adding a second signal for the
 same fact would double-count it.
+
+## D-42 — external code validation (post-update): five findings, and what they have in common
+
+An external technical validation of the merged state returned CONDITIONAL FAIL
+with three High-severity correctness defects and two Medium validation gaps. All
+five were reproduced against the code before any of them were fixed, and two of
+the three blockers were mine, introduced with the state-transition work in D-40.
+
+They are worth recording together because four of the five are the same mistake
+in different clothes: **a mechanism that reported success based on whether it
+had DONE something, rather than on whether what it did answered the question.**
+
+**DS-REV-01 — the fallback tier measured presence, not coverage.** The
+compiled-in dataset held 156 advisories, zero of them malicious, and three
+coordinates with no advisories at all. Any hit incremented `FromBundled` and
+suppressed the gap, so an offline scan of a bundled coordinate returned clean,
+exit 0, even under `-fail-on-incomplete`. The tier is documented and gated as
+the offline stand-in for a live VC-001 check; the data could not serve that, and
+the accounting could not tell.
+
+The data was wrong by construction, not by accident. `refresh-bundled-snapshot.sh`
+seeded the dataset by scanning this repo's `realworld` fixtures — real popular
+packages pinned to deliberately VULNERABLE versions — which yields GHSA records
+and can never yield a MAL-* one. The generator's inputs guaranteed the output
+could not do its job, and nothing in the pipeline compared the two.
+
+Both halves are fixed, and both are needed: the accounting now requires a
+malicious advisory before a hit counts as coverage, and the generator now pulls
+MAL-* records from OSV's per-ecosystem exports and fails closed on zero
+malicious records or fewer than two ecosystems. The cap counts COORDINATES
+rather than advisories — capping advisories let NuGet contribute 4411
+coordinates against crates.io's 11, which is not ecosystem diversity.
+
+On freshness, the review asked for an invariant test. A test asserting "newer
+than N days" fails on an untouched repository and must be edited to stay green:
+the hardcoded-date time bomb this project already removed once. Freshness
+remains a runtime disclosure — `BundledDatasetAt` rides every bundled hit and
+the CLI prints its age — and the test guards the field's integrity instead of
+the calendar.
+
+**DS-REV-02 — the Cargo parser discarded the disambiguation Cargo added.**
+Cargo.lock qualifies a dependency with its version precisely when several
+versions are present. The parser kept the name and resolved edges by name, so
+the over-connection happened exactly in the case the qualification exists to
+prevent. Resolution is now most-specific-first and never widens; an ambiguous
+bare name is disclosed through the existing unresolved-coverage keys instead of
+guessed, because a guessed edge is indistinguishable from a real one once it is
+in the graph.
+
+Writing the fixture surfaced a second defect: two entries with the same
+name@version from different sources collapsed into one node whose source class
+was whichever was parsed last. Node identity across this tool IS the PURL
+string, and a PURL carries no source, so representing both would change what
+identity means for IOC keys, baseline keys, workspace dedup, and the PURL
+parser's forging invariants (D-33). Under a release hold that trade is not
+worth taking, so the graph keeps one node and refuses to claim a source for it:
+provenance becomes unknown, which is unverifiable, which VC-009 names and
+coverage counts. Distinct nodes need PURL qualifiers and are follow-up work,
+recorded rather than quietly skipped.
+
+**DS-REV-03 — "deterministic" is not "correct".** `baseline.Index` kept one
+profile per package by PURL order and my comment called that deterministic. It
+was. It also selected 2.0.0 over 10.0.0, because PURL order is lexicographic —
+and fixing the ordering would not have fixed the defect. When two projects in a
+workspace have legitimately approved different versions, the right profile
+depends on WHICH PROJECT the candidate came from, and no ordering of versions
+answers that. The index now keeps every approved version and VC-010 declines
+when the answer is not determined, visibly: an informational finding, a stderr
+warning at load time, and a coverage entry that can reach exit 3.
+
+**DS-REV-04 — a partial history is not a complete one.** `PriorPublishers`
+returned `known=true` on the first prior identity it found, so alice / unknown /
+mallory supported "mallory has never published this package" — when the unknown
+release could have been mallory's. Measuring live crates.io while building the
+feature, serde carries `published_by` on 142 of 316 versions: partial is the
+normal shape there, so the check made its strongest claim exactly where its
+evidence was thinnest. Three states are now distinguished, and a partial history
+produces a qualified claim at reduced confidence that never gates however it
+composes. Composition multiplies confidence; there was none here to multiply.
+
+**DS-REV-05 — a guard that cannot fail.** Go tooling ignores `testdata`
+directories, so `go test ./...` never ran the adversarial corpus, while the CI
+comment asserted that it did. The companion shell harness counted failures,
+printed a tally, and exited 0 regardless — and two of its seven fixtures had
+been failing that way silently: one had no lockfile so no adapter matched, and
+one scanned clean because of a path defect in the Composer extractor.
+
+That defect is the sharpest thing the review produced indirectly. Paths were
+joined with the scan root before being handed to `securefs`, which joins
+relative paths onto its own root. An absolute scan path was unaffected; a
+relative one was joined twice, escaped, and was refused. `depsnort scan ./path`
+therefore skipped the root project's own manifest while `depsnort scan
+/abs/path` read it and blocked on the cradle inside. The refusal WAS disclosed
+as a coverage gap, which is the only reason this was a lost detection rather
+than a silent all-clear — the coverage model did its job while the analysis did
+not.
+
+The corpus now runs as its own CI step, the harness fails on a missed detection
+or an incomplete tally, and expectations are matched through a subsumption rule
+so a stronger classification satisfies a weaker expectation. Without that, every
+rule tightening breaks the harness and the pressure lands on loosening the rule.
+Both suites are kept: the Go corpus builds graphs in memory and cannot catch a
+fixture that never scans, and the shell harness drives the shipped binary and
+found both fixtures that didn't.
+
+**The common thread, and the standing rule.** Coverage accounting (D-24) is
+already the answer to "did we look?", and D-41 extended it to "could this lookup
+have answered?". These findings extend it once more: a mechanism must be judged
+by what it PROVIDES, not by whether it ran. A dataset that contains records, an
+index that returns a profile, a history that has an entry, a test job that
+executed — each reported success while answering nothing. Where a component
+cannot answer, the honest outputs are a disclosed gap and a refusal to conclude,
+and every one of these fixes is one of those two.
