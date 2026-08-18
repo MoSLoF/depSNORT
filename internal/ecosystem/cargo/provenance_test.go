@@ -1,6 +1,7 @@
 package cargo
 
 import (
+	"strings"
 	"testing"
 
 	"ihbv.io/depsnort/internal/graph"
@@ -37,12 +38,14 @@ func TestVendoredLockClassifiesEverySource(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
+	// Non-registry crates carry their origin in the PURL itself (D-42), so a
+	// vendored fork and a registry crate of the same name can never share a
+	// node. Registry crates keep the bare, canonical coordinate.
 	want := map[string]string{
-		"pkg:cargo/portable-pty-harbor@0.9.6": graph.SourcePath,
-		"pkg:cargo/vt100-harbor@0.16.9":       graph.SourcePath,
-		"pkg:cargo/libc@0.2.155":              graph.SourceRegistry,
-		"pkg:cargo/bitflags@2.6.0":            graph.SourceRegistry,
-		"pkg:cargo/tally-ho-shim@0.4.1":       graph.SourceGit,
+		"pkg:cargo/portable-pty-harbor@0.9.6?source=path": graph.SourcePath,
+		"pkg:cargo/vt100-harbor@0.16.9?source=path":       graph.SourcePath,
+		"pkg:cargo/libc@0.2.155":                          graph.SourceRegistry,
+		"pkg:cargo/bitflags@2.6.0":                        graph.SourceRegistry,
 	}
 	for id, wantClass := range want {
 		n := g.Get(id)
@@ -56,9 +59,22 @@ func TestVendoredLockClassifiesEverySource(t *testing.T) {
 	}
 
 	// The git crate must carry its origin, not just its class: a report that
-	// cannot name what it could not verify is barely better than silence.
-	if _, ref := g.Get("pkg:cargo/tally-ho-shim@0.4.1").SourceOf(); ref == "" {
-		t.Error("git dependency recorded no source ref")
+	// cannot name what it could not verify is barely better than silence, and
+	// the origin is what makes two forks of one crate distinguishable.
+	var gitNode *graph.Node
+	for _, n := range g.SortedNodes() {
+		if n.Name == "tally-ho-shim" {
+			gitNode = n
+		}
+	}
+	if gitNode == nil {
+		t.Fatal("git dependency missing from the graph")
+	}
+	if class, ref := gitNode.SourceOf(); class != graph.SourceGit || ref == "" {
+		t.Errorf("git dependency: class=%q ref=%q", class, ref)
+	}
+	if !strings.Contains(gitNode.ID, "source=git") {
+		t.Errorf("git dependency ID %q does not carry its origin", gitNode.ID)
 	}
 
 	cov := g.Coverage()

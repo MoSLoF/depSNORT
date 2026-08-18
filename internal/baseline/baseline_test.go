@@ -135,21 +135,21 @@ func TestLookupRefusesToChooseBetweenVersions(t *testing.T) {
 		prof("dup", "10.0.0", "network"),
 	}
 
-	if _, ok := Lookup(candidates, "3.0.0"); ok {
+	if _, ok := Lookup(candidates, "pkg:npm/dup@3.0.0", "3.0.0"); ok {
 		t.Error("Lookup resolved an ambiguous baseline; it must decline")
 	}
 
 	// An exact match is not ambiguous: this version IS approved, so there is
 	// nothing to compare and no drift by construction.
-	got, ok := Lookup(candidates, "10.0.0")
+	got, ok := Lookup(candidates, "pkg:npm/dup@10.0.0", "10.0.0")
 	if !ok || got.Version != "10.0.0" {
 		t.Errorf("Lookup(exact) = (%+v, %v), want the 10.0.0 profile", got, ok)
 	}
 
-	if got, ok := Lookup(candidates[:1], "9.9.9"); !ok || got.Version != "2.0.0" {
+	if got, ok := Lookup(candidates[:1], "pkg:npm/dup@9.9.9", "9.9.9"); !ok || got.Version != "2.0.0" {
 		t.Errorf("a single candidate must resolve regardless of version, got (%+v, %v)", got, ok)
 	}
-	if _, ok := Lookup(nil, "1.0.0"); ok {
+	if _, ok := Lookup(nil, "pkg:npm/x@1.0.0", "1.0.0"); ok {
 		t.Error("no candidates must not resolve")
 	}
 }
@@ -179,5 +179,38 @@ func TestWriteSkipsZeroProfiles(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Errorf("loaded %d profiles, want 1 (the zero profile must be dropped)", len(got))
+	}
+}
+
+// TestLookupPrefersExactIdentity guards the interaction D-42 introduced. Since
+// a non-registry package carries its origin in its PURL, a baseline can hold a
+// registry package and a git fork of it at the same name AND version —
+// identical on every field except identity. Matching on version alone would
+// compare the fork against the registry package's approved profile, which is
+// exactly the cross-comparison DS-REV-03 exists to prevent.
+func TestLookupPrefersExactIdentity(t *testing.T) {
+	registry := prof("dup", "1.0.0")
+	fork := prof("dup", "1.0.0", "network")
+	fork.PURL = "pkg:npm/dup@1.0.0?source=git&source_ref=git%2Bhttps:%2F%2Fx.invalid%2Fr.git"
+	fork.SourceClass = "git"
+	candidates := []profile.Profile{registry, fork}
+
+	got, ok := Lookup(candidates, fork.PURL, "1.0.0")
+	if !ok {
+		t.Fatal("the fork's own approved profile must resolve")
+	}
+	if got.PURL != fork.PURL || len(got.Caps) != 1 {
+		t.Errorf("resolved to %+v, want the fork's profile", got)
+	}
+
+	got, ok = Lookup(candidates, registry.PURL, "1.0.0")
+	if !ok || got.PURL != registry.PURL || len(got.Caps) != 0 {
+		t.Errorf("resolved to %+v, want the registry profile", got)
+	}
+
+	// A third identity at the same version matches neither, and two candidates
+	// share that version — so there is no answer, only a guess.
+	if _, ok := Lookup(candidates, "pkg:npm/dup@1.0.0?source=path", "1.0.0"); ok {
+		t.Error("an unknown identity colliding on version must not resolve")
 	}
 }

@@ -81,9 +81,10 @@ type cargoEntry struct {
 // source. Keeping only the name — which this parser used to do — throws away
 // exactly the information Cargo added because it was needed (finding
 // DS-REV-02).
-// cargoKey identifies one locked package: Cargo allows several versions of the
-// same crate, so a name alone is not an identity.
-type cargoKey struct{ name, version string }
+// cargoKey identifies one locked package. Cargo allows several versions of the
+// same crate AND the same version from several sources, so neither the name nor
+// the name+version pair is an identity on its own.
+type cargoKey struct{ name, version, source string }
 
 type cargoDep struct {
 	name    string
@@ -199,48 +200,46 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 	// The first [[package]] in Cargo.lock is typically the project itself.
 	root := rootNode(g, path, entries[0])
 
-	// Build nodes. Track by (name, version) for deduplication (Cargo allows
-	// multiple versions of the same crate).
-	byKey := map[cargoKey]string{}
-	byName := map[string][]string{}     // name -> [node IDs], for name-only deps
-	bySource := map[cargoKey]string{}   // (name, version) -> that node's source
+	// Build nodes, keyed by FULL identity: name, version, and source.
+	//
+	// A crate vendored from a git fork is different code from the registry
+	// crate of the same name and version, so it is a different node — the
+	// PURL carries the origin as a qualifier (purl.WithSource, D-42). Registry
+	// crates keep bare PURLs, so dedupe across a workspace is unchanged for
+	// everything that is not a fork.
+	byKey := map[cargoKey]string{}      // (name, version, source) -> node ID
+	byNV := map[string][]string{}       // "name\x00version" -> node IDs
+	byName := map[string][]string{}     // name -> node IDs, for name-only deps
 	unresolved := map[string][]string{} // parent node ID -> ambiguous dep names
+
+	nv := func(name, version string) string { return name + "\x00" + version }
 
 	for i, e := range entries {
 		if e.name == "" || e.version == "" {
 			continue
 		}
+		k := cargoKey{e.name, e.version, e.source}
 		if i == 0 && e.name == root.Name {
-			byKey[cargoKey{e.name, e.version}] = root.ID
+			byKey[k] = root.ID
+			byNV[nv(e.name, e.version)] = append(byNV[nv(e.name, e.version)], root.ID)
 			byName[e.name] = append(byName[e.name], root.ID)
-			bySource[cargoKey{e.name, e.version}] = e.source
 			continue
 		}
-		id := purl.NewCargo(e.name, e.version).String()
-		k := cargoKey{e.name, e.version}
 
-		// Same name@version from a DIFFERENT source — a registry crate and a
-		// git fork of it, say. Node identity across this tool is the PURL
-		// string, and a PURL carries no source, so the graph cannot represent
-		// these as two nodes without changing what identity means everywhere
-		// (IOC ledger keys, baseline keys, workspace dedup, the PURL parser's
-		// forging invariants from D-33).
-		//
-		// What it can do is refuse to pretend it knows which one this is. The
-		// node keeps its first-seen position deterministically, and its
-		// provenance becomes UNKNOWN rather than whichever source happened to
-		// be parsed last — so it is not verifiable, VC-009 names it, and the
-		// scan's coverage degrades (D-41). A confident wrong source class here
-		// would be worse than an admitted ambiguous one: it decides whether an
-		// advisory lookup meant anything.
+		class, ref := classifySource(e.source)
+		id := purl.NewCargo(e.name, e.version).WithSource(class, ref).String()
+
+		// Two entries with the same name, version AND source are genuinely
+		// indistinguishable — the only way to reach this is two path crates,
+		// because Cargo.lock records no path for them. Nothing here can tell
+		// them apart, so the node keeps its first-seen position and says its
+		// provenance is unknown rather than asserting one of two answers.
 		if prev, seen := byKey[k]; seen {
-			if prevSrc := bySource[k]; prevSrc != e.source {
-				if n := g.Get(prev); n != nil {
-					n.SetSource(graph.SourceUnknown,
-						"ambiguous: "+firstNonEmpty(prevSrc, "(no source)")+" and "+
-							firstNonEmpty(e.source, "(no source)"))
-					n.Attr["cargo.source_collision"] = "true"
-				}
+			if n := g.Get(prev); n != nil {
+				n.SetSource(graph.SourceUnknown,
+					"ambiguous: two lock entries share this identity with source "+
+						firstNonEmpty(e.source, "(none recorded)"))
+				n.Attr["cargo.source_collision"] = "true"
 			}
 			continue
 		}
@@ -253,11 +252,10 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 			ID: id, Ecosystem: "cargo", Name: e.name, Version: e.version,
 			Attr: attr,
 		})
-		class, ref := classifySource(e.source)
 		n.SetSource(class, ref)
 		byKey[k] = id
+		byNV[nv(e.name, e.version)] = append(byNV[nv(e.name, e.version)], id)
 		byName[e.name] = append(byName[e.name], id)
-		bySource[k] = e.source
 	}
 
 	// Build edges by DEPENDENCY IDENTITY, not by name (finding DS-REV-02).
@@ -271,12 +269,12 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 	// transitive, blast radius, the topology digest a baseline diff compares —
 	// inherits that error silently.
 	for _, e := range entries {
-		fromID, ok := byKey[cargoKey{e.name, e.version}]
+		fromID, ok := byKey[cargoKey{e.name, e.version, e.source}]
 		if !ok {
 			continue
 		}
 		for _, dep := range e.deps {
-			toID, ok := resolveDep(dep, byKey, byName, bySource)
+			toID, ok := resolveDep(dep, byKey, byNV, byName)
 			if !ok {
 				// Ambiguous: a bare name with more than one candidate. Cargo
 				// does not normally emit this, so it means a hand-edited or
@@ -338,18 +336,19 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 // packages with different contents, and treating them as one defeats the
 // provenance model (D-41) at the graph layer.
 func resolveDep(dep cargoDep, byKey map[cargoKey]string,
-	byName map[string][]string, bySource map[cargoKey]string,
+	byNV, byName map[string][]string,
 ) (string, bool) {
 	if dep.version != "" {
-		k := cargoKey{dep.name, dep.version}
-		id, ok := byKey[k]
-		if !ok {
-			return "", false
+		if dep.source != "" {
+			id, ok := byKey[cargoKey{dep.name, dep.version, dep.source}]
+			return id, ok
 		}
-		if dep.source != "" && bySource[k] != "" && bySource[k] != dep.source {
-			return "", false
+		// Version but no source: unique unless the same version exists from
+		// several sources, in which case the lock would have qualified it.
+		if ids := byNV[dep.name+"\x00"+dep.version]; len(ids) == 1 {
+			return ids[0], true
 		}
-		return id, true
+		return "", false
 	}
 	if ids := byName[dep.name]; len(ids) == 1 {
 		return ids[0], true

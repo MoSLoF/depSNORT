@@ -96,7 +96,7 @@ func (CapabilityDrift) Run(ctx *check.Context) []finding.Finding {
 			continue
 		}
 
-		base, ok := baseline.Lookup(candidates, n.Version)
+		base, ok := baseline.Lookup(candidates, n.ID, n.Version)
 		if !ok {
 			// Several approved versions and no exact match: nothing here can
 			// say which one this candidate should be compared against, and the

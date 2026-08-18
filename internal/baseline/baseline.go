@@ -182,17 +182,39 @@ func Index(profiles map[string]profile.Profile) map[string][]profile.Profile {
 //     disclose it and draw no conclusion.
 //
 // Callers distinguish the last two by the length of the slice they passed.
-func Lookup(candidates []profile.Profile, version string) (profile.Profile, bool) {
-	switch len(candidates) {
-	case 0:
+//
+// purl is the candidate's full identity and is tried FIRST. Since D-42 a
+// non-registry package carries its origin in its PURL, so a baseline can hold a
+// registry package and a git fork of it at the same name AND the same version —
+// identical on every field this function would otherwise compare. Only the PURL
+// separates them, and comparing a fork against the registry package's approved
+// profile is precisely the cross-comparison DS-REV-03 exists to prevent.
+func Lookup(candidates []profile.Profile, purl, version string) (profile.Profile, bool) {
+	if len(candidates) == 0 {
 		return profile.Profile{}, false
-	case 1:
-		return candidates[0], true
 	}
+	// Exact identity: this artifact is approved, whatever else shares its name.
 	for _, c := range candidates {
-		if c.Version == version {
+		if c.PURL == purl {
 			return c, true
 		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0], true
+	}
+	// Same version but a different identity is NOT a match: with several
+	// candidates, a version collision means two different artifacts, and
+	// picking either would be the guess this function refuses to make.
+	var match profile.Profile
+	found := 0
+	for _, c := range candidates {
+		if c.Version == version {
+			match = c
+			found++
+		}
+	}
+	if found == 1 {
+		return match, true
 	}
 	return profile.Profile{}, false
 }

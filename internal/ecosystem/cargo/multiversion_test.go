@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"ihbv.io/depsnort/internal/purl"
+
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/profile"
 )
@@ -92,44 +94,98 @@ func TestVersionQualifiedDepConnectsOnlyToItsVersion(t *testing.T) {
 	}
 }
 
-// TestSameVersionDifferentSourcesIsAmbiguousNotGuessed: a registry crate and a
-// git fork at the same name@version are different code. Node identity is the
-// PURL string, which carries no source, so the graph cannot hold both — but it
-// must not silently claim one of them either. The surviving node's provenance
-// becomes unknown, which makes it unverifiable (D-41) rather than confidently
-// mislabelled.
+// TestSameVersionDifferentSourcesAreDistinctNodes closes the half of DS-REV-02
+// that was previously deferred. A registry crate and a git fork at the same
+// name@version are different code, and they are now different nodes: the PURL
+// carries the origin as a qualifier, so identity reflects it.
 //
-// Before the DS-REV-02 fix the second entry simply overwrote the first's source
-// class, so the node reported whichever source the parser happened to read last.
-func TestSameVersionDifferentSourcesIsAmbiguousNotGuessed(t *testing.T) {
+// Before qualifiers the two collapsed into one node and the later entry's
+// source class overwrote the earlier one's, so the node reported whichever
+// source the parser happened to read last — which decides whether the advisory
+// lookup for it meant anything.
+func TestSameVersionDifferentSourcesAreDistinctNodes(t *testing.T) {
 	g, err := New().Resolve("testdata/multiversion")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	n := g.Get("pkg:cargo/harbor-forked@0.3.0")
+
+	var registryID, gitID string
+	for _, n := range g.SortedNodes() {
+		if n.Name != "harbor-forked" {
+			continue
+		}
+		switch class, _ := n.SourceOf(); class {
+		case graph.SourceRegistry:
+			registryID = n.ID
+		case graph.SourceGit:
+			gitID = n.ID
+		}
+	}
+	if registryID == "" || gitID == "" {
+		t.Fatalf("want a registry node AND a git node for harbor-forked; got registry=%q git=%q",
+			registryID, gitID)
+	}
+	if registryID == gitID {
+		t.Fatal("the two sources share a node ID")
+	}
+
+	// The registry copy keeps the bare, canonical coordinate: qualifying it too
+	// would change the identity of nearly every package in every tree.
+	if registryID != "pkg:cargo/harbor-forked@0.3.0" {
+		t.Errorf("registry node ID = %q, want the bare PURL", registryID)
+	}
+	// The fork carries its origin, so two different forks of one crate are also
+	// distinguishable from each other.
+	if !strings.Contains(gitID, "source=git") || !strings.Contains(gitID, "source_ref=") {
+		t.Errorf("git node ID = %q, want source and source_ref qualifiers", gitID)
+	}
+	if _, err := purl.Parse(gitID); err != nil {
+		t.Errorf("qualified node ID does not parse as a PURL: %v", err)
+	}
+
+	// The app's dependency is qualified with the REGISTRY source, so the edge
+	// must land on the registry node and not on the fork.
+	deps := edgesFrom(g, "pkg:cargo/app@0.1.0")
+	if !has(deps, registryID) {
+		t.Errorf("app -> registry harbor-forked edge missing; deps = %v", deps)
+	}
+	if has(deps, gitID) {
+		t.Errorf("app must not depend on the git fork; deps = %v", deps)
+	}
+}
+
+// TestIdenticalIdentityIsStillAmbiguous: two entries sharing name, version AND
+// source are genuinely indistinguishable — the only route is two path crates,
+// since Cargo.lock records no path for them. Nothing can tell those apart, so
+// the surviving node says so instead of asserting one of two answers.
+func TestIdenticalIdentityIsStillAmbiguous(t *testing.T) {
+	lock := []byte(`version = 3
+
+[[package]]
+name = "app"
+version = "0.1.0"
+
+[[package]]
+name = "vendored"
+version = "1.0.0"
+
+[[package]]
+name = "vendored"
+version = "1.0.0"
+`)
+	g, err := parseCargoLock("testdata", lock)
+	if err != nil {
+		t.Fatalf("parseCargoLock: %v", err)
+	}
+	n := g.Get("pkg:cargo/vendored@1.0.0?source=path")
 	if n == nil {
-		t.Fatal("harbor-forked@0.3.0 missing from the graph")
+		t.Fatal("vendored node missing")
 	}
-	class, ref := n.SourceOf()
-	if class != graph.SourceUnknown {
-		t.Errorf("source class = %q, want %q: two sources claim this coordinate",
-			class, graph.SourceUnknown)
-	}
-	if !strings.Contains(ref, "ambiguous") || !strings.Contains(ref, "git+") {
-		t.Errorf("source ref = %q, want it to name both competing sources", ref)
+	if class, _ := n.SourceOf(); class != graph.SourceUnknown {
+		t.Errorf("source class = %q, want unknown for an indistinguishable pair", class)
 	}
 	if n.Attr["cargo.source_collision"] != "true" {
 		t.Error("the collision must be recorded on the node")
-	}
-
-	// Unverifiable provenance degrades coverage, so the ambiguity can reach an
-	// exit code rather than living only in an attribute.
-	cov := g.Coverage()
-	if cov.UnverifiableSources == 0 {
-		t.Error("a coordinate with ambiguous provenance must count as unverifiable")
-	}
-	if !cov.Incomplete() {
-		t.Error("ambiguous provenance must degrade coverage")
 	}
 }
 
