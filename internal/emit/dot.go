@@ -78,10 +78,20 @@ func dotEscape(s string) string {
 func dotLabel(n *graph.Node) string {
 	switch n.Kind {
 	case graph.KindPackage:
+		label := dotEscape(n.Name)
 		if n.Version != "" {
-			return dotEscape(n.Name) + `\n` + dotEscape(n.Version)
+			label += `\n` + dotEscape(n.Version)
 		}
-		return dotEscape(n.Name)
+		// A node whose version this tool presumed (or could not) reads
+		// tentatively, so the graph never implies a discovered layer is as
+		// certain as an observed one (D-44).
+		switch n.VersionTruth() {
+		case graph.TruthPresumed, graph.TruthAsserted:
+			label += `\n(presumed)`
+		case graph.TruthContested:
+			label += `\n(contested)`
+		}
+		return label
 	case graph.KindInstallHook:
 		return `⚙ ` + dotEscape(n.Name)
 	case graph.KindReferencedArtifact:
@@ -110,9 +120,16 @@ func (DOT) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 
 	for _, n := range g.SortedNodes() {
 		fill, stroke, text := riskColors(n.Risk)
+		// Presumed and contested nodes get a dashed outline: an observed node is
+		// a fact from a lockfile, a presumed one is this tool's best guess at
+		// what an installer would resolve, and the two must not look identical.
+		style := `filled,rounded`
+		if n.Kind == graph.KindPackage && (n.Presumed() || n.VersionTruth() == graph.TruthContested) {
+			style = `filled,rounded,dashed`
+		}
 		b.WriteString(fmt.Sprintf(
-			"  %q [label=\"%s\", shape=%s, fillcolor=\"%s\", color=\"%s\", fontcolor=\"%s\"];\n",
-			n.ID, dotLabel(n), nodeShape(n.Kind), fill, stroke, text))
+			"  %q [label=\"%s\", shape=%s, style=\"%s\", fillcolor=\"%s\", color=\"%s\", fontcolor=\"%s\"];\n",
+			n.ID, dotLabel(n), nodeShape(n.Kind), style, fill, stroke, text))
 	}
 	b.WriteString("\n")
 

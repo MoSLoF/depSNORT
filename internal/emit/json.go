@@ -16,15 +16,20 @@ type JSON struct{}
 func (JSON) Name() string { return "json" }
 
 type jsonNode struct {
-	ID        string            `json:"id"`
-	Kind      graph.NodeKind    `json:"kind"`
-	Ecosystem string            `json:"ecosystem"`
-	Name      string            `json:"name"`
-	Version   string            `json:"version"`
-	Direct    bool              `json:"direct"`
-	Depth     int               `json:"depth"`
-	Risk      string            `json:"risk"`
-	Attr      map[string]string `json:"attr,omitempty"`
+	ID        string         `json:"id"`
+	Kind      graph.NodeKind `json:"kind"`
+	Ecosystem string         `json:"ecosystem"`
+	Name      string         `json:"name"`
+	Version   string         `json:"version"`
+	Direct    bool           `json:"direct"`
+	Depth     int            `json:"depth"`
+	Risk      string         `json:"risk"`
+	// VersionTruth is emitted only when it is not "observed" — i.e. for nodes
+	// the walk discovered and presumed a version for, or could not (D-44). An
+	// observed lockfile node omits it, so its absence means "this came from a
+	// file", and its presence flags a version this tool chose rather than read.
+	VersionTruth string            `json:"version_truth,omitempty"`
+	Attr         map[string]string `json:"attr,omitempty"`
 }
 
 type jsonReport struct {
@@ -56,10 +61,14 @@ func (JSON) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) 
 	rep.DataSources = info.DataSources
 
 	for _, n := range g.SortedNodes() {
+		truth := ""
+		if n.Kind == graph.KindPackage && n.VersionTruth() != graph.TruthObserved {
+			truth = n.VersionTruth()
+		}
 		rep.Nodes = append(rep.Nodes, jsonNode{
 			ID: n.ID, Kind: n.Kind, Ecosystem: n.Ecosystem, Name: n.Name,
 			Version: n.Version, Direct: n.Direct, Depth: n.Depth,
-			Risk: string(n.Risk), Attr: n.Attr,
+			Risk: string(n.Risk), VersionTruth: truth, Attr: n.Attr,
 		})
 	}
 	rep.Edges = g.SortedEdges()

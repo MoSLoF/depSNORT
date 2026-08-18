@@ -95,6 +95,12 @@ func (Cypher) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo
 		if n.Ecosystem != "" {
 			sets = append(sets, "n.ecosystem = "+cq(n.Ecosystem))
 		}
+		// version_truth is a first-class property when not observed, so a graph
+		// query can select the layers this tool presumed rather than read from a
+		// lockfile (D-44) — e.g. MATCH (n) WHERE n.version_truth = 'presumed'.
+		if n.Kind == graph.KindPackage && n.VersionTruth() != graph.TruthObserved {
+			sets = append(sets, "n.version_truth = "+cq(n.VersionTruth()))
+		}
 		// Capability facts become first-class properties for querying.
 		// Keys are sorted for deterministic output (Decision D-09).
 		var capKeys []string

@@ -367,6 +367,7 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 		depth               int
 		gateRank            int     // 0 block, 1 gate-eligible, 2 advisory-only
 		score               float64 // highest composed score on the package
+		truth               string  // version_truth, when not observed
 	}
 	var rows []row
 	var clean int
@@ -383,6 +384,9 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 			continue
 		}
 		r := row{name: n.Name, version: n.Version, risk: string(n.Risk), depth: n.Depth, gateRank: 2}
+		if t := n.VersionTruth(); t != graph.TruthObserved {
+			r.truth = t
+		}
 		for _, f := range n.Findings {
 			switch f.GateClass {
 			case finding.GateBlock:
@@ -439,6 +443,7 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 			fontMono, 8, colFaint, 8, 12)
 
 		shown := 0
+		anyPresumed := false
 		for _, r := range rows {
 			if shown >= maxRiskRowsShown {
 				break
@@ -451,14 +456,37 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 			case "warned":
 				c = colGate
 			}
+			// A presumed or contested version is not a fact from a lockfile;
+			// mark the version cell so the reader never mistakes a guessed
+			// coordinate for an observed one (D-44).
+			ver := r.version
+			switch r.truth {
+			case graph.TruthPresumed, graph.TruthAsserted:
+				ver = "~" + ver
+				anyPresumed = true
+			case graph.TruthContested:
+				ver = "?" + defaultIfEmpty(ver, "unresolved")
+				anyPresumed = true
+			}
 			d.space(11)
 			d.rect(marginLeft, 2.5, 9, c)
 			d.text(fmt.Sprintf(riskRowFmt,
 				strings.ToUpper(r.risk),
 				truncateRunes(r.name, 34),
-				truncateRunes(r.version, 14),
+				truncateRunes(ver, 14),
 				fmt.Sprintf("%d", r.depth)),
 				fontMono, 8, colInk, 8, 11)
+		}
+		if anyPresumed {
+			d.gap(3)
+			d.wrapped(
+				"A version marked \"~\" was PRESUMED by transitive expansion, not read "+
+					"from a lockfile — the highest (or, for NuGet, lowest) published "+
+					"version satisfying the declared range. A \"?\" marks a CONTESTED "+
+					"version the declared ranges could not agree on. Findings on presumed "+
+					"packages are advisory and never gate: the package is real, but this "+
+					"exact version may not be in your build.",
+				fontRegular, 8.5, colFaint, 8, 11)
 		}
 		if omitted := len(rows) - shown; omitted > 0 {
 			d.gap(3)
@@ -483,4 +511,13 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 
 	_, err := w.Write(d.render("depSNORT scan report"))
 	return err
+}
+
+// defaultIfEmpty returns fallback when s is empty. Used so a contested node with
+// no version still renders a word rather than a bare "?".
+func defaultIfEmpty(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }

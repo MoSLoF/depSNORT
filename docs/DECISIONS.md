@@ -1437,3 +1437,18 @@ node — dedup, not borrowing, because A presumed it independently from the
 registry. The guarantee that survives is narrower and correct: A's resolution is
 never SWAYED by B's pin. When B has pinned a version A's constraint excludes, A
 presumes its own and the two do not touch.
+
+**Surfacing, once the walk shipped.** A presumed version that renders
+identically to an observed one re-creates the very confusion the truth axis
+exists to prevent, so every emitter now distinguishes them. JSON promotes
+`version_truth` to a first-class node field, emitted only when not observed, so
+its absence still means "from a lockfile". SARIF tags a finding whose subject is
+presumed with `versionTruth`/`presumedVersion` properties, so a code-scanning
+dashboard can deprioritize a finding about a coordinate that may not be in any
+build — the same reason verdict already demoted it. DOT gives presumed and
+contested nodes a dashed outline and a `(presumed)`/`(contested)` label. The PDF
+risk table marks a presumed version `~` and a contested one `?`, with a note
+that findings on them are advisory. Cypher promotes `version_truth` to a
+queryable property. The rule is one line across all five: an observed node is a
+fact from a lockfile and a presumed one is this tool's best guess, and they must
+never look the same.
