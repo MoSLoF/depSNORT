@@ -264,15 +264,33 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			continue
 		}
 
+		// Paths handed to the contained reader are RELATIVE TO THE SCAN ROOT,
+		// which is what securefs.Reader expects: it joins a relative path onto
+		// its own root and refuses anything that escapes.
+		//
+		// These used to be joined with rootDir first. With an absolute scan
+		// path that is harmless — securefs leaves absolute paths alone — but
+		// with a RELATIVE one, "testdata/proj/composer.json" was joined onto
+		// the root a second time, landing at
+		// "<root>/testdata/proj/composer.json", outside the root, and refused.
+		// So `depsnort scan ./path` silently lost the root project's own
+		// manifest while `depsnort scan /abs/path` analyzed it — the same tree
+		// scanned two ways gave two different verdicts, and the block-class
+		// cradle in the adversarial composer fixture went undetected through
+		// the relative path.
+		//
+		// The refusal WAS disclosed as a coverage gap, which is why this was a
+		// lost detection rather than a silent all-clear. It was still a
+		// detection the tool is supposed to make (D-27).
 		var manifestPath, baseDir string
 		if roots[n.ID] {
-			baseDir = rootDir
-			manifestPath = filepath.Join(rootDir, "composer.json")
+			baseDir = "."
+			manifestPath = "composer.json"
 		} else {
 			if !vendorPresent {
 				continue // uninstalled transitive source is not on disk
 			}
-			baseDir = filepath.Join(vendorDir, n.Name)
+			baseDir = filepath.Join("vendor", n.Name)
 			manifestPath = filepath.Join(baseDir, "composer.json")
 		}
 

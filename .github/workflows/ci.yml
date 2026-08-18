@@ -43,11 +43,29 @@ jobs:
         run: test -z "$(gofmt -l .)" || { echo 'gofmt needed:'; gofmt -l .; exit 1; }
       - name: go vet
         run: go vet ./...
-      # -race exercises the whole suite, including the adversarial corpus
-      # (testdata/adversarial), the containment primitive (internal/securefs),
-      # and the coverage-verdict regression tests.
+      # -race exercises the containment primitive (internal/securefs), the
+      # coverage-verdict regression tests, and every other package.
+      #
+      # It does NOT reach the adversarial corpus: Go tooling ignores
+      # directories named "testdata", so ./... never matched
+      # ./testdata/adversarial and the seven end-to-end attack scenarios ran in
+      # no CI job at all (finding DS-REV-05). The comment here used to claim
+      # otherwise, which is worse than saying nothing — a detector regression
+      # could merge with the suite green. The corpus now has its own step
+      # below, and this comment describes what the command actually does.
       - name: go test -race
         run: go test -race ./...
+      # Explicit, because ./... cannot see it. A missed attack detection fails
+      # the build here.
+      - name: go test -race (adversarial corpus)
+        run: go test -race -count=1 ./testdata/adversarial
+      # The end-to-end counterpart: drives the shipped binary over the same
+      # attack fixtures through adapter detection, install-surface extraction,
+      # checks, and verdict. The Go suite above builds its graphs in memory, so
+      # it cannot catch a fixture that never scans or a path-handling defect in
+      # an adapter — both of which this harness found.
+      - name: adversarial validation (end-to-end)
+        run: bash testdata/adversarial/run_adversarial.sh
       - name: static build
         run: CGO_ENABLED=0 make build
       - name: dogfood — zero third-party dependencies (Decision D-10)

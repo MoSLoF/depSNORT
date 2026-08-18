@@ -1,6 +1,18 @@
 #!/bin/bash
-# Adversarial validation harness for depSNORT
-# Runs each synthetic attack fixture and reports detection results.
+# Adversarial validation harness for depSNORT.
+#
+# Runs the SHIPPED BINARY against each attack fixture directory and fails if a
+# scenario goes undetected. This is the end-to-end counterpart to
+# adversarial_test.go: that suite builds graphs and surfaces in memory to
+# exercise the analyzer and checks, while this one drives the whole pipeline —
+# adapter detection, lockfile parsing, install-surface extraction, checks,
+# verdict — the way an operator does.
+#
+# Both matter, and neither substitutes for the other. Repairing this harness is
+# what surfaced two fixtures that had never actually scanned (one had no
+# lockfile, so no adapter matched) and a path-handling defect in the Composer
+# extractor that made a relative scan path miss a block-class cradle an
+# absolute path caught.
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -8,55 +20,72 @@ cd "$(dirname "$0")/../.."
 PASS=0
 FAIL=0
 TOTAL=0
+EXPECTED_SCENARIOS=7
+
+BIN=${DEPSNORT_BIN:-}
+if [ -z "$BIN" ]; then
+    BIN=$(mktemp -u)
+    go build -o "$BIN" ./cmd/depsnort
+    trap 'rm -f "$BIN"' EXIT
+fi
+
+# subsumes: does a detected check ID satisfy an expectation?
+#
+# Exact match, or a STRONGER classification in the same family. VC-002b (network
+# egress) is the weak form of both VC-002d (credentials + egress) and VC-002f
+# (download cradle), and VC-002b deliberately stands down when the cradle
+# capability is set, so expecting the weak form and receiving the strong one is
+# the rule working, not a regression.
+#
+# Without this, tightening a rule breaks the harness and the pressure is to
+# loosen the rule. The stale expectations this replaced were exactly that: they
+# named VC-002b for two scenarios that now correctly classify as VC-002d and
+# VC-002f.
+subsumes() {
+    local detected="$1" expected="$2"
+    [ "$detected" = "$expected" ] && return 0
+    case "$expected" in
+        VC-002b) [ "$detected" = "VC-002d" ] || [ "$detected" = "VC-002f" ] ;;
+        VC-002a) [ "${detected#VC-002}" != "$detected" ] ;;
+        *) return 1 ;;
+    esac
+}
 
 check() {
-    local name="$1"
-    local dir="$2"
-    local expected_checks="$3"  # comma-separated check IDs we expect to fire
-
+    local name="$1" dir="$2" expected_checks="$3"
     TOTAL=$((TOTAL + 1))
 
-    # Run scan
-    local output
-    output=$(go run ./cmd/depsnort scan -no-registry -no-osv "$dir" 2>/dev/null) || true
-
-    local findings
-    findings=$(echo "$output" | python3 -c "
+    local output found_checks
+    output=$("$BIN" scan -no-registry -no-osv -format json "$dir" 2>/dev/null) || true
+    found_checks=$(printf '%s' "$output" | python3 -c "
 import json, sys
-data = json.load(sys.stdin)
-findings = data.get('verdict', {}).get('findings', [])
-checks = set()
-evidence = []
-for f in findings:
-    checks.add(f['check_id'])
-    evidence.append(f['check_id'] + ': ' + f.get('title', ''))
-print('CHECKS=' + ','.join(sorted(checks)))
-for e in evidence:
-    print('  ' + e)
-" 2>/dev/null)
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('')
+    sys.exit(0)
+print(','.join(sorted({f['check_id'] for f in d.get('verdict', {}).get('findings', [])})))
+" 2>/dev/null || true)
 
-    local found_checks
-    found_checks=$(echo "$findings" | head -1 | sed 's/CHECKS=//')
-
-    # Check if all expected checks fired
-    local all_found=true
-    IFS=',' read -ra EXPECTED <<< "$expected_checks"
-    for chk in "${EXPECTED[@]}"; do
-        if ! echo "$found_checks" | grep -q "$chk"; then
-            all_found=false
-        fi
+    local missing=""
+    local IFS=','
+    for want in $expected_checks; do
+        local ok=1
+        for got in $found_checks; do
+            if subsumes "$got" "$want"; then ok=0; break; fi
+        done
+        [ $ok -eq 0 ] || missing="$missing $want"
     done
+    unset IFS
 
-    if $all_found && [ -n "$found_checks" ]; then
+    if [ -z "$missing" ] && [ -n "$found_checks" ]; then
         echo "PASS  $name"
         echo "      detected: $found_checks"
-        echo "$findings" | tail -n +2 | head -5
         PASS=$((PASS + 1))
     else
         echo "FAIL  $name"
-        echo "      expected: $expected_checks"
-        echo "      detected: $found_checks"
-        echo "$findings" | tail -n +2 | head -5
+        echo "      expected:${missing:-  (none missing, but nothing was detected)}"
+        echo "      detected: ${found_checks:-(nothing)}"
         FAIL=$((FAIL + 1))
     fi
     echo ""
@@ -69,19 +98,19 @@ echo ""
 
 check "npm-postinstall-exfil (ua-parser-js style)" \
     "testdata/adversarial/npm-postinstall-exfil" \
-    "VC-002a"
+    "VC-002a,VC-002b"
 
 check "pypi-ctx-exfil (ctx PyPI attack)" \
     "testdata/adversarial/pypi-ctx-exfil" \
-    "VC-002b"
+    "VC-002d"
 
 check "npm-obfuscated-payload (event-stream style)" \
     "testdata/adversarial/npm-obfuscated-payload" \
-    "VC-002a"
+    "VC-002e"
 
 check "nuget-clickfix (caret+wildcard evasion)" \
     "testdata/adversarial/nuget-clickfix" \
-    "VC-002b"
+    "VC-002b,VC-002e"
 
 check "gem-extconf-payload (malicious extconf.rb)" \
     "testdata/adversarial/gem-extconf-payload" \
@@ -89,12 +118,25 @@ check "gem-extconf-payload (malicious extconf.rb)" \
 
 check "cargo-buildrs-exfil (build.rs credential theft)" \
     "testdata/adversarial/cargo-buildrs-exfil" \
-    "VC-002b"
+    "VC-002d"
 
 check "composer-plugin-cradle (certutil download)" \
     "testdata/adversarial/composer-plugin-cradle" \
-    "VC-002b"
+    "VC-002f"
 
 echo "============================================="
 echo "  Results: $PASS/$TOTAL passed, $FAIL failed"
 echo "============================================="
+
+# The harness used to end here, exiting 0 whatever the tally said — so every
+# scenario could fail and the run still reported success. Two of them had been
+# failing exactly that way. A validation harness that cannot fail validates
+# nothing.
+if [ "$TOTAL" -ne "$EXPECTED_SCENARIOS" ]; then
+    echo "ERROR: ran $TOTAL scenario(s), expected $EXPECTED_SCENARIOS — the run was cut short." >&2
+    exit 1
+fi
+if [ "$FAIL" -ne 0 ]; then
+    echo "ERROR: $FAIL attack scenario(s) went undetected." >&2
+    exit 1
+fi
