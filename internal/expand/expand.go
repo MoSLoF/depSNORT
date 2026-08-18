@@ -29,45 +29,65 @@
 // once it is in the graph — the DS-REV-02 rule, which cost a Cargo parser its
 // correctness when a bare name was widened to an edge, applied one layer up.
 //
-// # The honest limit
+// # Reaching depth N without inventing facts
 //
-// Because a discovered node has no version, it has no coordinate, so its own
-// dependencies cannot be fetched. Name-only expansion therefore reaches exactly
-// ONE layer past each versioned package — not depth N. Reaching further needs
-// versions from somewhere: a resolved-graph service (D-01 named deps.dev), or a
-// lockfile that had them all along. That source plugs in as a VersionSource
-// below; the walk itself does not change. Nodes where the walk stopped are
-// marked, so "how deep did we actually get" stays a reported fact rather than
-// an assumption (D-24).
+// A node with no version has no coordinate, so a name-only walk stops one layer
+// past each pinned package. Stopping there defeats the tool: the layers an
+// attacker prefers you never read are exactly the ones below the first.
+//
+// The way through is not to choose between depth and honesty. It is to record
+// HOW EACH VERSION IS KNOWN, and let every downstream stage read that. This
+// codebase already separates risk from gate (D-05/D-06), risk from coverage
+// (D-24), and origin from verifiability (D-41); the version is the axis that
+// was still being treated as uniformly true. See VersionTruth below.
+//
+// The walk continues through presumed versions, so depth N is reached. What
+// changes is what may be CONCLUDED from a node: a finding on a presumed node is
+// advisory and never gates, the same structural guarantee D-06 gives proximity
+// — high recall in the report, high precision at the gate.
+//
+// # Why presuming is not the resolver D-01 refused
+//
+// Presuming is "the highest published version satisfying the accumulated
+// constraints". That is a filter and a sort, not a solver: no backtracking, no
+// environment-marker evaluation, no conflict search. It is also what pip, npm,
+// and cargo actually do in the absence of a conflict, which is the common case
+// — so it is right most of the time and wrong in a knowable direction.
+//
+// When the accumulated constraints admit NOTHING, the walk does not pick a
+// side. The node is marked contested, keeps no version, and the walk stops
+// there. Declining to conclude when the answer is undetermined is the D-40
+// rule (VC-010 refuses when a baseline holds several candidates), applied to
+// versions.
 package expand
 
 import (
 	"context"
 	"sort"
+	"strconv"
+	"strings"
 
 	"ihbv.io/depsnort/internal/datasource"
 	"ihbv.io/depsnort/internal/graph"
 )
 
-// Facts recorded on discovered nodes. Ecosystem-neutral, for the reason the
-// coverage (D-24) and provenance (D-41) keys are: the verdict layer reads them
-// without knowing which registry answered.
+// Facts recorded by the walk. Ecosystem-neutral, for the reason the coverage
+// (D-24) and provenance (D-41) keys are: the verdict layer reads them without
+// knowing which registry answered.
 const (
-	// AttrUnversioned marks a node discovered by name from a declaration, with
-	// no version ever assigned. Set to "true".
-	//
-	// Checks MUST branch on this. The name-driven ones — VC-001 (malicious),
-	// VC-003 (IOC), VC-006 (typosquat), VC-007 (dependency confusion) — have
-	// everything they need. VC-008 (vulnerability) does not: an advisory
-	// applies to a version range, and an unversioned node cannot be inside or
-	// outside one. It must DECLINE, per the D-15 rule that a check without a
-	// basis to judge is silent rather than confident.
-	AttrUnversioned = "depsnort.unversioned"
-	// AttrDeclaredConstraint is the raw, unevaluated constraint string as the
-	// upstream package published it (">=2.0", "^1.2", "~> 3.0"). Recorded
-	// verbatim so a reader can see what was claimed without this tool having
-	// interpreted it.
+	// AttrVersionTruth is HOW this node's version is known — one of the
+	// VersionTruth constants. The axis that makes depth safe.
+	AttrVersionTruth = "depsnort.version_truth"
+	// AttrDeclaredConstraint is the accumulated constraint text as upstream
+	// published it (">=2.0", "^1.2", "~> 3.0"), comma-joined when several
+	// parents declared the same package. Recorded verbatim so a reader sees
+	// what was claimed without this tool having interpreted it.
 	AttrDeclaredConstraint = "depsnort.declared_constraint"
+	// AttrCandidateCount is how many published versions satisfied those
+	// constraints — how wide the door was. A presumption over 1 candidate is
+	// nearly a fact; over 60 it is a choice among 60, and a reader deserves to
+	// see which they are looking at.
+	AttrCandidateCount = "depsnort.version_candidates"
 	// AttrDiscoveredBy is the coordinate whose metadata named this package —
 	// the evidence for the node existing at all.
 	AttrDiscoveredBy = "depsnort.discovered_by"
@@ -77,81 +97,145 @@ const (
 	AttrFrontier = "depsnort.walk_frontier"
 )
 
+// VersionTruth values.
+//
+// # Why this axis exists
+//
+// Before it, every node's version was equally true, so the only honest walk was
+// a shallow one. Grading the claim is what buys depth: a presumed version is
+// worth having in the graph — it is how the layer below gets read at all — and
+// worth being unable to block on.
+const (
+	// TruthObserved: a lockfile recorded this version. A fact about the build.
+	TruthObserved = "observed"
+	// TruthPresumed: the highest published version satisfying the accumulated
+	// constraints, chosen HERE. What an installer would most likely resolve,
+	// not what one was observed to resolve.
+	//
+	// Checks may run against a presumed node and findings may be reported. They
+	// MUST NOT gate. A block on a version nobody observed is a false positive
+	// with a build failure attached, and one of those teaches an operator to
+	// pass -no-expand forever.
+	TruthPresumed = "presumed"
+	// TruthAsserted: an external resolved-graph service supplied it (D-01 named
+	// deps.dev). Someone else's resolution, taken as reported and attributed.
+	TruthAsserted = "asserted"
+	// TruthContested: the accumulated constraints admit no published version,
+	// or could not be evaluated. No version is assigned and the walk stops.
+	// Declining to conclude when the answer is undetermined (the D-40 rule).
+	TruthContested = "contested"
+)
+
+// Presumed reports whether a node's version was chosen by this tool rather than
+// observed. The single predicate the check stage and verdict layer share, so
+// "may this node gate" is defined once — the graph.Verifiable precedent.
+func Presumed(n *graph.Node) bool {
+	if n == nil || n.Attr == nil {
+		return false
+	}
+	t := n.Attr[AttrVersionTruth]
+	return t == TruthPresumed || t == TruthAsserted
+}
+
 // Declaration is one dependency a package declares, unresolved.
 type Declaration struct {
 	Name       string
-	Constraint string // raw; never parsed or evaluated here
+	Constraint string // raw; parsed only by the owning ecosystem
 	Optional   bool   // extras-gated, dev-only, or platform-conditional
 }
 
-// Declarer is the per-ecosystem seam. It answers exactly one question — what
-// does this coordinate declare — and owns its own naming rules.
+// Declarer is the per-ecosystem seam. It answers what a coordinate declares and
+// owns its own naming rules.
 //
-// This is the whole per-ecosystem surface of the walk. Everything else in this
-// file (traversal, per-root containment, dedupe, cycle handling, frontier
-// accounting) is shared, which is why the walk belongs to the engine and not to
-// six adapters.
+// This plus the optional interfaces below is the entire per-ecosystem surface.
+// Traversal, per-root containment, dedupe, constraint accumulation, depth
+// bounding, and frontier accounting are shared, which is why the walk belongs
+// to the engine and not to six adapters.
 type Declarer interface {
 	// Ecosystem matches graph.Node.Ecosystem.
 	Ecosystem() string
 
-	// Identify turns a declared name into this ecosystem's canonical
-	// unversioned node identity, plus the canonical name.
+	// Identify turns a declared name into this ecosystem's canonical identity
+	// for a given version ("" for none), plus the canonical name.
 	//
 	// IDENTITY NORMALIZATION LIVES HERE. PyPI must fold per PEP 503 and NuGet
-	// must lowercase before a name becomes a node, or `Flask_SQLAlchemy` and
-	// `flask-sqlalchemy` become two nodes and the dedupe below silently fails
-	// — the exact leak D-15 found and closed once already. Doing it in the
-	// shared walk would mean re-deriving six ecosystems' rules in one switch.
-	Identify(name string) (id, canonicalName string)
+	// must lowercase before a name becomes a node, or Flask_SQLAlchemy and
+	// flask-sqlalchemy become two nodes and the dedupe below silently fails —
+	// the leak D-15 found and closed once already.
+	Identify(name, version string) (id, canonicalName string)
 
 	// Declared returns what each coordinate declares, keyed by Coord.Key().
-	// A coordinate ABSENT from the map was not read — distinct from one
-	// present with an empty slice, which declares nothing. The walk counts the
-	// two differently and must never conflate them.
+	// A coordinate ABSENT from the map was not read — distinct from one present
+	// with an empty slice, which declares nothing. The walk counts the two
+	// differently and must never conflate them.
 	Declared(ctx context.Context, coords []datasource.Coord) (map[string][]Declaration, error)
 }
 
-// VersionSource is the optional extension that lifts the one-layer limit: given
-// a name and a constraint, it supplies a concrete version from an external
-// resolved-graph service (D-01's sanctioned path). Absent, the walk is
-// name-only and stops at the first unversioned layer.
+// VersionIndex lists a package's published versions. Optional: without it the
+// walk is name-only and stops at the first unversioned layer.
 //
-// A version obtained this way is SOMEONE ELSE'S RESOLUTION, not this tool's,
-// and the node it produces should record which service asserted it. Deliberately
-// not implemented in this sketch — the seam exists so the walk did not have to
-// be redesigned around it later.
-type VersionSource interface {
-	Name() string
-	Resolve(ctx context.Context, ecosystem, name, constraint string) (version string, ok bool)
+// The registry clients behind VC-004/VC-005 already fetch exactly this data for
+// publish-time history, so this is a shape the datasource layer holds today.
+type VersionIndex interface {
+	// Versions lists published versions, in any order. An error or an empty
+	// list leaves the node unversioned rather than presuming from nothing.
+	Versions(ctx context.Context, ecosystem, name string) ([]string, error)
+}
+
+// Presumer supplies version SEMANTICS. Optional, and required alongside a
+// VersionIndex for the walk to presume anything.
+//
+// Kept per-ecosystem because the semantics genuinely differ — PEP 440 is not
+// semver, and Cargo's caret is not npm's. Kept OUT of the engine for the same
+// reason Identify is: a shared switch over six grammars is where the drift
+// starts. Kept out of Declarer because an ecosystem may be able to report
+// declarations long before anyone writes its range grammar, and should not be
+// blocked on it.
+type Presumer interface {
+	// Satisfies reports whether version meets constraint, and whether the
+	// constraint could be evaluated AT ALL. An unevaluable constraint yields
+	// (false, false) and makes the node contested — never silently unsatisfied,
+	// which would read as a deliberate exclusion.
+	Satisfies(constraint, version string) (ok, evaluable bool)
+	// CompareVersions orders two versions (-1, 0, 1), so the engine can take
+	// the highest satisfying candidate without knowing the grammar.
+	CompareVersions(a, b string) int
 }
 
 // Options bound the walk.
 type Options struct {
 	// MaxDepth stops expansion beyond this distance from the root. Zero means
-	// the default below. A bound is mandatory, not defensive: a walk over
-	// published metadata is over a graph this tool does not control.
+	// the default below. A bound is mandatory, not defensive: past the first
+	// layer this walks a graph the operator does not control.
 	MaxDepth int
 	// IncludeOptional expands extras-gated and platform-conditional
-	// declarations. Off by default: they are declarations of what MIGHT be
-	// installed, and treating them as present inflates the tree with packages
-	// no build would fetch.
+	// declarations. Off by default: they declare what MIGHT be installed, and
+	// treating them as present inflates the tree with packages no build fetches.
 	IncludeOptional bool
+	// NoPresume forces name-only expansion even when a VersionIndex and
+	// Presumer are available — the strictest posture, for an operator who wants
+	// nothing in the graph that a file did not state.
+	NoPresume bool
 }
 
 const defaultMaxDepth = 8
 
 // Result is what one walk learned, per root.
 type Result struct {
-	// Root is the node the walk started from.
 	Root string `json:"root"`
 	// Discovered is how many nodes exist now that did not before.
 	Discovered int `json:"discovered"`
+	// Presumed is how many of those carry a version this tool chose. The number
+	// that bounds what the scan may claim.
+	Presumed int `json:"presumed"`
+	// Contested is how many had constraints admitting no version, or none that
+	// could be evaluated.
+	Contested int `json:"contested"`
 	// Linked is how many declarations matched a package already in this root's
 	// subtree, drawing an edge instead of creating a node.
 	Linked int `json:"linked"`
 	// Frontier is how many nodes the walk stopped at without reading their
-	// dependencies. The headline number: everything beneath these is unseen.
+	// dependencies. Everything beneath these is unseen.
 	Frontier int `json:"frontier"`
 	// Unread is how many coordinates were submitted for metadata and came back
 	// absent — a fetch that did not happen, as distinct from a package that
@@ -164,10 +248,11 @@ type Result struct {
 // Walker expands graphs using per-ecosystem declarers.
 type Walker struct {
 	declarers map[string]Declarer
-	versions  VersionSource // optional; nil means name-only
+	index     VersionIndex
 }
 
-// NewWalker builds a walker over the given declarers.
+// NewWalker builds a walker over the given declarers. Without WithVersionIndex
+// it is name-only.
 func NewWalker(declarers ...Declarer) *Walker {
 	m := make(map[string]Declarer, len(declarers))
 	for _, d := range declarers {
@@ -176,33 +261,45 @@ func NewWalker(declarers ...Declarer) *Walker {
 	return &Walker{declarers: m}
 }
 
-// WithVersionSource returns a walker that can carry the frontier past the first
-// unversioned layer.
-func (w *Walker) WithVersionSource(vs VersionSource) *Walker {
+// WithVersionIndex returns a walker that can presume versions and so carry the
+// frontier past the first unversioned layer.
+func (w *Walker) WithVersionIndex(ix VersionIndex) *Walker {
 	cp := *w
-	cp.versions = vs
+	cp.index = ix
 	return &cp
+}
+
+// pending is one declared package awaiting node creation, with every constraint
+// its parents in this layer placed on it.
+type pending struct {
+	eco          string
+	canonical    string
+	constraints  []string
+	parents      []string
+	discoveredBy string
+	// depth is one past the DEEPEST parent that declared it. Taken from the
+	// parents rather than the loop counter: the initial frontier is every
+	// versioned node in the subtree, at mixed depths, so a counter would flatten
+	// a layer-3 package's children to layer 1.
+	depth int
 }
 
 // ExpandRoot walks one root's subtree and no other.
 //
 // # Per-root containment
 //
-// The walk is scoped to a single root on purpose, and the scoping is asymmetric
-// in a way that matters:
+// The scoping is asymmetric on purpose:
 //
 //   - MATCHING a declaration against an existing package is restricted to nodes
 //     REACHABLE FROM THIS ROOT. Attaching root A's declaration to root B's
-//     pinned version would be inferring A's tree from B's file — precisely the
-//     inference pypi.ReconstructDepth refuses, and it produces an edge that
-//     looks identical to a real one.
+//     pinned version infers A's tree from B's file — the inference
+//     pypi.ReconstructDepth refuses — and produces an edge indistinguishable
+//     from a real one.
 //   - CREATING a node is by canonical identity, graph-wide. Two roots that both
-//     declare `requests` share one node with an edge from each, which is the
-//     dedupe this graph already performs everywhere. Sharing a node both roots
-//     genuinely declare asserts nothing about either.
+//     declare requests share one node with an edge from each, the dedupe this
+//     graph performs everywhere, asserting nothing about either.
 //
-// The difference is the whole rule: never borrow another root's FACTS, always
-// share the same package's IDENTITY.
+// Never borrow another root's facts; always share the same package's identity.
 func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Node, opts Options) (Result, error) {
 	res := Result{Root: root.ID}
 	if g == nil || root == nil {
@@ -213,31 +310,39 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		maxDepth = defaultMaxDepth
 	}
 
-	// Nodes reachable from this root, by canonical name, for match-not-borrow.
 	inSubtree := reachable(g, root.ID)
 	byName := map[string]*graph.Node{}
 	for id := range inSubtree {
 		if n := g.Get(id); n != nil && n.Kind == graph.KindPackage {
 			if d := w.declarers[n.Ecosystem]; d != nil {
-				_, canon := d.Identify(n.Name)
+				_, canon := d.Identify(n.Name, n.Version)
 				byName[n.Ecosystem+"|"+canon] = n
 			}
 		}
 	}
 
-	// Frontier: versioned packages in this subtree we have not yet read.
 	expanded := map[string]bool{}
-	frontier := make([]*graph.Node, 0, len(inSubtree))
+	var frontier []*graph.Node
 	for _, n := range g.SortedNodes() {
 		if inSubtree[n.ID] && n.Kind == graph.KindPackage && n.Version != "" {
 			frontier = append(frontier, n)
+			if n.Attr[AttrVersionTruth] == "" && n.ID != root.ID {
+				setAttr(n, AttrVersionTruth, TruthObserved)
+			}
 		}
 	}
 
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
-		// Batch per ecosystem so each Declarer sees one call, not one per node.
+		// PHASE 1 — read this layer's declarations and accumulate, per declared
+		// package, every constraint its parents placed on it. Accumulating
+		// before presuming is what lets a diamond be answered once, with all of
+		// its constraints in hand, instead of once per parent with each answer
+		// overwriting the last.
+		queue := map[string]*pending{}
+		var order []string
+
 		byEco := map[string][]*graph.Node{}
-		ecos := []string{}
+		var ecos []string
 		for _, n := range frontier {
 			if expanded[n.ID] || w.declarers[n.Ecosystem] == nil {
 				continue
@@ -250,7 +355,6 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		}
 		sort.Strings(ecos) // determinism (D-13)
 
-		var next []*graph.Node
 		for _, eco := range ecos {
 			nodes := byEco[eco]
 			d := w.declarers[eco]
@@ -261,9 +365,8 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 			}
 			declared, err := d.Declared(ctx, coords)
 			if err != nil {
-				// A failed fetch is a gap, not an empty answer: every node in
-				// this batch stays a frontier, and the caller learns the walk
-				// was bounded by the network rather than by the tree.
+				// A failed fetch bounds the walk by the network, not by the
+				// tree, and every node in the batch stays a frontier.
 				for _, n := range nodes {
 					markFrontier(n)
 					res.Frontier++
@@ -276,9 +379,10 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 				key := datasource.Coord{Ecosystem: eco, Name: n.Name, Version: n.Version}.Key()
 				decls, ok := declared[key]
 				if !ok {
-					// Absent from the map: never read. Distinct from declaring
-					// nothing, and conflating them would turn an unfetched
-					// package into a confident leaf.
+					// Absent means never read. Conflating that with "declares
+					// nothing" turns an unfetched package into a confident leaf
+					// — reporting success because the call ran (the D-42
+					// pattern), not because it answered.
 					markFrontier(n)
 					res.Frontier++
 					res.Unread++
@@ -288,62 +392,144 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 					if decl.Optional && !opts.IncludeOptional {
 						continue
 					}
-					id, canon := d.Identify(decl.Name)
-					if id == "" || canon == "" {
+					_, canon := d.Identify(decl.Name, "")
+					if canon == "" {
 						continue
 					}
-
 					// Match within this root's subtree only.
 					if existing := byName[eco+"|"+canon]; existing != nil {
 						g.AddEdge(n.ID, existing.ID, graph.EdgeDependsOn)
 						res.Linked++
 						continue
 					}
-
-					child := g.Get(id)
-					if child == nil {
-						child = g.AddNode(&graph.Node{
-							ID:        id,
-							Kind:      graph.KindPackage,
-							Ecosystem: eco,
-							Name:      canon,
-							Depth:     n.Depth + 1,
-						})
-						setAttr(child, AttrUnversioned, "true")
-						setAttr(child, AttrDeclaredConstraint, decl.Constraint)
-						setAttr(child, AttrDiscoveredBy, key)
-						res.Discovered++
+					mk := eco + "|" + canon
+					p := queue[mk]
+					if p == nil {
+						p = &pending{eco: eco, canonical: canon, discoveredBy: key}
+						queue[mk] = p
+						order = append(order, mk)
 					}
-					g.AddEdge(n.ID, child.ID, graph.EdgeDependsOn)
-					byName[eco+"|"+canon] = child
-					inSubtree[child.ID] = true
-					if child.Depth > res.DepthReached {
-						res.DepthReached = child.Depth
+					if decl.Constraint != "" {
+						p.constraints = append(p.constraints, decl.Constraint)
 					}
-
-					// The walk continues only through a node with a
-					// coordinate. Without a VersionSource that is never a
-					// discovered node, and the frontier is where it stops.
-					if child.Version != "" && !expanded[child.ID] {
-						next = append(next, child)
-					} else if child.Version == "" {
-						markFrontier(child)
-						res.Frontier++
+					p.parents = append(p.parents, n.ID)
+					if n.Depth+1 > p.depth {
+						p.depth = n.Depth + 1
 					}
 				}
+			}
+		}
+
+		// PHASE 2 — presume a version for each newly declared package, then
+		// create it. Presuming BEFORE creation matters: a node's ID carries its
+		// version, so deciding after the fact would mean rewriting an identity
+		// that edges already point at.
+		var next []*graph.Node
+		sort.Strings(order)
+		for _, mk := range order {
+			p := queue[mk]
+			d := w.declarers[p.eco]
+
+			version, truth, candidates := w.presume(ctx, d, p, opts)
+			id, canon := d.Identify(p.canonical, version)
+			if id == "" {
+				continue
+			}
+
+			child := g.Get(id)
+			if child == nil {
+				child = g.AddNode(&graph.Node{
+					ID: id, Kind: graph.KindPackage, Ecosystem: p.eco,
+					Name: canon, Version: version, Depth: p.depth,
+				})
+				setAttr(child, AttrVersionTruth, truth)
+				setAttr(child, AttrDiscoveredBy, p.discoveredBy)
+				setAttr(child, AttrDeclaredConstraint, joinConstraints(p.constraints))
+				if candidates > 0 {
+					setAttr(child, AttrCandidateCount, strconv.Itoa(candidates))
+				}
+				res.Discovered++
+				switch truth {
+				case TruthPresumed, TruthAsserted:
+					res.Presumed++
+				case TruthContested:
+					res.Contested++
+				}
+			}
+			for _, parent := range p.parents {
+				g.AddEdge(parent, child.ID, graph.EdgeDependsOn)
+			}
+			byName[mk] = child
+			inSubtree[child.ID] = true
+			if child.Depth > res.DepthReached {
+				res.DepthReached = child.Depth
+			}
+
+			// The walk continues only through a node that has a coordinate.
+			if child.Version != "" && !expanded[child.ID] {
+				next = append(next, child)
+			} else if child.Version == "" {
+				markFrontier(child)
+				res.Frontier++
 			}
 		}
 		frontier = next
 	}
 
-	// Anything still queued when the depth bound hit is a frontier too: the
-	// bound is ours, and a limit we imposed must be disclosed exactly like a
-	// limit the data imposed.
+	// Anything still queued when the depth bound hit is a frontier too: a limit
+	// we imposed is disclosed exactly like a limit the data imposed.
 	for _, n := range frontier {
 		markFrontier(n)
 		res.Frontier++
 	}
 	return res, nil
+}
+
+// presume picks the highest published version satisfying every accumulated
+// constraint. It is a filter and a sort — no backtracking, no marker
+// evaluation, no conflict search — which is why it is not the resolver D-01
+// refused, and why it is honest to label its output rather than assert it.
+func (w *Walker) presume(ctx context.Context, d Declarer, p *pending, opts Options) (version, truth string, candidates int) {
+	pr, canPresume := d.(Presumer)
+	if opts.NoPresume || w.index == nil || !canPresume {
+		return "", "", 0 // name-only: no version, and no claim about why
+	}
+
+	all, err := w.index.Versions(ctx, p.eco, p.canonical)
+	if err != nil || len(all) == 0 {
+		// Nothing published, or the index could not be read. Either way there
+		// is nothing to presume FROM, which is not the same as a constraint
+		// that excludes everything — so this is not contested, it is unknown.
+		return "", "", 0
+	}
+
+	var ok []string
+	for _, v := range all {
+		fits := true
+		for _, c := range p.constraints {
+			sat, evaluable := pr.Satisfies(c, v)
+			if !evaluable {
+				// An unevaluable constraint is not a satisfied one and not a
+				// violated one. Guessing either way would be a conclusion drawn
+				// from a grammar this tool does not read.
+				return "", TruthContested, 0
+			}
+			if !sat {
+				fits = false
+				break
+			}
+		}
+		if fits {
+			ok = append(ok, v)
+		}
+	}
+	if len(ok) == 0 {
+		// Constraints that admit nothing. Real: two parents pinning
+		// incompatible ranges. The walk does not pick a side.
+		return "", TruthContested, 0
+	}
+	sort.Slice(ok, func(i, j int) bool { return pr.CompareVersions(ok[i], ok[j]) > 0 })
+	return ok[0], TruthPresumed, len(ok)
 }
 
 // reachable returns the node IDs reachable from id over declared edges.
@@ -367,6 +553,20 @@ func reachable(g *graph.Graph, id string) map[string]bool {
 		}
 	}
 	return seen
+}
+
+func joinConstraints(cs []string) string {
+	if len(cs) == 0 {
+		return ""
+	}
+	sort.Strings(cs)
+	out := cs[0]
+	for _, c := range cs[1:] {
+		if c != out && !strings.Contains(out, c) {
+			out += ", " + c
+		}
+	}
+	return out
 }
 
 func markFrontier(n *graph.Node) { setAttr(n, AttrFrontier, "true") }
