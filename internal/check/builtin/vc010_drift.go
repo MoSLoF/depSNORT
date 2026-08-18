@@ -87,8 +87,8 @@ func (CapabilityDrift) Run(ctx *check.Context) []finding.Finding {
 		if !ok {
 			continue
 		}
-		base, ok := ctx.Baseline[baseline.Key(n.Ecosystem, n.Name)]
-		if !ok {
+		candidates := ctx.Baseline[baseline.Key(n.Ecosystem, n.Name)]
+		if len(candidates) == 0 {
 			// A package absent from the baseline is NEW to this tree, not
 			// drifted. Reporting it here would drown the real signal in
 			// every added dependency; VC-009 and the VC-002 family judge new
@@ -96,6 +96,35 @@ func (CapabilityDrift) Run(ctx *check.Context) []finding.Finding {
 			continue
 		}
 
+		base, ok := baseline.Lookup(candidates, n.Version)
+		if !ok {
+			// Several approved versions and no exact match: nothing here can
+			// say which one this candidate should be compared against, and the
+			// answer depends on which project it came from rather than on any
+			// ordering of versions (DS-REV-03). Guessing produces false drift
+			// and suppresses real drift with equal confidence, so the check
+			// declines — visibly.
+			out = append(out, finding.Finding{
+				CheckID:    "VC-010",
+				Axis:       finding.AxisDrift,
+				Severity:   finding.SevInfo,
+				GateClass:  finding.GateAdvisory,
+				Confidence: 1,
+				NodeID:     n.ID,
+				Title:      fmt.Sprintf("drift not evaluated for %s: ambiguous baseline", n.Name),
+				Evidence: fmt.Sprintf(
+					"the baseline approves %s at %d different versions (%s) and none of them is the "+
+						"scanned version %s; comparing against an arbitrary one would report drift "+
+						"that is an artifact of the choice",
+					n.Name, len(candidates), strings.Join(baseline.Versions(candidates), ", "), n.Version),
+				Remediation: "scan the project this baseline was taken from, or record a baseline whose " +
+					"packages each appear at one approved version",
+			})
+			continue
+		}
+
+		// An exact version match means this version IS the approved one, so
+		// there is nothing to compare and Diff correctly reports no change.
 		d := profile.Diff(base, candidate)
 		if !d.Escalating() {
 			continue

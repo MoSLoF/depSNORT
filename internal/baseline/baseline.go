@@ -126,21 +126,98 @@ func Load(path string) (map[string]profile.Profile, error) {
 // candidate's version is by definition different when there is drift to find.
 func Key(ecosystem, name string) string { return ecosystem + "|" + name }
 
-// Index rekeys profiles by ecosystem+name for candidate lookup. Where a
-// baseline holds several versions of the same package — legal in a workspace
-// where two projects pin differently — the highest PURL wins deterministically
-// rather than whichever map iteration reached last.
-func Index(profiles map[string]profile.Profile) map[string]profile.Profile {
+// Index groups profiles by ecosystem+name for candidate lookup, keeping EVERY
+// approved version under its key (finding DS-REV-03).
+//
+// The previous implementation returned one profile per key and let the highest
+// sorted PURL win, which it described as deterministic. It was — and it was
+// also wrong twice over. PURL order is lexicographic, so a baseline holding
+// 2.0.0 and 10.0.0 selected 2.0.0; and even a correct semantic ordering picks
+// the wrong answer when two projects in one workspace have legitimately
+// approved different versions, because the right profile is a question about
+// WHICH PROJECT the candidate came from, not about which version is newest.
+// Comparing a candidate against another project's baseline generates false
+// drift and hides real drift with equal confidence.
+//
+// So nothing is discarded here. Deciding what a set of several approved
+// versions means is the caller's job, and VC-010 refuses to conclude rather
+// than guess.
+//
+// Profiles are deduplicated by PURL — the same package@version approved by two
+// projects is one profile, not an ambiguity — and sorted, so the result is
+// stable across runs.
+func Index(profiles map[string]profile.Profile) map[string][]profile.Profile {
 	purls := make([]string, 0, len(profiles))
 	for purl := range profiles {
 		purls = append(purls, purl)
 	}
 	sort.Strings(purls)
 
-	out := make(map[string]profile.Profile, len(profiles))
+	out := make(map[string][]profile.Profile, len(profiles))
+	seen := map[string]bool{}
 	for _, purl := range purls {
+		if seen[purl] {
+			continue
+		}
+		seen[purl] = true
 		p := profiles[purl]
-		out[Key(p.Ecosystem, p.Name)] = p
+		k := Key(p.Ecosystem, p.Name)
+		out[k] = append(out[k], p)
 	}
+	return out
+}
+
+// Lookup resolves the baseline profile a candidate version should be compared
+// against.
+//
+// The three outcomes are deliberately distinct, because collapsing any two of
+// them is how a drift axis starts lying:
+//
+//   - (profile, true): exactly one approved version, or an exact match on the
+//     candidate's own version. An exact match means this version IS approved,
+//     so there is nothing to compare and no drift by construction.
+//   - (zero, false) with no candidates: the package is new to this tree, not
+//     drifted.
+//   - (zero, false) with several candidates: ambiguous. The caller must
+//     disclose it and draw no conclusion.
+//
+// Callers distinguish the last two by the length of the slice they passed.
+func Lookup(candidates []profile.Profile, version string) (profile.Profile, bool) {
+	switch len(candidates) {
+	case 0:
+		return profile.Profile{}, false
+	case 1:
+		return candidates[0], true
+	}
+	for _, c := range candidates {
+		if c.Version == version {
+			return c, true
+		}
+	}
+	return profile.Profile{}, false
+}
+
+// Versions lists the approved versions under one key, for a diagnostic that
+// names what it could not choose between.
+func Versions(candidates []profile.Profile) []string {
+	out := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		out = append(out, c.Version)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AmbiguousKeys lists the baseline keys holding more than one approved version,
+// sorted. Used to disclose up front that drift will be skipped for them rather
+// than leaving the omission to be inferred from an absent finding.
+func AmbiguousKeys(index map[string][]profile.Profile) []string {
+	var out []string
+	for k, candidates := range index {
+		if len(candidates) > 1 {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
 	return out
 }

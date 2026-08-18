@@ -98,20 +98,73 @@ func TestLoadRejectsMissingAndIrregularFiles(t *testing.T) {
 	}
 }
 
-func TestIndexIsDeterministicAcrossDuplicateNames(t *testing.T) {
+// TestIndexPreservesEveryApprovedVersion is the DS-REV-03 guard. The previous
+// implementation kept one profile per key by PURL order, so a baseline holding
+// 2.0.0 and 10.0.0 selected 2.0.0 — lexicographically "10" precedes "2" — and a
+// workspace where two projects approved different versions silently lost one.
+func TestIndexPreservesEveryApprovedVersion(t *testing.T) {
 	profiles := map[string]profile.Profile{
-		"pkg:npm/dup@1.0.0": prof("dup", "1.0.0", "exec"),
-		"pkg:npm/dup@2.0.0": prof("dup", "2.0.0", "network"),
+		"pkg:npm/dup@2.0.0":  prof("dup", "2.0.0", "exec"),
+		"pkg:npm/dup@10.0.0": prof("dup", "10.0.0", "network"),
+		"pkg:npm/solo@1.0.0": prof("solo", "1.0.0"),
 	}
-	first := Index(profiles)[Key("npm", "dup")]
-	for range 20 {
-		if got := Index(profiles)[Key("npm", "dup")]; got.Version != first.Version {
-			t.Fatalf("Index picked %s then %s; duplicate names must resolve deterministically",
-				first.Version, got.Version)
-		}
+	idx := Index(profiles)
+
+	dup := idx[Key("npm", "dup")]
+	if len(dup) != 2 {
+		t.Fatalf("Index kept %d profile(s) for dup, want both approved versions", len(dup))
 	}
-	if first.Version != "2.0.0" {
-		t.Errorf("Index kept %s, want the highest PURL (2.0.0)", first.Version)
+	if got := Versions(dup); got[0] != "10.0.0" || got[1] != "2.0.0" {
+		t.Errorf("Versions = %v, want both versions listed", got)
+	}
+	if len(idx[Key("npm", "solo")]) != 1 {
+		t.Error("a single-version package must still index to exactly one profile")
+	}
+
+	if amb := AmbiguousKeys(idx); len(amb) != 1 || amb[0] != Key("npm", "dup") {
+		t.Errorf("AmbiguousKeys = %v, want just the duplicated key", amb)
+	}
+}
+
+// TestLookupRefusesToChooseBetweenVersions: with several approved versions and
+// no exact match, there is no answer — only a guess, and a guess here reports
+// drift that is an artifact of the choice.
+func TestLookupRefusesToChooseBetweenVersions(t *testing.T) {
+	candidates := []profile.Profile{
+		prof("dup", "2.0.0", "exec"),
+		prof("dup", "10.0.0", "network"),
+	}
+
+	if _, ok := Lookup(candidates, "3.0.0"); ok {
+		t.Error("Lookup resolved an ambiguous baseline; it must decline")
+	}
+
+	// An exact match is not ambiguous: this version IS approved, so there is
+	// nothing to compare and no drift by construction.
+	got, ok := Lookup(candidates, "10.0.0")
+	if !ok || got.Version != "10.0.0" {
+		t.Errorf("Lookup(exact) = (%+v, %v), want the 10.0.0 profile", got, ok)
+	}
+
+	if got, ok := Lookup(candidates[:1], "9.9.9"); !ok || got.Version != "2.0.0" {
+		t.Errorf("a single candidate must resolve regardless of version, got (%+v, %v)", got, ok)
+	}
+	if _, ok := Lookup(nil, "1.0.0"); ok {
+		t.Error("no candidates must not resolve")
+	}
+}
+
+// TestIndexDeduplicatesIdenticalPURLs: the same package@version approved by two
+// projects is one profile, not an ambiguity.
+func TestIndexDeduplicatesIdenticalPURLs(t *testing.T) {
+	idx := Index(map[string]profile.Profile{
+		"pkg:npm/same@1.0.0": prof("same", "1.0.0", "exec"),
+	})
+	if len(idx[Key("npm", "same")]) != 1 {
+		t.Errorf("got %d profiles, want 1", len(idx[Key("npm", "same")]))
+	}
+	if amb := AmbiguousKeys(idx); len(amb) != 0 {
+		t.Errorf("AmbiguousKeys = %v, want none", amb)
 	}
 }
 

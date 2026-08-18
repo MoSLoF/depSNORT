@@ -23,9 +23,11 @@ func driftCtx(baseProf, candidate profile.Profile) *check.Context {
 	})
 	g.MarkRoot("pkg:npm/app@1.0.0")
 	return &check.Context{
-		Graph:    g,
-		Now:      nowRef,
-		Baseline: map[string]profile.Profile{baseline.Key(baseProf.Ecosystem, baseProf.Name): baseProf},
+		Graph: g,
+		Now:   nowRef,
+		Baseline: map[string][]profile.Profile{
+			baseline.Key(baseProf.Ecosystem, baseProf.Name): {baseProf},
+		},
 		Profiles: map[string]profile.Profile{n.ID: candidate},
 	}
 }
@@ -58,8 +60,8 @@ func TestVC010SilentWhenNothingChanged(t *testing.T) {
 // drifted. Reporting it here would drown the real signal in every added dep.
 func TestVC010SilentOnNewPackage(t *testing.T) {
 	ctx := driftCtx(driftProf("1.2.3", nil, nil, nil), driftProf("1.2.4", []string{"network"}, nil, nil))
-	ctx.Baseline = map[string]profile.Profile{
-		baseline.Key("npm", "some-other-package"): driftProf("1.0.0", nil, nil, nil),
+	ctx.Baseline = map[string][]profile.Profile{
+		baseline.Key("npm", "some-other-package"): {driftProf("1.0.0", nil, nil, nil)},
 	}
 	if fs := (CapabilityDrift{}).Run(ctx); len(fs) != 0 {
 		t.Errorf("VC-010 fired on a package the baseline never saw: %+v", fs)
@@ -201,5 +203,81 @@ func TestVC010UnknownPublisherIsDisclosedNotAssumed(t *testing.T) {
 	}
 	if !strings.Contains(fs[0].Evidence, "unevaluated") {
 		t.Errorf("a one-sided publisher identity must be disclosed as unevaluated, got %q", fs[0].Evidence)
+	}
+}
+
+// TestVC010AmbiguousBaselineIsUnevaluable is the DS-REV-03 guard at the check
+// level: several approved versions, none matching the candidate, means there is
+// no answer — only a choice, and drift derived from a choice is an artifact of
+// it.
+func TestVC010AmbiguousBaselineIsUnevaluable(t *testing.T) {
+	candidate := driftProf("3.0.0", []string{"credentials", "network"}, []string{"postinstall"}, nil)
+	ctx := driftCtx(driftProf("2.0.0", nil, nil, nil), candidate)
+	ctx.Baseline = map[string][]profile.Profile{
+		baseline.Key("npm", "acme-widget"): {
+			driftProf("2.0.0", nil, nil, nil),
+			driftProf("10.0.0", nil, nil, nil),
+		},
+	}
+
+	fs := (CapabilityDrift{}).Run(ctx)
+	if len(fs) != 1 {
+		t.Fatalf("VC-010 findings = %d, want 1 (the unevaluable diagnostic)", len(fs))
+	}
+	f := fs[0]
+	if f.GateClass != finding.GateAdvisory || f.Severity != finding.SevInfo {
+		t.Errorf("the diagnostic must be informational, got gate=%q severity=%q",
+			f.GateClass, f.Severity)
+	}
+	if !strings.Contains(f.Title, "not evaluated") {
+		t.Errorf("title must say the axis was skipped, got %q", f.Title)
+	}
+	// It must name what it could not choose between, or the operator cannot act.
+	for _, want := range []string{"2.0.0", "10.0.0", "3.0.0"} {
+		if !strings.Contains(f.Evidence, want) {
+			t.Errorf("evidence missing %q: %s", want, f.Evidence)
+		}
+	}
+	// And crucially: no drift conclusion was produced despite a candidate that
+	// would otherwise have gated.
+	if strings.Contains(f.Evidence, "new capabilit") {
+		t.Error("an ambiguous baseline must not yield a drift conclusion")
+	}
+}
+
+// TestVC010ExactVersionMatchIsNotAmbiguous: a candidate whose exact version is
+// among the approved ones is approved. Nothing to compare, no diagnostic.
+func TestVC010ExactVersionMatchIsNotAmbiguous(t *testing.T) {
+	candidate := driftProf("10.0.0", []string{"network"}, nil, nil)
+	ctx := driftCtx(driftProf("2.0.0", nil, nil, nil), candidate)
+	ctx.Baseline = map[string][]profile.Profile{
+		baseline.Key("npm", "acme-widget"): {
+			driftProf("2.0.0", nil, nil, nil),
+			driftProf("10.0.0", []string{"network"}, nil, nil),
+		},
+	}
+	if fs := (CapabilityDrift{}).Run(ctx); len(fs) != 0 {
+		t.Errorf("an exactly-approved version produced findings: %+v", fs)
+	}
+}
+
+// TestVC010TwoRootsPinningDifferentVersions is the workspace shape the review
+// named: two projects legitimately approved different versions, so neither can
+// claim the other's baseline.
+func TestVC010TwoRootsPinningDifferentVersions(t *testing.T) {
+	candidate := driftProf("1.5.0", []string{"credentials"}, []string{"postinstall"}, nil)
+	ctx := driftCtx(driftProf("1.0.0", nil, nil, nil), candidate)
+	ctx.Baseline = map[string][]profile.Profile{
+		baseline.Key("npm", "acme-widget"): {
+			driftProf("1.0.0", nil, nil, nil), // approved by project A
+			driftProf("1.4.0", nil, nil, nil), // approved by project B
+		},
+	}
+	fs := (CapabilityDrift{}).Run(ctx)
+	if len(fs) != 1 || fs[0].GateClass != finding.GateAdvisory {
+		t.Fatalf("want one advisory diagnostic, got %+v", fs)
+	}
+	if strings.Contains(fs[0].Title, "gained") {
+		t.Error("drift must not be claimed against another project's approved version")
 	}
 }
