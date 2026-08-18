@@ -43,6 +43,7 @@ import (
 	"ihbv.io/depsnort/internal/ecosystem/pypi"
 	"ihbv.io/depsnort/internal/ecosystem/rubygems"
 	"ihbv.io/depsnort/internal/emit"
+	"ihbv.io/depsnort/internal/expand"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/verdict"
 )
@@ -136,6 +137,12 @@ scan flags:
   -osv-cache string        OSV advisory cache directory
   -no-registry             skip registry metadata (disables VC-004 / VC-005)
   -registry-cache string   registry metadata cache directory
+  -expand                  discover transitive layers a manifest does not name,
+                           past what the lockfile recorded (default true); the
+                           versions it presumes are labelled and never gate
+  -expand-depth int        stop expansion after N layers (0 = full depth); set 1
+                           to step through the tree one layer at a time
+  -no-expand               alias for -expand=false: only what the files state
   -no-install-surface      skip static install-hook extraction (VC-002b..e)
   -recursive               treat the path as a workspace root: discover every
                            project beneath it and merge into one graph
@@ -464,6 +471,44 @@ func reconstructPyPIDepth(g *graph.Graph, client *registry.PyPIDepsClient, roots
 	return cov
 }
 
+// expandTransitive walks each root past what its lockfile recorded, discovering
+// the layers a manifest does not name and presuming a published version at each
+// (Decisions D-24 for coverage honesty, and the version-truth axis for the
+// presumption grade). It is per-root by construction: a declaration in one
+// project is never satisfied by another project's pinned version.
+//
+// depth is the -expand-depth cap (0 = full). The returned coverage folds every
+// root's frontier and unread counts into one data-source entry, so a walk that
+// was bounded by the network — rather than by the tree or by the cap — degrades
+// coverage exactly as the reconstruction stage does.
+func expandTransitive(g *graph.Graph, roots []*graph.Node, ws *pypi.WalkSource, depth int) emit.DataSourceCoverage {
+	cov := emit.DataSourceCoverage{Name: "pypi-expand"}
+	walker := expand.NewWalker(ws).WithVersionIndex(ws)
+	opts := expand.Options{MaxDepth: depth}
+
+	var discovered, presumed, contested, unread int
+	for _, root := range roots {
+		res, err := walker.ExpandRoot(context.Background(), g, root, opts)
+		if err != nil && cov.Error == "" {
+			cov.Error = err.Error()
+		}
+		discovered += res.Discovered
+		presumed += res.Presumed
+		contested += res.Contested
+		unread += res.Unread
+	}
+	// Queried counts what we set out to learn; Gaps is the honest shortfall —
+	// a coordinate whose metadata never came back is a layer we could not read,
+	// which degrades coverage rather than passing as a complete walk (D-24).
+	cov.Stats.Queried = discovered
+	cov.Stats.Gaps = unread
+	if discovered > 0 {
+		fmt.Fprintf(os.Stderr, "depsnort: expansion discovered %d transitive package(s) past the manifest (%d presumed, %d contested, %d unread)\n",
+			discovered, presumed, contested, unread)
+	}
+	return cov
+}
+
 // resolveResult is what one pass over a project list produced: the merged
 // graph plus every way that pass fell short of seeing the whole tree.
 type resolveResult struct {
@@ -539,6 +584,9 @@ func cmdScan(args []string) int {
 	noBundled := fs.Bool("no-osv-bundled", false, "never use the compiled-in fallback advisory dataset, even when the network is unreachable")
 	regCacheDir := fs.String("registry-cache", defaultCacheDir("registry"), "registry metadata cache directory")
 	noRegistry := fs.Bool("no-registry", false, "skip registry-metadata source (disables VC-004/VC-005)")
+	expandTree := fs.Bool("expand", true, "discover transitive layers past what the lockfile recorded; presumed versions are labelled and never gate")
+	noExpand := fs.Bool("no-expand", false, "alias for -expand=false")
+	expandDepth := fs.Int("expand-depth", 0, "stop expansion after N layers (0 = full depth); 1 steps one layer at a time")
 	noInstallSurface := fs.Bool("no-install-surface", false, "skip static install-hook extraction")
 	recursive := fs.Bool("recursive", false, "treat the path as a workspace root: discover and merge every project beneath it")
 	internalScopes := fs.String("internal-scopes", "", "comma-separated internal scopes for dependency-confusion (e.g. @ihbv,@acme)")
@@ -621,6 +669,9 @@ func cmdScan(args []string) int {
 	// Data-source stage: fetch advisories once (unless disabled). A network
 	// failure degrades coverage but does not abort the scan — the coverage is
 	// reported so a degraded run is never mistaken for a clean one.
+	if *noExpand {
+		*expandTree = false
+	}
 	ctx := &check.Context{Graph: g, Now: time.Now(), Config: check.Config{
 		InternalScopes: splitCSV(*internalScopes),
 		InternalNames:  splitCSV(*internalNames),
@@ -734,6 +785,23 @@ func cmdScan(args []string) int {
 			dataSourceGaps = append(dataSourceGaps, depsCov.Name)
 		}
 		info.DataSources = append(info.DataSources, depsCov)
+
+		// Transitive expansion (default on): walk past what the lockfile
+		// recorded, presuming a published version at each layer. Presumed nodes
+		// are labelled (graph.AttrVersionTruth) and can never gate — the
+		// guarantee is enforced in verdict, not here. Reuses the requires_dist
+		// client above for declarations and a dedicated PyPI release client for
+		// the version list; no new network surface beyond what -no-registry and
+		// -offline already govern.
+		if *expandTree {
+			idx := registry.NewPyPI(datasource.NewCache(filepath.Join(*regCacheDir, "pypi"), 24*time.Hour), *offline)
+			ws := &pypi.WalkSource{Deps: depsClient, Index: idx}
+			expCov := expandTransitive(g, rootNodes, ws, *expandDepth)
+			if expCov.Stats.Gaps > 0 {
+				dataSourceGaps = append(dataSourceGaps, expCov.Name)
+			}
+			info.DataSources = append(info.DataSources, expCov)
+		}
 	} else {
 		// -no-registry means requires_dist was never even fetched: a flat PyPI
 		// root must say so explicitly rather than silently carrying no

@@ -1316,3 +1316,67 @@ What remains genuinely indistinguishable is two path crates, because Cargo.lock
 records no path for them. They keep the ambiguity disclosure. The rule holds:
 where the lockfile can tell two artifacts apart, so does the identity; where it
 cannot, nothing pretends otherwise.
+
+## D-44 — expansion looks past the manifest by default, and grades what it finds
+
+A lockfile-first scan sees exactly one layer below a flat pin. `requirements.txt`
+with `totallyInnocent==0.11.2` resolved one node; whatever it dragged in — the
+layers an attacker would rather stayed unread — was nowhere in the file, and the
+scan said `PASSED`. D-24 made that gap VISIBLE (coverage degrades, the banner
+reads INCOMPLETE). It did not close it. A supply-chain IDS that only reads what
+the operator already listed is not doing the job the name claims.
+
+The walk closes it: from each versioned node it reads that package's own
+published dependencies and descends, layer after layer, per root. It is on by
+default (`-expand`, default true), because looking only at face value defeats
+the tool. `-no-expand` (or `-expand=false`) restores the manifest-only posture
+for an operator who wants nothing in the graph a file did not state, and
+`-expand-depth=N` stops after N layers so the tree can be stepped through one
+layer at a time.
+
+**Why this is not the resolver D-01 refused.** A dependency is declared as a
+NAME and a CONSTRAINT (`requests>=2.0`), never a version. To put a node in the
+graph the walk presumes one: the highest published version satisfying the
+constraints its dependents accumulated. That is a filter and a sort — no
+backtracking, no marker evaluation, no conflict search — and it is what pip,
+npm, and cargo actually do absent a conflict, so it is right in the common case
+and wrong in a knowable direction. It is not a resolver, and the tool never
+presents its output as observed fact.
+
+**The version is a truth axis, the way risk, coverage, and origin already are
+(D-05/D-06, D-24, D-41).** `depsnort.version_truth` grades every node: OBSERVED
+(a lockfile said so), PRESUMED (this tool chose it), ASSERTED (an external
+resolved-graph service supplied it — the D-01-sanctioned deps.dev path, not yet
+built), CONTESTED (constraints admit nothing, or could not be evaluated — no
+version assigned, walk stops). Grading the claim is what makes depth safe:
+before it, the only honest walk was a shallow one.
+
+**Presumed nodes never gate.** `verdict.applyPresumedDemotion` demotes every
+finding on a presumed node to advisory, enforced beside the recency demotion so
+no check can opt out. A block on a version nobody installed is a false positive
+with a build failure attached, and one of those teaches an operator to disable
+expansion permanently — costing every true finding the deeper layers would have
+surfaced. It demotes block class where recency demotion refuses to, and the
+difference is the premise: recency acts on an OBSERVED release, where severity
+still stands; a presumed node's version was never observed, so a block about it
+is a confident claim about a coordinate that may not be in the build. Demoted,
+never dropped — a typosquat found four layers down stays in the report, which is
+the whole reason for walking that deep.
+
+**What it costs, disclosed not hidden.** The walk stops at a FRONTIER — a node
+whose dependencies it could not read — for three distinct reasons it keeps
+apart: the `-expand-depth` cap (a limit the operator chose), a contested version
+(the data would not resolve), and an unread coordinate (a fetch that did not
+happen). Only the last degrades coverage, surfacing as the `pypi-expand` data
+source going degraded, exactly as a failed OSV lookup does. An offline scan
+therefore now reports INCOMPLETE where before it silently attempted nothing —
+the more honest answer, and the one D-24 demands: a walk that could not see the
+deep layers must say so, not imply an all-clear.
+
+**Scope today.** The engine (`internal/expand`) and the truth axis
+(`internal/graph`) are ecosystem-neutral; the per-ecosystem surface is one seam
+(declare, index versions, judge a constraint) implemented for PyPI over PEP 440
+(`internal/pep440`) and the clients VC-004/VC-005 already run. The other five
+ecosystems expand as each grows its own version grammar — and until one does,
+its nodes simply stay at the frontier rather than being presumed wrongly, the
+same decline-when-you-lack-a-basis rule D-15 established for checks.
