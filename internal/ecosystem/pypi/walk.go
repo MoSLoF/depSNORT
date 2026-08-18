@@ -53,26 +53,26 @@ func (w *WalkSource) Declared(ctx context.Context, coords []datasource.Coord) (m
 	if w.Deps == nil {
 		return nil, nil
 	}
-	raw, err := w.Deps.RequiresDist(ctx, coords)
+	raw, err := w.Deps.Requirements(ctx, coords)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string][]expand.Declaration, len(raw))
-	for key, names := range raw {
-		decls := make([]expand.Declaration, 0, len(names))
-		for _, entry := range names {
-			name, constraint, _, marker := pep508.Split(entry)
-			name = pep508.StripExtras(name)
-			if name == "" {
+	for key, reqs := range raw {
+		decls := make([]expand.Declaration, 0, len(reqs))
+		for _, r := range reqs {
+			if r.Name == "" {
 				continue
 			}
 			decls = append(decls, expand.Declaration{
-				Name:       name,
-				Constraint: constraint,
-				// An extras-gated or platform-excluded dependency declares what
-				// MIGHT be installed. Marked optional so the default walk does
-				// not inflate the tree with packages no ordinary install pulls.
-				Optional: pep508.GatedByExtra(marker) || pep508.ExcludesLinux(marker),
+				Name:       r.Name,
+				Constraint: r.Specifier,
+				// A platform-excluded dependency declares what MIGHT be
+				// installed. Marked optional so the default walk does not
+				// inflate the tree with packages no ordinary install pulls.
+				// (Extras-gated entries are already dropped by the client, the
+				// same way name-only reconstruction drops them.)
+				Optional: pep508.ExcludesLinux(r.Marker),
 			})
 		}
 		out[key] = decls

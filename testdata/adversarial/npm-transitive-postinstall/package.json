@@ -1,0 +1,7 @@
+{
+  "name": "depsnort-fixture-root",
+  "version": "0.0.0",
+  "dependencies": {
+    "depsnort-fixture-layer1": "1.0.0"
+  }
+}
