@@ -3,14 +3,11 @@ package registry
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"ihbv.io/depsnort/internal/datasource"
@@ -80,91 +77,12 @@ func (c *PyPIDepsClient) RequiresDist(ctx context.Context, coords []datasource.C
 }
 
 func fetchParsed[T any](c *PyPIDepsClient, ctx context.Context, coords []datasource.Coord, parse func([]byte) ([]T, int, error)) (map[string][]T, error) {
-	now := time.Now
-	if c.Now != nil {
-		now = c.Now
-	}
-	out := make(map[string][]T, len(coords))
-	c.Stats = datasource.Stats{Queried: len(coords), Offline: c.Offline}
-
-	var misses []datasource.Coord
-	for _, coord := range coords {
-		key := c.cacheKey(coord)
-		if raw, fresh, ok := c.Cache.GetRaw(key); ok && (fresh || c.Offline) {
-			if items, unparsed, err := parse(raw); err == nil {
-				out[coord.Key()] = items
-				c.Stats.FromCache++
-				c.Stats.UnparsedEntries += unparsed
-				continue
-			}
-		}
-		if c.Offline {
-			c.Stats.Gaps++
-			continue
-		}
-		misses = append(misses, coord)
-	}
-	if len(misses) == 0 {
-		return out, nil
-	}
-
-	type result struct {
-		coord    datasource.Coord
-		items    []T
-		unparsed int
-		raw      []byte
-		err      error
-	}
-	var (
-		mu      sync.Mutex
-		wg      sync.WaitGroup
-		errsBy  = map[string]error{}
-		sem     = make(chan struct{}, concurrency)
-		results = make([]result, len(misses))
-	)
-	for i, coord := range misses {
-		wg.Add(1)
-		go func(i int, coord datasource.Coord) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			raw, err := c.fetch(ctx, coord)
-			if err != nil {
-				results[i] = result{coord: coord, err: err}
-				return
-			}
-			items, unparsed, err := parse(raw)
-			results[i] = result{coord: coord, items: items, unparsed: unparsed, raw: raw, err: err}
-		}(i, coord)
-	}
-	wg.Wait()
-
-	for _, r := range results {
-		if r.err != nil {
-			if errors.Is(r.err, ErrNotFound) {
-				c.Stats.NotFound++
-				continue
-			}
-			c.Stats.Gaps++
-			mu.Lock()
-			errsBy[r.coord.Key()] = r.err
-			mu.Unlock()
-			continue
-		}
-		out[r.coord.Key()] = r.items
-		c.Stats.FromNet++
-		c.Stats.UnparsedEntries += r.unparsed
-		_ = c.Cache.PutRaw(c.cacheKey(r.coord), r.raw, now())
-	}
-	if len(errsBy) > 0 {
-		sorted := make([]string, 0, len(errsBy))
-		for k := range errsBy {
-			sorted = append(sorted, k)
-		}
-		sort.Strings(sorted)
-		return out, errsBy[sorted[0]]
-	}
-	return out, nil
+	out, stats, err := fetchCoords(coordFetcher{
+		cache: c.Cache, offline: c.Offline, now: c.Now,
+		cacheKey: c.cacheKey, fetch: c.fetch,
+	}, ctx, coords, parse)
+	c.Stats = stats
+	return out, err
 }
 
 func (c *PyPIDepsClient) fetch(ctx context.Context, coord datasource.Coord) ([]byte, error) {

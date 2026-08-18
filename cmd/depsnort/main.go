@@ -796,9 +796,12 @@ func cmdScan(args []string) int {
 		if *expandTree {
 			pypiIdx := registry.NewPyPI(datasource.NewCache(filepath.Join(*regCacheDir, "pypi"), 24*time.Hour), *offline)
 			npmReg := npmreg.New(datasource.NewCache(filepath.Join(*regCacheDir, "npm"), 24*time.Hour), *offline)
+			cargoDeps := registry.NewCargoDeps(datasource.NewCache(filepath.Join(*regCacheDir, "cargo-deps"), 24*time.Hour), *offline)
+			cargoIdx := registry.NewCargo(datasource.NewCache(filepath.Join(*regCacheDir, "cargo"), 24*time.Hour), *offline)
 			sources := []expand.Declarer{
 				&pypi.WalkSource{Deps: depsClient, Index: pypiIdx},
 				&npm.WalkSource{Reg: npmReg},
+				&cargo.WalkSource{Deps: cargoDeps, Index: cargoIdx},
 			}
 			expCov := expandTransitive(g, rootNodes, sources, *expandDepth)
 			if expCov.Stats.Gaps > 0 {

@@ -89,3 +89,44 @@ func FuzzSatisfiesNeverPanics(f *testing.F) {
 		_, _ = Satisfies(rng, ver)
 	})
 }
+
+func TestSatisfiesCargo(t *testing.T) {
+	for _, tc := range []struct {
+		req, ver        string
+		want, evaluable bool
+	}{
+		// bare version is caret, NOT exact — the key Cargo difference
+		{"1.2.3", "1.2.3", true, true},
+		{"1.2.3", "1.9.0", true, true},
+		{"1.2.3", "2.0.0", false, true},
+		{"1.2.3", "1.2.2", false, true},
+		// caret 0.x rules
+		{"0.2.3", "0.2.9", true, true},
+		{"0.2.3", "0.3.0", false, true},
+		{"^0.0.3", "0.0.3", true, true},
+		{"^0.0.3", "0.0.4", false, true},
+		{"^0", "0.9.9", true, true},
+		{"^0", "1.0.0", false, true},
+		// tilde
+		{"~1.2", "1.2.9", true, true},
+		{"~1.2", "1.3.0", false, true},
+		// comma is AND
+		{">=1.2, <1.5", "1.4.0", true, true},
+		{">=1.2, <1.5", "1.5.0", false, true},
+		// explicit exact and wildcard
+		{"=1.2.3", "1.2.3", true, true},
+		{"=1.2.3", "1.2.4", false, true},
+		{"1.*", "1.9.0", true, true},
+		{"1.*", "2.0.0", false, true},
+		{"*", "9.9.9", true, true},
+		// declines
+		{">=1.x.0", "1.0.0", false, false},
+		{"~1.2.3.4", "1.2.3", false, false},
+	} {
+		got, ev := SatisfiesCargo(tc.req, tc.ver)
+		if got != tc.want || ev != tc.evaluable {
+			t.Errorf("SatisfiesCargo(%q, %q) = (%v, %v), want (%v, %v)",
+				tc.req, tc.ver, got, ev, tc.want, tc.evaluable)
+		}
+	}
+}

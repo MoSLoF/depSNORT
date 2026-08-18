@@ -334,3 +334,68 @@ func (c comparator) matches(v Version) bool {
 	}
 	return false
 }
+
+// SatisfiesCargo evaluates a Cargo (crates.io) version requirement. Cargo's
+// grammar shares npm's comparators, caret, and tilde, but differs in two ways
+// that change the answer:
+//
+//   - A BARE version is a caret requirement, not an exact match: "1.2.3" means
+//     "^1.2.3". Treating it as "=1.2.3" the way npm does would exclude every
+//     compatible newer release and make the walk descend a version no Cargo
+//     build would select.
+//   - AND is a COMMA, not a space: ">=1.2, <1.5". Cargo has no "||" OR.
+//
+// The caret arithmetic itself is identical to npm's, including the 0.x rules
+// (^0.2.3 -> <0.3.0, ^0.0.3 -> <0.0.4), so those helpers are shared. The
+// evaluable-separate-from-answer contract is the same: an unreadable
+// requirement declines rather than excluding a candidate.
+func SatisfiesCargo(req, version string) (ok, evaluable bool) {
+	v := Parse(version)
+	if !v.Valid {
+		return false, false
+	}
+	req = strings.TrimSpace(req)
+	if req == "" || req == "*" {
+		return !v.IsPrerelease(), true
+	}
+
+	var set []comparator
+	for _, tok := range strings.Split(req, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		cs, ok := parseCargoToken(tok)
+		if !ok {
+			return false, false
+		}
+		set = append(set, cs...)
+	}
+	return satisfiesSet(v, set), true
+}
+
+// parseCargoToken differs from parseToken only in the default: a token with no
+// operator is a caret requirement, Cargo's rule, where npm reads it as an exact
+// version or x-range.
+func parseCargoToken(tok string) ([]comparator, bool) {
+	switch {
+	case strings.HasPrefix(tok, "^"):
+		return caret(tok[1:])
+	case strings.HasPrefix(tok, "~"):
+		return tilde(tok[1:])
+	case strings.HasPrefix(tok, ">="):
+		return simple(">=", tok[2:])
+	case strings.HasPrefix(tok, "<="):
+		return simple("<=", tok[2:])
+	case strings.HasPrefix(tok, ">"):
+		return simple(">", tok[1:])
+	case strings.HasPrefix(tok, "<"):
+		return simple("<", tok[1:])
+	case strings.HasPrefix(tok, "="):
+		return xrange(tok[1:]) // "=1.2" is exact-ish; xrange handles the partial
+	case strings.ContainsAny(tok, "*xX") && strings.Contains(tok, "."):
+		return xrange(tok) // an explicit wildcard stays a wildcard, not a caret
+	default:
+		return caret(tok) // BARE VERSION IS CARET — the Cargo default
+	}
+}

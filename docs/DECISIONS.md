@@ -1378,13 +1378,28 @@ deep layers must say so, not imply an all-clear.
 — declare, index versions, judge a constraint — and each ecosystem implements
 all three on one struct, so one walk spans several. PyPI reads requires_dist and
 judges with PEP 440 (`internal/pep440`); npm reads the packument's per-version
-`dependencies` and judges with a semver-range evaluator added to
-`internal/semver` (caret, tilde, x-ranges, hyphen ranges, AND/OR). Both reuse
-the registry clients VC-004/VC-005 already run — the packument and the PyPI JSON
-were already fetched and their dependency data discarded. The other four
-ecosystems expand as each grows its own range grammar; until one does, its nodes
-stay at the frontier rather than being presumed wrongly, the D-15
+`dependencies` and judges with a semver-range evaluator in `internal/semver`
+(caret, tilde, x-ranges, hyphen ranges, AND/OR); Cargo reads the crates.io
+per-version dependencies endpoint and judges with `SatisfiesCargo`, which shares
+that evaluator's caret/tilde math but flips two defaults — a bare requirement is
+caret, not exact, and AND is a comma. All reuse the registry clients
+VC-004/VC-005 already run; the deps clients share one `coordFetcher` for the
+cache/concurrency/coverage plumbing. Cargo also keeps build-dependencies (they
+run build.rs at compile time — the install-time subgraph's own subject, D-02)
+and drops dev-dependencies, which Cargo never compiles transitively. The other
+three ecosystems expand as each grows its own range grammar; until one does, its
+nodes stay at the frontier rather than being presumed wrongly, the D-15
 decline-when-you-lack-a-basis rule.
+
+**One guard the Cargo fixture forced, applying to every ecosystem.** The walk
+descends from versioned nodes, and a vendored crate is a versioned node — but
+one the lockfile recorded as path- or git-sourced (D-41). Querying a registry
+for that name would answer with whatever real package happens to share it, and
+graft that package's dependency tree onto the local fork: the exact
+name-confusion the source class exists to prevent. The walk therefore queries a
+registry only for registry-origin and unqualified nodes (D-43 qualifies only
+non-registry origins, so an ordinary registry package carries no source
+attribute), and leaves an explicitly non-registry node at the frontier.
 
 npm forced one design choice the single-ecosystem sketch hid: the walker cannot
 hold one global version index, because npm and PyPI resolve versions through

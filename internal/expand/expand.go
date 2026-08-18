@@ -273,7 +273,7 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 	expanded := map[string]bool{}
 	var frontier []*graph.Node
 	for _, n := range g.SortedNodes() {
-		if inSubtree[n.ID] && n.Kind == graph.KindPackage && n.Version != "" {
+		if inSubtree[n.ID] && n.Kind == graph.KindPackage && n.Version != "" && registryQueryable(n) {
 			frontier = append(frontier, n)
 			if n.Attr[graph.AttrVersionTruth] == "" && n.ID != root.ID {
 				setAttr(n, graph.AttrVersionTruth, graph.TruthObserved)
@@ -487,6 +487,20 @@ func (w *Walker) presume(ctx context.Context, d Declarer, p *pending, opts Optio
 	}
 	sort.Slice(ok, func(i, j int) bool { return pr.CompareVersions(ok[i], ok[j]) > 0 })
 	return ok[0], graph.TruthPresumed, len(ok)
+}
+
+// registryQueryable reports whether it is meaningful to ask a package registry
+// what this node depends on. A node whose origin the lockfile recorded as git,
+// path, or url (D-41) has no registry coordinate, so querying the registry by
+// its name would answer with a DIFFERENT package that happens to share the name
+// — grafting a real crate's dependency tree onto a local fork, which is exactly
+// the name-confusion the source class exists to prevent. Registry origins and
+// UNQUALIFIED nodes (the common case: D-43 qualifies only non-registry origins,
+// so an ordinary registry package carries no source attribute) are queryable; a
+// node explicitly marked non-registry is not.
+func registryQueryable(n *graph.Node) bool {
+	class, _ := n.SourceOf()
+	return class == graph.SourceRegistry || class == graph.SourceUnknown
 }
 
 // reachable returns the node IDs reachable from id over declared edges.

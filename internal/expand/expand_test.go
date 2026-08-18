@@ -321,3 +321,36 @@ func TestUnreadCoordinateIsNotAConfidentLeaf(t *testing.T) {
 		t.Error("a package that genuinely declares nothing is a leaf")
 	}
 }
+
+// A non-registry origin (git/path/url) is never queried against a package
+// registry: its name could collide with a real registry package, and grafting
+// that package's dependencies onto a local fork is the name-confusion the
+// source class exists to prevent.
+func TestNonRegistrySourceIsNotWalked(t *testing.T) {
+	d := &fakePyPI{
+		// If this were queried, "forked-lib" would declare a dependency.
+		table:    map[string][]expand.Declaration{"pypi|forked-lib|1.0.0": {{Name: "should-not-appear", Constraint: ">=1.0"}}},
+		versions: map[string][]string{"should-not-appear": {"1.0.0"}},
+	}
+	g := graph.New()
+	root := g.AddNode(&graph.Node{ID: "pkg:pypi/app", Kind: graph.KindPackage, Ecosystem: "pypi", Name: "app"})
+	g.MarkRoot(root.ID)
+	// A git-sourced fork, not a registry package.
+	fork := &graph.Node{ID: "pkg:pypi/forked-lib@1.0.0", Kind: graph.KindPackage,
+		Ecosystem: "pypi", Name: "forked-lib", Version: "1.0.0", Depth: 1}
+	fork.SetSource(graph.SourceGit, "git+https://github.com/someone/forked-lib")
+	g.AddNode(fork)
+	g.AddEdge(root.ID, fork.ID, graph.EdgeDependsOn)
+
+	res, err := expand.NewWalker(d).WithVersionIndex(d).
+		ExpandRoot(context.Background(), g, root, expand.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Get("pkg:pypi/should-not-appear") != nil {
+		t.Error("walked a git-sourced fork against the registry — name-confusion vector")
+	}
+	if res.Discovered != 0 {
+		t.Errorf("discovered = %d from a non-registry node, want 0", res.Discovered)
+	}
+}
