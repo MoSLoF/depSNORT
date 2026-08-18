@@ -47,19 +47,19 @@ func scanPyPI(t *testing.T, extraArgs ...string) map[string]bool {
 }
 
 func TestExpansionIsOnByDefault(t *testing.T) {
-	if !scanPyPI(t)["pypi-expand"] {
+	if !scanPyPI(t)["expand"] {
 		t.Error("expansion did not run by default — -expand should default true")
 	}
 }
 
 func TestNoExpandSuppressesTheStage(t *testing.T) {
-	if scanPyPI(t, "-no-expand")["pypi-expand"] {
+	if scanPyPI(t, "-no-expand")["expand"] {
 		t.Error("-no-expand did not suppress the expansion stage")
 	}
 }
 
 func TestExpandFalseSuppressesTheStage(t *testing.T) {
-	if scanPyPI(t, "-expand=false")["pypi-expand"] {
+	if scanPyPI(t, "-expand=false")["expand"] {
 		t.Error("-expand=false did not suppress the expansion stage")
 	}
 }
@@ -71,7 +71,7 @@ func TestNoRegistrySuppressesExpansion(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "report.json")
 	run([]string{"scan", "-no-osv", "-no-registry", "-o", out,
 		"../../internal/ecosystem/pypi/testdata/pipfreeze/requirements.txt"})
-	if dataSources(t, out)["pypi-expand"] {
+	if dataSources(t, out)["expand"] {
 		t.Error("expansion ran with -no-registry, but nothing was fetched to expand from")
 	}
 }

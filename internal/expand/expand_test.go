@@ -234,7 +234,9 @@ func TestNoPresumeStaysNameOnly(t *testing.T) {
 	}
 }
 
-// Per-root: a declaration must never be satisfied by another root's pin.
+// Per-root, name-only: a declaration must never be MATCHED against another
+// root's pinned package. In name-only mode A's requests stays unversioned and
+// distinct from B's pinned coordinate.
 func TestDeclarationNeverBorrowsAnotherRootsPin(t *testing.T) {
 	d := &fakePyPI{
 		table:    map[string][]expand.Declaration{"pypi|totallyinnocent|0.11.2": {{Name: "requests", Constraint: ">=2.0"}}},
@@ -250,12 +252,53 @@ func TestDeclarationNeverBorrowsAnotherRootsPin(t *testing.T) {
 	pinned.Attr = map[string]string{graph.AttrVersionTruth: graph.TruthObserved}
 	g.AddEdge(rootB.ID, pinned.ID, graph.EdgeDependsOn)
 
-	if _, err := expand.NewWalker(d).ExpandRoot(context.Background(), g, rootA, expand.Options{}); err != nil {
+	// NoPresume: the match-not-borrow rule is a name-only property. With
+	// presuming on, A independently presumes a version from the registry and a
+	// legitimate identity match is dedup, not borrowing (covered below).
+	if _, err := expand.NewWalker(d).ExpandRoot(context.Background(), g, rootA, expand.Options{NoPresume: true}); err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range g.SortedEdges() {
 		if e.To == pinned.ID && strings.Contains(e.From, "totallyinnocent") {
 			t.Fatal("root A's declaration was satisfied by root B's observed pin")
+		}
+	}
+	if g.Get("pkg:pypi/requests") == nil {
+		t.Error("want a separate unversioned node under root A")
+	}
+}
+
+// Per-root, presuming: A presumes a version INDEPENDENTLY from the registry, so
+// when B has pinned a version A's constraint excludes, A must not attach to it.
+// This is the containment guarantee that survives presuming: A's resolution
+// cannot be swayed by what another root happened to pin.
+func TestPresumedResolutionIgnoresAnotherRootsPin(t *testing.T) {
+	d := &fakePyPI{
+		table: map[string][]expand.Declaration{"pypi|totallyinnocent|0.11.2": {{Name: "requests", Constraint: ">=2.0"}}},
+		// The registry publishes 2.31.0; B pinned an out-of-range 1.0.0.
+		versions: map[string][]string{"requests": {"1.0.0", "2.31.0"}},
+	}
+	g, rootA := rootWith(t, map[string]string{"totallyinnocent": "0.11.2"})
+	rootB := g.AddNode(&graph.Node{ID: "pkg:pypi/other", Kind: graph.KindPackage, Ecosystem: "pypi", Name: "other"})
+	g.MarkRoot(rootB.ID)
+	stale := g.AddNode(&graph.Node{
+		ID: "pkg:pypi/requests@1.0.0", Kind: graph.KindPackage,
+		Ecosystem: "pypi", Name: "requests", Version: "1.0.0", Depth: 1,
+		Attr: map[string]string{graph.AttrVersionTruth: graph.TruthObserved},
+	})
+	g.AddEdge(rootB.ID, stale.ID, graph.EdgeDependsOn)
+
+	if _, err := expand.NewWalker(d).WithVersionIndex(d).
+		ExpandRoot(context.Background(), g, rootA, expand.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	// A presumes 2.31.0 (its constraint excludes B's 1.0.0), a distinct node.
+	if g.Get("pkg:pypi/requests@2.31.0") == nil {
+		t.Error("A did not presume its own in-range version")
+	}
+	for _, e := range g.SortedEdges() {
+		if e.To == stale.ID && strings.Contains(e.From, "totallyinnocent") {
+			t.Fatal("A attached to B's out-of-range pin instead of presuming its own")
 		}
 	}
 }

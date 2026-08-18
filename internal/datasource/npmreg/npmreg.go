@@ -96,8 +96,10 @@ type packument struct {
 }
 
 type packumentVersion struct {
-	NpmUser maintainer        `json:"_npmUser"`
-	Scripts map[string]string `json:"scripts"`
+	NpmUser              maintainer        `json:"_npmUser"`
+	Scripts              map[string]string `json:"scripts"`
+	Dependencies         map[string]string `json:"dependencies"`
+	OptionalDependencies map[string]string `json:"optionalDependencies"`
 }
 
 type maintainer struct {
@@ -122,12 +124,80 @@ func escapePath(name string) string {
 // Histories fetches release history for each unique package name. Results are
 // keyed by package name. Packages that cannot be fetched are omitted and
 // counted as gaps rather than silently treated as clean.
+// Requirement is one declared dependency with its semver range preserved, for
+// the Nth-layer walk (D-44). Optional marks an optionalDependencies entry —
+// installed if it can be, so it belongs in the tree, but as a MIGHT-install
+// edge the default walk can exclude.
+type Requirement struct {
+	Name     string
+	Range    string
+	Optional bool
+}
+
+// Requirements returns each coordinate's declared dependencies WITH ranges,
+// read from the same packument Histories uses. Keyed by datasource.Coord.Key()
+// so a caller holding a graph.Node lines up without re-deriving a key.
+//
+// devDependencies are deliberately absent: npm installs a package's devDeps
+// only when that package is the build root, never transitively, so treating
+// them as present would inflate every dependency's subtree with tooling no
+// install pulls. peerDependencies are absent too — they are a REQUIREMENT ON
+// THE CONSUMER, not an edge this package pulls, and the consumer's own
+// dependency set already accounts for them.
+func (c *Client) Requirements(ctx context.Context, coords []datasource.Coord) (map[string][]Requirement, error) {
+	names := make([]string, 0, len(coords))
+	seen := map[string]bool{}
+	for _, co := range coords {
+		if !seen[co.Name] {
+			seen[co.Name] = true
+			names = append(names, co.Name)
+		}
+	}
+	docs, err := fetchPackuments(c, ctx, names, func(_ string, raw []byte) (*packument, error) {
+		var p packument
+		if e := json.Unmarshal(raw, &p); e != nil {
+			return nil, e
+		}
+		return &p, nil
+	})
+	out := make(map[string][]Requirement, len(coords))
+	for _, co := range coords {
+		doc := docs[co.Name]
+		if doc == nil {
+			continue // absent: not read. The walk counts this as a frontier.
+		}
+		pv, ok := doc.Versions[co.Version]
+		if !ok {
+			continue // this exact release is not in the packument: also unread.
+		}
+		reqs := make([]Requirement, 0, len(pv.Dependencies)+len(pv.OptionalDependencies))
+		for name, rng := range pv.Dependencies {
+			reqs = append(reqs, Requirement{Name: name, Range: rng})
+		}
+		for name, rng := range pv.OptionalDependencies {
+			reqs = append(reqs, Requirement{Name: name, Range: rng, Optional: true})
+		}
+		out[co.Key()] = reqs
+	}
+	return out, err
+}
+
 func (c *Client) Histories(ctx context.Context, names []string) (map[string]*datasource.ReleaseHistory, error) {
+	out, err := fetchPackuments(c, ctx, names, parsePackument)
+	return out, err
+}
+
+// fetchPackuments resolves each name's packument — cache first, then
+// bounded-parallel network — and parses it with parse. It owns the Stats
+// accounting, the deterministic error selection (D-13), and the cache writes,
+// so Histories and Requirements share every line of the plumbing and differ
+// only in what they read out of a packument.
+func fetchPackuments[T any](c *Client, ctx context.Context, names []string, parse func(name string, raw []byte) (T, error)) (map[string]T, error) {
 	now := time.Now
 	if c.Now != nil {
 		now = c.Now
 	}
-	out := make(map[string]*datasource.ReleaseHistory, len(names))
+	out := make(map[string]T, len(names))
 	c.Stats = datasource.Stats{Queried: len(names), Offline: c.Offline}
 
 	// Cache pass first, serially: it is local and cheap, and resolving it up
@@ -135,7 +205,7 @@ func (c *Client) Histories(ctx context.Context, names []string) (map[string]*dat
 	var misses []string
 	for _, name := range names {
 		if raw, fresh, ok := c.Cache.GetRaw(cacheKey(name)); ok && (fresh || c.Offline) {
-			if h, err := parsePackument(name, raw); err == nil {
+			if h, err := parse(name, raw); err == nil {
 				out[name] = h
 				c.Stats.FromCache++
 				continue
@@ -158,7 +228,7 @@ func (c *Client) Histories(ctx context.Context, names []string) (map[string]*dat
 	// degraded run still produces a deterministic message (Decision D-13).
 	type result struct {
 		name string
-		h    *datasource.ReleaseHistory
+		h    T
 		raw  []byte
 		err  error
 	}
@@ -181,7 +251,7 @@ func (c *Client) Histories(ctx context.Context, names []string) (map[string]*dat
 				results[i] = result{name: name, err: err}
 				return
 			}
-			h, err := parsePackument(name, raw)
+			h, err := parse(name, raw)
 			results[i] = result{name: name, h: h, raw: raw, err: err}
 		}(i, name)
 	}

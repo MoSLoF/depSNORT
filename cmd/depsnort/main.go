@@ -481,9 +481,9 @@ func reconstructPyPIDepth(g *graph.Graph, client *registry.PyPIDepsClient, roots
 // root's frontier and unread counts into one data-source entry, so a walk that
 // was bounded by the network — rather than by the tree or by the cap — degrades
 // coverage exactly as the reconstruction stage does.
-func expandTransitive(g *graph.Graph, roots []*graph.Node, ws *pypi.WalkSource, depth int) emit.DataSourceCoverage {
-	cov := emit.DataSourceCoverage{Name: "pypi-expand"}
-	walker := expand.NewWalker(ws).WithVersionIndex(ws)
+func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Declarer, depth int) emit.DataSourceCoverage {
+	cov := emit.DataSourceCoverage{Name: "expand"}
+	walker := expand.NewWalker(sources...)
 	opts := expand.Options{MaxDepth: depth}
 
 	var discovered, presumed, contested, unread int
@@ -794,9 +794,13 @@ func cmdScan(args []string) int {
 		// the version list; no new network surface beyond what -no-registry and
 		// -offline already govern.
 		if *expandTree {
-			idx := registry.NewPyPI(datasource.NewCache(filepath.Join(*regCacheDir, "pypi"), 24*time.Hour), *offline)
-			ws := &pypi.WalkSource{Deps: depsClient, Index: idx}
-			expCov := expandTransitive(g, rootNodes, ws, *expandDepth)
+			pypiIdx := registry.NewPyPI(datasource.NewCache(filepath.Join(*regCacheDir, "pypi"), 24*time.Hour), *offline)
+			npmReg := npmreg.New(datasource.NewCache(filepath.Join(*regCacheDir, "npm"), 24*time.Hour), *offline)
+			sources := []expand.Declarer{
+				&pypi.WalkSource{Deps: depsClient, Index: pypiIdx},
+				&npm.WalkSource{Reg: npmReg},
+			}
+			expCov := expandTransitive(g, rootNodes, sources, *expandDepth)
 			if expCov.Stats.Gaps > 0 {
 				dataSourceGaps = append(dataSourceGaps, expCov.Name)
 			}

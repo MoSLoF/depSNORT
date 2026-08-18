@@ -1375,8 +1375,25 @@ deep layers must say so, not imply an all-clear.
 
 **Scope today.** The engine (`internal/expand`) and the truth axis
 (`internal/graph`) are ecosystem-neutral; the per-ecosystem surface is one seam
-(declare, index versions, judge a constraint) implemented for PyPI over PEP 440
-(`internal/pep440`) and the clients VC-004/VC-005 already run. The other five
-ecosystems expand as each grows its own version grammar — and until one does,
-its nodes simply stay at the frontier rather than being presumed wrongly, the
-same decline-when-you-lack-a-basis rule D-15 established for checks.
+— declare, index versions, judge a constraint — and each ecosystem implements
+all three on one struct, so one walk spans several. PyPI reads requires_dist and
+judges with PEP 440 (`internal/pep440`); npm reads the packument's per-version
+`dependencies` and judges with a semver-range evaluator added to
+`internal/semver` (caret, tilde, x-ranges, hyphen ranges, AND/OR). Both reuse
+the registry clients VC-004/VC-005 already run — the packument and the PyPI JSON
+were already fetched and their dependency data discarded. The other four
+ecosystems expand as each grows its own range grammar; until one does, its nodes
+stay at the frontier rather than being presumed wrongly, the D-15
+decline-when-you-lack-a-basis rule.
+
+npm forced one design choice the single-ecosystem sketch hid: the walker cannot
+hold one global version index, because npm and PyPI resolve versions through
+different clients. A declarer that also indexes its own versions (both
+`WalkSource`s do) is therefore preferred per-ecosystem, and the global index is
+only a fallback. That in turn surfaced a containment subtlety worth recording:
+with presuming on, a declared package is created by identity graph-wide, so if
+root A presumes the same coordinate root B observed, they legitimately share one
+node — dedup, not borrowing, because A presumed it independently from the
+registry. The guarantee that survives is narrower and correct: A's resolution is
+never SWAYED by B's pin. When B has pinned a version A's constraint excludes, A
+presumes its own and the two do not touch.

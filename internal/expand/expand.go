@@ -208,8 +208,10 @@ func NewWalker(declarers ...Declarer) *Walker {
 	return &Walker{declarers: m}
 }
 
-// WithVersionIndex returns a walker that can presume versions and so carry the
-// frontier past the first unversioned layer.
+// WithVersionIndex sets a FALLBACK version index, used only for a declarer that
+// does not index its own versions. A WalkSource that implements VersionIndex
+// itself (both the npm and PyPI ones do) is preferred per-ecosystem, so a
+// multi-ecosystem walk needs no global index at all.
 func (w *Walker) WithVersionIndex(ix VersionIndex) *Walker {
 	cp := *w
 	cp.index = ix
@@ -438,11 +440,19 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 // refused, and why it is honest to label its output rather than assert it.
 func (w *Walker) presume(ctx context.Context, d Declarer, p *pending, opts Options) (version, truth string, candidates int) {
 	pr, canPresume := d.(Presumer)
-	if opts.NoPresume || w.index == nil || !canPresume {
+	// A declarer that also indexes its own versions serves per-ecosystem; the
+	// walker's global index is a fallback for a declarer that does not. This is
+	// what lets one walk span several ecosystems, each with its own client and
+	// its own version grammar, without a shared switch.
+	ix, hasIx := d.(VersionIndex)
+	if !hasIx {
+		ix = w.index
+	}
+	if opts.NoPresume || ix == nil || !canPresume {
 		return "", "", 0 // name-only: no version, and no claim about why
 	}
 
-	all, err := w.index.Versions(ctx, p.eco, p.canonical)
+	all, err := ix.Versions(ctx, p.eco, p.canonical)
 	if err != nil || len(all) == 0 {
 		// Nothing published, or the index could not be read. Either way there
 		// is nothing to presume FROM, which is not the same as a constraint
