@@ -1396,7 +1396,20 @@ installs the LOWEST. Presuming the highest for NuGet would model a restore no
 client performs, so an ecosystem now declares its direction through the optional
 `LowestResolver` interface, and the walk sorts candidates accordingly — highest
 by default, lowest when the declarer says so. The selection is the installer's,
-not the tool's. Cargo also keeps build-dependencies (they
+not the tool's.
+
+RubyGems and Composer completed the set with no engine change — grammar only.
+Their `~>` (Ruby) and `~` (Composer) are the SAME "pessimistic" operator
+(`~> 1.2` and `~1.2` both mean `>=1.2.0 <2.0.0`), distinct from npm's tilde
+(`~1.2` = `<1.3.0`), so `internal/semver` grew one shared `pessimistic` helper
+and two entry points over the existing caret/comparator machinery. RubyGems
+reads runtime dependencies per version from the v2 API (development
+dependencies excluded, like npm devDeps); Composer reads the `require` map from
+the Packagist p2 document (which, like the npm packument and the NuGet
+registration index, carries every version's dependencies in one fetch, so its
+deps client batches by name), filtering platform requirements — php, ext-*,
+lib-* — that name the runtime rather than an installable package. With these
+two, expansion covers every ecosystem depSNORT resolves. Cargo also keeps build-dependencies (they
 run build.rs at compile time — the install-time subgraph's own subject, D-02)
 and drops dev-dependencies, which Cargo never compiles transitively. The other
 three ecosystems expand as each grows its own range grammar; until one does, its

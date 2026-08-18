@@ -331,6 +331,8 @@ func (c comparator) matches(v Version) bool {
 		return cmp >= 0
 	case "=":
 		return cmp == 0
+	case "!=":
+		return cmp != 0
 	}
 	return false
 }
@@ -397,5 +399,156 @@ func parseCargoToken(tok string) ([]comparator, bool) {
 		return xrange(tok) // an explicit wildcard stays a wildcard, not a caret
 	default:
 		return caret(tok) // BARE VERSION IS CARET — the Cargo default
+	}
+}
+
+// pessimistic builds the comparators for a "pessimistic" operator — RubyGems'
+// "~> X" and Composer's "~X", which share one meaning distinct from npm's
+// tilde: the LAST specified component is dropped and the one before it may
+// increase.
+//
+//	~> 1.2    / ~1.2    -> >=1.2.0 <2.0.0   (minor dropped; major may rise)
+//	~> 1.2.3  / ~1.2.3  -> >=1.2.3 <1.3.0   (patch dropped; minor may rise)
+//	~> 1      / ~1      -> >=1.0.0 <2.0.0
+//
+// npm's tilde differs on the two-part case (~1.2 -> <1.3), which is why this is
+// its own helper rather than a reuse of tilde().
+func pessimistic(raw string) ([]comparator, bool) {
+	raw = strings.TrimPrefix(strings.TrimSpace(raw), "v")
+	// A wildcard has no meaning in a pessimistic requirement ("~> 1.x" is not
+	// valid); decline rather than silently reinterpreting it.
+	if strings.ContainsAny(raw, "xX*") {
+		return nil, false
+	}
+	major, minor, patch, hasMinor, hasPatch, ok := splitParts(raw)
+	if !ok {
+		return nil, false
+	}
+	lo := Version{Major: major, Minor: minor, Patch: patch, Valid: true}
+	var hi Version
+	switch {
+	case hasPatch:
+		hi = Version{Major: major, Minor: minor + 1, Valid: true} // drop patch -> minor may rise
+	case hasMinor:
+		hi = Version{Major: major + 1, Valid: true} // drop minor -> major may rise
+	default:
+		hi = Version{Major: major + 1, Valid: true} // ~>1 -> <2
+	}
+	return []comparator{{">=", lo}, {"<", hi}}, true
+}
+
+// SatisfiesRuby evaluates a RubyGems requirement. RubyGems uses "~>" for the
+// pessimistic operator, comma for AND, and treats a bare version as an EXACT
+// match (unlike Cargo's caret default or NuGet's minimum). It also has "!=".
+func SatisfiesRuby(req, version string) (ok, evaluable bool) {
+	v := Parse(version)
+	if !v.Valid {
+		return false, false
+	}
+	req = strings.TrimSpace(req)
+	if req == "" {
+		return !v.IsPrerelease(), true
+	}
+	var set []comparator
+	for _, tok := range strings.Split(req, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		cs, ok := parseRubyToken(tok)
+		if !ok {
+			return false, false
+		}
+		set = append(set, cs...)
+	}
+	return satisfiesSet(v, set), true
+}
+
+func parseRubyToken(tok string) ([]comparator, bool) {
+	switch {
+	case strings.HasPrefix(tok, "~>"):
+		return pessimistic(strings.TrimSpace(tok[2:]))
+	case strings.HasPrefix(tok, ">="):
+		return simple(">=", tok[2:])
+	case strings.HasPrefix(tok, "<="):
+		return simple("<=", tok[2:])
+	case strings.HasPrefix(tok, "!="):
+		return simple("!=", tok[2:])
+	case strings.HasPrefix(tok, ">"):
+		return simple(">", tok[1:])
+	case strings.HasPrefix(tok, "<"):
+		return simple("<", tok[1:])
+	case strings.HasPrefix(tok, "="):
+		return simple("=", tok[1:])
+	default:
+		return simple("=", tok) // bare version is exact
+	}
+}
+
+// SatisfiesComposer evaluates a Composer requirement. Composer is npm-family
+// semver — caret, comparators, "||" OR, space/comma AND, wildcards — but its
+// TILDE is the pessimistic operator, not npm's (~1.2 -> <2.0, not <1.3), and a
+// bare version is exact-or-wildcard. Stability suffixes ("@dev", "-stable")
+// are not part of the range this subset reads and cause a decline.
+func SatisfiesComposer(req, version string) (ok, evaluable bool) {
+	v := Parse(version)
+	if !v.Valid {
+		return false, false
+	}
+	expr := strings.TrimSpace(req)
+	if expr == "" || expr == "*" {
+		return !v.IsPrerelease(), true
+	}
+	for _, alt := range strings.Split(expr, "||") {
+		set, ok := parseComposerSet(alt)
+		if !ok {
+			return false, false
+		}
+		if satisfiesSet(v, set) {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+func parseComposerSet(alt string) ([]comparator, bool) {
+	alt = strings.TrimSpace(alt)
+	if alt == "" || alt == "*" {
+		return nil, true
+	}
+	// Composer accepts both comma and space as AND. Normalize commas to spaces
+	// and split on whitespace.
+	alt = strings.ReplaceAll(alt, ",", " ")
+	var set []comparator
+	for _, tok := range strings.Fields(alt) {
+		cs, ok := parseComposerToken(tok)
+		if !ok {
+			return nil, false
+		}
+		set = append(set, cs...)
+	}
+	return set, true
+}
+
+func parseComposerToken(tok string) ([]comparator, bool) {
+	switch {
+	case strings.HasPrefix(tok, "^"):
+		return caret(tok[1:])
+	case strings.HasPrefix(tok, "~"):
+		return pessimistic(tok[1:]) // Composer tilde IS pessimistic
+	case strings.HasPrefix(tok, ">="):
+		return simple(">=", tok[2:])
+	case strings.HasPrefix(tok, "<="):
+		return simple("<=", tok[2:])
+	case strings.HasPrefix(tok, "!="):
+		return simple("!=", tok[2:])
+	case strings.HasPrefix(tok, ">"):
+		return simple(">", tok[1:])
+	case strings.HasPrefix(tok, "<"):
+		return simple("<", tok[1:])
+	case strings.HasPrefix(tok, "="):
+		return xrange(tok[1:])
+	default:
+		return xrange(tok) // bare version or wildcard
 	}
 }

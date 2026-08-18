@@ -130,3 +130,68 @@ func TestSatisfiesCargo(t *testing.T) {
 		}
 	}
 }
+
+func TestSatisfiesRuby(t *testing.T) {
+	for _, tc := range []struct {
+		req, ver        string
+		want, evaluable bool
+	}{
+		// pessimistic ~>
+		{"~> 1.2", "1.9.0", true, true},
+		{"~> 1.2", "2.0.0", false, true},
+		{"~> 1.2.3", "1.2.9", true, true},
+		{"~> 1.2.3", "1.3.0", false, true},
+		{"~> 1", "1.9.9", true, true},
+		{"~> 1", "2.0.0", false, true},
+		// bare is exact
+		{"1.2.3", "1.2.3", true, true},
+		{"1.2.3", "1.2.4", false, true},
+		// comparators, comma AND, !=
+		{">= 1.2, < 2.0", "1.5.0", true, true},
+		{">= 1.2, < 2.0", "2.0.0", false, true},
+		{"!= 1.2.3", "1.2.3", false, true},
+		{"!= 1.2.3", "1.2.4", true, true},
+		// declines
+		{"~> 1.x", "1.2.0", false, false},
+		{">= notaver", "1.0.0", false, false},
+	} {
+		got, ev := SatisfiesRuby(tc.req, tc.ver)
+		if got != tc.want || ev != tc.evaluable {
+			t.Errorf("SatisfiesRuby(%q,%q) = (%v,%v), want (%v,%v)", tc.req, tc.ver, got, ev, tc.want, tc.evaluable)
+		}
+	}
+}
+
+func TestSatisfiesComposer(t *testing.T) {
+	for _, tc := range []struct {
+		req, ver        string
+		want, evaluable bool
+	}{
+		// caret (npm-like)
+		{"^1.2.3", "1.9.0", true, true},
+		{"^1.2.3", "2.0.0", false, true},
+		// tilde is PESSIMISTIC, differs from npm: ~1.2 -> <2.0
+		{"~1.2", "1.9.0", true, true},
+		{"~1.2", "2.0.0", false, true},
+		{"~1.2.3", "1.2.9", true, true},
+		{"~1.2.3", "1.3.0", false, true},
+		// space and comma AND, || OR
+		{">=1.0 <2.0", "1.5.0", true, true},
+		{">=1.0,<2.0", "1.5.0", true, true},
+		{"^1.0 || ^2.0", "2.5.0", true, true},
+		{"^1.0 || ^2.0", "3.0.0", false, true},
+		// wildcard and exact
+		{"1.2.*", "1.2.7", true, true},
+		{"1.2.*", "1.3.0", false, true},
+		{"1.2.3", "1.2.3", true, true},
+		{"*", "9.9.9", true, true},
+		// declines
+		{"dev-main", "1.0.0", false, false},
+		{"^1.0@dev", "1.0.0", false, false},
+	} {
+		got, ev := SatisfiesComposer(tc.req, tc.ver)
+		if got != tc.want || ev != tc.evaluable {
+			t.Errorf("SatisfiesComposer(%q,%q) = (%v,%v), want (%v,%v)", tc.req, tc.ver, got, ev, tc.want, tc.evaluable)
+		}
+	}
+}

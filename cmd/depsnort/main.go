@@ -800,11 +800,17 @@ func cmdScan(args []string) int {
 			cargoIdx := registry.NewCargo(datasource.NewCache(filepath.Join(*regCacheDir, "cargo"), 24*time.Hour), *offline)
 			nugetDeps := registry.NewNuGetDeps(datasource.NewCache(filepath.Join(*regCacheDir, "nuget-deps"), 24*time.Hour), *offline)
 			nugetIdx := registry.NewNuGet(datasource.NewCache(filepath.Join(*regCacheDir, "nuget"), 24*time.Hour), *offline)
+			gemDeps := registry.NewGemDeps(datasource.NewCache(filepath.Join(*regCacheDir, "gem-deps"), 24*time.Hour), *offline)
+			gemIdx := registry.NewGem(datasource.NewCache(filepath.Join(*regCacheDir, "gem"), 24*time.Hour), *offline)
+			composerDeps := registry.NewComposerDeps(datasource.NewCache(filepath.Join(*regCacheDir, "composer-deps"), 24*time.Hour), *offline)
+			composerIdx := registry.NewComposer(datasource.NewCache(filepath.Join(*regCacheDir, "composer"), 24*time.Hour), *offline)
 			sources := []expand.Declarer{
 				&pypi.WalkSource{Deps: depsClient, Index: pypiIdx},
 				&npm.WalkSource{Reg: npmReg},
 				&cargo.WalkSource{Deps: cargoDeps, Index: cargoIdx},
 				&nuget.WalkSource{Deps: nugetDeps, Index: nugetIdx},
+				&rubygems.WalkSource{Deps: gemDeps, Index: gemIdx},
+				&composer.WalkSource{Deps: composerDeps, Index: composerIdx},
 			}
 			expCov := expandTransitive(g, rootNodes, sources, *expandDepth)
 			if expCov.Stats.Gaps > 0 {
