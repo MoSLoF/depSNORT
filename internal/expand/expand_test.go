@@ -99,9 +99,9 @@ func dump(t *testing.T, g *graph.Graph) {
 	t.Helper()
 	for _, n := range g.SortedNodes() {
 		t.Logf("d%d %-32s truth=%-9s cand=%-3s frontier=%-4s constraint=%q",
-			n.Depth, n.ID, n.Attr[expand.AttrVersionTruth],
-			n.Attr[expand.AttrCandidateCount], n.Attr[expand.AttrFrontier],
-			n.Attr[expand.AttrDeclaredConstraint])
+			n.Depth, n.ID, n.Attr[graph.AttrVersionTruth],
+			n.Attr[graph.AttrVersionCandidates], n.Attr[expand.AttrFrontier],
+			n.Attr[graph.AttrDeclaredConstraint])
 	}
 }
 
@@ -147,17 +147,17 @@ func TestWalksBeyondFaceValue(t *testing.T) {
 	if u == nil {
 		t.Fatal("urllib3 not presumed from the accumulated constraints")
 	}
-	if got := u.Attr[expand.AttrDeclaredConstraint]; got != "<2.0, >=1.21" {
+	if got := u.Attr[graph.AttrDeclaredConstraint]; got != "<2.0, >=1.21" {
 		t.Errorf("constraints = %q, want both parents' accumulated", got)
 	}
-	if u.Attr[expand.AttrCandidateCount] != "1" {
-		t.Errorf("candidates = %q, want 1 — the door was one version wide", u.Attr[expand.AttrCandidateCount])
+	if u.Attr[graph.AttrVersionCandidates] != "1" {
+		t.Errorf("candidates = %q, want 1 — the door was one version wide", u.Attr[graph.AttrVersionCandidates])
 	}
-	if !expand.Presumed(u) {
+	if !u.Presumed() {
 		t.Error("a version this tool chose must not read as observed")
 	}
 	// The pinned node stays a fact.
-	if got := g.Get("pkg:pypi/totallyinnocent@0.11.2").Attr[expand.AttrVersionTruth]; got != expand.TruthObserved {
+	if got := g.Get("pkg:pypi/totallyinnocent@0.11.2").Attr[graph.AttrVersionTruth]; got != graph.TruthObserved {
 		t.Errorf("pinned truth = %q, want observed", got)
 	}
 	// The leaf that genuinely declares nothing is a leaf, not a frontier.
@@ -187,8 +187,8 @@ func TestUnsatisfiableConstraintsAreContestedNotGuessed(t *testing.T) {
 	if n == nil || n.Version != "" {
 		t.Fatalf("want an unversioned contested node, got %+v", n)
 	}
-	if n.Attr[expand.AttrVersionTruth] != expand.TruthContested || res.Contested != 1 {
-		t.Errorf("truth=%q contested=%d", n.Attr[expand.AttrVersionTruth], res.Contested)
+	if n.Attr[graph.AttrVersionTruth] != graph.TruthContested || res.Contested != 1 {
+		t.Errorf("truth=%q contested=%d", n.Attr[graph.AttrVersionTruth], res.Contested)
 	}
 	if n.Attr[expand.AttrFrontier] != "true" {
 		t.Error("a contested node stops the walk and must say so")
@@ -207,7 +207,7 @@ func TestUnevaluableConstraintDoesNotSilentlyExclude(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := g.Get("pkg:pypi/weird")
-	if n == nil || n.Attr[expand.AttrVersionTruth] != expand.TruthContested {
+	if n == nil || n.Attr[graph.AttrVersionTruth] != graph.TruthContested {
 		t.Fatalf("want contested, got %+v", n)
 	}
 }
@@ -247,7 +247,7 @@ func TestDeclarationNeverBorrowsAnotherRootsPin(t *testing.T) {
 		ID: "pkg:pypi/requests@2.31.0", Kind: graph.KindPackage,
 		Ecosystem: "pypi", Name: "requests", Version: "2.31.0", Depth: 1,
 	})
-	pinned.Attr = map[string]string{expand.AttrVersionTruth: expand.TruthObserved}
+	pinned.Attr = map[string]string{graph.AttrVersionTruth: graph.TruthObserved}
 	g.AddEdge(rootB.ID, pinned.ID, graph.EdgeDependsOn)
 
 	if _, err := expand.NewWalker(d).ExpandRoot(context.Background(), g, rootA, expand.Options{}); err != nil {

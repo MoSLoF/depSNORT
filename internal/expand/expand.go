@@ -75,19 +75,6 @@ import (
 // (D-24) and provenance (D-41) keys are: the verdict layer reads them without
 // knowing which registry answered.
 const (
-	// AttrVersionTruth is HOW this node's version is known — one of the
-	// VersionTruth constants. The axis that makes depth safe.
-	AttrVersionTruth = "depsnort.version_truth"
-	// AttrDeclaredConstraint is the accumulated constraint text as upstream
-	// published it (">=2.0", "^1.2", "~> 3.0"), comma-joined when several
-	// parents declared the same package. Recorded verbatim so a reader sees
-	// what was claimed without this tool having interpreted it.
-	AttrDeclaredConstraint = "depsnort.declared_constraint"
-	// AttrCandidateCount is how many published versions satisfied those
-	// constraints — how wide the door was. A presumption over 1 candidate is
-	// nearly a fact; over 60 it is a choice among 60, and a reader deserves to
-	// see which they are looking at.
-	AttrCandidateCount = "depsnort.version_candidates"
 	// AttrDiscoveredBy is the coordinate whose metadata named this package —
 	// the evidence for the node existing at all.
 	AttrDiscoveredBy = "depsnort.discovered_by"
@@ -96,46 +83,6 @@ const (
 	// "we walked the tree" from overclaiming.
 	AttrFrontier = "depsnort.walk_frontier"
 )
-
-// VersionTruth values.
-//
-// # Why this axis exists
-//
-// Before it, every node's version was equally true, so the only honest walk was
-// a shallow one. Grading the claim is what buys depth: a presumed version is
-// worth having in the graph — it is how the layer below gets read at all — and
-// worth being unable to block on.
-const (
-	// TruthObserved: a lockfile recorded this version. A fact about the build.
-	TruthObserved = "observed"
-	// TruthPresumed: the highest published version satisfying the accumulated
-	// constraints, chosen HERE. What an installer would most likely resolve,
-	// not what one was observed to resolve.
-	//
-	// Checks may run against a presumed node and findings may be reported. They
-	// MUST NOT gate. A block on a version nobody observed is a false positive
-	// with a build failure attached, and one of those teaches an operator to
-	// pass -no-expand forever.
-	TruthPresumed = "presumed"
-	// TruthAsserted: an external resolved-graph service supplied it (D-01 named
-	// deps.dev). Someone else's resolution, taken as reported and attributed.
-	TruthAsserted = "asserted"
-	// TruthContested: the accumulated constraints admit no published version,
-	// or could not be evaluated. No version is assigned and the walk stops.
-	// Declining to conclude when the answer is undetermined (the D-40 rule).
-	TruthContested = "contested"
-)
-
-// Presumed reports whether a node's version was chosen by this tool rather than
-// observed. The single predicate the check stage and verdict layer share, so
-// "may this node gate" is defined once — the graph.Verifiable precedent.
-func Presumed(n *graph.Node) bool {
-	if n == nil || n.Attr == nil {
-		return false
-	}
-	t := n.Attr[AttrVersionTruth]
-	return t == TruthPresumed || t == TruthAsserted
-}
 
 // Declaration is one dependency a package declares, unresolved.
 type Declaration struct {
@@ -326,8 +273,8 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 	for _, n := range g.SortedNodes() {
 		if inSubtree[n.ID] && n.Kind == graph.KindPackage && n.Version != "" {
 			frontier = append(frontier, n)
-			if n.Attr[AttrVersionTruth] == "" && n.ID != root.ID {
-				setAttr(n, AttrVersionTruth, TruthObserved)
+			if n.Attr[graph.AttrVersionTruth] == "" && n.ID != root.ID {
+				setAttr(n, graph.AttrVersionTruth, graph.TruthObserved)
 			}
 		}
 	}
@@ -442,17 +389,17 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 					ID: id, Kind: graph.KindPackage, Ecosystem: p.eco,
 					Name: canon, Version: version, Depth: p.depth,
 				})
-				setAttr(child, AttrVersionTruth, truth)
+				setAttr(child, graph.AttrVersionTruth, truth)
 				setAttr(child, AttrDiscoveredBy, p.discoveredBy)
-				setAttr(child, AttrDeclaredConstraint, joinConstraints(p.constraints))
+				setAttr(child, graph.AttrDeclaredConstraint, joinConstraints(p.constraints))
 				if candidates > 0 {
-					setAttr(child, AttrCandidateCount, strconv.Itoa(candidates))
+					setAttr(child, graph.AttrVersionCandidates, strconv.Itoa(candidates))
 				}
 				res.Discovered++
 				switch truth {
-				case TruthPresumed, TruthAsserted:
+				case graph.TruthPresumed, graph.TruthAsserted:
 					res.Presumed++
-				case TruthContested:
+				case graph.TruthContested:
 					res.Contested++
 				}
 			}
@@ -512,7 +459,7 @@ func (w *Walker) presume(ctx context.Context, d Declarer, p *pending, opts Optio
 				// An unevaluable constraint is not a satisfied one and not a
 				// violated one. Guessing either way would be a conclusion drawn
 				// from a grammar this tool does not read.
-				return "", TruthContested, 0
+				return "", graph.TruthContested, 0
 			}
 			if !sat {
 				fits = false
@@ -526,10 +473,10 @@ func (w *Walker) presume(ctx context.Context, d Declarer, p *pending, opts Optio
 	if len(ok) == 0 {
 		// Constraints that admit nothing. Real: two parents pinning
 		// incompatible ranges. The walk does not pick a side.
-		return "", TruthContested, 0
+		return "", graph.TruthContested, 0
 	}
 	sort.Slice(ok, func(i, j int) bool { return pr.CompareVersions(ok[i], ok[j]) > 0 })
-	return ok[0], TruthPresumed, len(ok)
+	return ok[0], graph.TruthPresumed, len(ok)
 }
 
 // reachable returns the node IDs reachable from id over declared edges.

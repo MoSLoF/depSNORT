@@ -156,6 +156,62 @@ func applyRecencyDemotion(findings []finding.Finding) []finding.Finding {
 	return out
 }
 
+// applyPresumedDemotion downgrades every finding on a node whose version this
+// tool chose rather than observed, down to advisory.
+//
+// # Why this is structural and not each check's good behavior
+//
+// The Nth-layer walk reaches past what a manifest recorded by presuming a
+// version — the highest published one satisfying the constraints its dependents
+// declared. That is what an installer would most likely resolve, and it is not
+// what one was observed to resolve. A node built on it may not exist in any
+// real build of this project.
+//
+// Gating on that is the worst trade this tool can make. A block over a version
+// nobody installed is a false positive with a build failure attached, and one
+// of those teaches an operator to disable expansion permanently — costing every
+// true finding the deeper layers would have produced. High recall in the
+// report, high precision at the gate: the D-06 guarantee, applied to a second
+// axis and enforced in the same place, so no future check can opt out of it.
+//
+// # Why block class is demoted here when recency demotion refuses to
+//
+// The two rules rest on different premises, and the difference is the node's
+// existence rather than its severity. Recency demotion applies to a package the
+// lockfile OBSERVED: the release is real, it is installed, and a poisoned one
+// does not become safe with age — so block survives. A presumed node's version
+// was never observed at all, so a block-class finding about it is a confident
+// statement about a coordinate that may not be in the build. Severity cannot
+// rescue a subject that might not be there.
+//
+// The finding is DEMOTED, never dropped. It stays in the report, on the node,
+// with the reason in its evidence — a typosquatted name found four layers down
+// is exactly the signal expansion exists to surface, and silently suppressing it
+// would be the sin D-20 named for caps and D-24 named for coverage.
+func applyPresumedDemotion(g *graph.Graph, findings []finding.Finding) []finding.Finding {
+	out := make([]finding.Finding, len(findings))
+	copy(out, findings)
+	for i := range out {
+		f := &out[i]
+		if f.GateClass == finding.GateAdvisory {
+			continue
+		}
+		n := g.Get(f.NodeID)
+		if n == nil || !n.Presumed() {
+			continue
+		}
+		was := f.GateClass
+		f.GateClass = finding.GateAdvisory
+		note := fmt.Sprintf(" [demoted to advisory from %s: this node's version is %s, not observed in a lockfile",
+			was, n.VersionTruth())
+		if c := n.Attr[graph.AttrVersionCandidates]; c != "" {
+			note += fmt.Sprintf(" (%s candidate versions satisfied %q)", c, n.Attr[graph.AttrDeclaredConstraint])
+		}
+		f.Evidence += note + "]"
+	}
+	return out
+}
+
 // Evaluate attaches findings to their nodes, computes each node's risk state,
 // and derives the exit code, using ONLY the graph's own resolution coverage. It
 // is EvaluateWithCoverage with no scan-level gaps folded in — the right entry
@@ -175,6 +231,10 @@ func Evaluate(g *graph.Graph, findings []finding.Finding, pol Policy) Result {
 func EvaluateWithCoverage(g *graph.Graph, findings []finding.Finding, cov graph.Coverage, pol Policy) Result {
 	// Stale temporal findings lose the right to gate before anything is counted.
 	findings = applyRecencyDemotion(findings)
+	// So do findings about a version this tool presumed rather than observed.
+	// Both run before counting, so the gate-class tallies the report prints are
+	// the classes that actually govern the exit code.
+	findings = applyPresumedDemotion(g, findings)
 
 	res := Result{
 		Coverage: cov,
