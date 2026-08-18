@@ -43,12 +43,20 @@ func TestParseCargoVersionsCapturesPublishedBy(t *testing.T) {
 		t.Error("a null published_by must record no publisher")
 	}
 
-	keys, known := h.PriorPublishers("1.0.2")
-	if !known {
+	prior := h.PriorPublishers("1.0.2")
+	if !prior.Evaluable() {
 		t.Fatal("history with a prior publisher must be evaluable")
 	}
-	if len(keys) != 1 || !keys["99"] {
-		t.Errorf("prior publishers = %v, want {99} (1.0.0 has none)", keys)
+	if len(prior.Keys) != 1 || !prior.Seen("99") {
+		t.Errorf("prior publishers = %v, want {99} (1.0.0 has none)", prior.Keys)
+	}
+	// 1.0.0 carries no published_by, so the history is PARTIAL: this is the
+	// crates.io shape the review flagged, where most releases predate the field.
+	if prior.Complete() {
+		t.Error("a history with an unrecorded prior release must not report complete")
+	}
+	if prior.Unrecorded != 1 {
+		t.Errorf("Unrecorded = %d, want 1", prior.Unrecorded)
 	}
 }
 
@@ -64,7 +72,7 @@ func TestOtherRegistriesRecordNoPublisher(t *testing.T) {
 	if len(gem.Publishers) != 0 {
 		t.Errorf("rubygems recorded publishers %v; the API exposes none", gem.Publishers)
 	}
-	if _, known := gem.PriorPublishers("13.0.6"); known {
-		t.Error("a history with no publisher data must report known=false")
+	if gem.PriorPublishers("13.0.6").Evaluable() {
+		t.Error("a history with no publisher data must not be evaluable")
 	}
 }

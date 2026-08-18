@@ -37,9 +37,46 @@ import (
 // npm and crates.io have releases predating the fields that carry it. Where the
 // prior releases carry no identity, this check produces NOTHING rather than a
 // finding, because "we cannot see who published the earlier versions" cannot
-// support the claim "this publisher is new". That is what
-// ReleaseHistory.PriorPublishers's `known` flag exists to enforce.
+// support the claim "this publisher is new".
+//
+// Between those two states sits a third that used to be treated as the first
+// (finding DS-REV-04): a PARTIALLY recorded history. Given alice / unknown /
+// mallory, the unknown release could have been mallory's, so the evidence
+// supports "mallory is not among the publishers we can see" and nothing
+// stronger. Such a finding is reported with the qualification in its own title
+// and evidence, at reduced confidence, and never gates however it composes —
+// composition multiplies confidence, and there is none here to multiply. On
+// crates.io this is the normal shape rather than an edge case: published_by
+// postdates most releases of most crates.
 type PublisherLineage struct{}
+
+// capSeverity lowers sev to max when it is more severe, and leaves it alone
+// otherwise.
+//
+// Written as an explicit rank rather than a comparison on the Severity values:
+// Severity is a string type, so `sev > finding.SevMedium` compares "high"
+// against "medium" LEXICOGRAPHICALLY and is false — the cap would silently
+// never apply, on the one path whose whole purpose is to weaken a claim.
+func capSeverity(sev, max finding.Severity) finding.Severity {
+	rank := map[finding.Severity]int{
+		finding.SevInfo: 0, finding.SevLow: 1, finding.SevMedium: 2,
+		finding.SevHigh: 3, finding.SevCritical: 4,
+	}
+	if rank[sev] > rank[max] {
+		return max
+	}
+	return sev
+}
+
+// lineageTitle keeps the headline as precise as the evidence behind it. A
+// reader who only sees the title must not come away with a stronger claim than
+// the evidence supports.
+func lineageTitle(version, who string, complete bool) string {
+	if complete {
+		return fmt.Sprintf("%s published by %s, who has not published this package before", version, who)
+	}
+	return fmt.Sprintf("%s published by %s, who is not among this package's recorded publishers", version, who)
+}
 
 // lineageMinDecay is the recency floor, matching VC-004. A first-time publisher
 // whose release is years old is settled history: if it were a takeover, the
@@ -82,11 +119,11 @@ func (PublisherLineage) Run(ctx *check.Context) []finding.Finding {
 		if !ok {
 			continue // this ecosystem or this release records no publisher
 		}
-		prior, known := h.PriorPublishers(n.Version)
-		if !known {
+		prior := h.PriorPublishers(n.Version)
+		if !prior.Evaluable() {
 			continue // no earlier identity to compare against: unevaluable
 		}
-		if prior[pub.Key()] {
+		if prior.Seen(pub.Key()) {
 			continue // this account has shipped this package before
 		}
 
@@ -116,6 +153,30 @@ func (PublisherLineage) Run(ctx *check.Context) []finding.Finding {
 			composed = fmt.Sprintf("; it also ended %s of dormancy", roundDuration(gap))
 		}
 
+		// A PARTIAL prior history cannot carry a definitive claim (finding
+		// DS-REV-04). With gaps in the record, "this publisher is new" may
+		// simply mean the publisher is sitting in one of the gaps: a history of
+		// alice / unknown / mallory supports "mallory is not among the
+		// publishers we can see" and nothing stronger, because the unknown
+		// release could have been mallory's.
+		//
+		// The claim is weakened rather than dropped. It is still worth
+		// surfacing — but it must not gate, however it composes, because
+		// composition multiplies confidence and there is none to multiply.
+		// This is not an edge case: on crates.io most releases of most crates
+		// predate published_by, so partial is the normal shape there.
+		claim := fmt.Sprintf("appears in no earlier release of %s", n.Name)
+		if !prior.Complete() {
+			claim = fmt.Sprintf(
+				"is not among the %d recorded prior publisher(s) of %s, though %d earlier release(s) "+
+					"record no publisher at all — this is a LOWER BOUND, not a first-time-publisher claim",
+				prior.Recorded, n.Name, prior.Unrecorded)
+			gate = finding.GateAdvisory
+			sev = capSeverity(sev, finding.SevMedium)
+			conf *= 0.5
+			composed += "; the prior publisher record is incomplete, so this cannot establish a first release from this account"
+		}
+
 		out = append(out, finding.Finding{
 			CheckID:      "VC-011",
 			Axis:         finding.AxisWeather,
@@ -124,11 +185,10 @@ func (PublisherLineage) Run(ctx *check.Context) []finding.Finding {
 			Confidence:   conf,
 			RecencyDecay: decay,
 			NodeID:       n.ID,
-			Title: fmt.Sprintf("%s published by %s, who has not published this package before",
-				n.Version, pub.Name),
+			Title:        lineageTitle(n.Version, pub.Name, prior.Complete()),
 			Evidence: fmt.Sprintf(
-				"publisher %q (%s, via %s) appears in no earlier release of %s; %d prior publisher(s) on record%s",
-				pub.Name, pub.Key(), pub.Source, n.Name, len(prior), composed),
+				"publisher %q (%s, via %s) %s%s",
+				pub.Name, pub.Key(), pub.Source, claim, composed),
 			Remediation: "confirm the publishing account is a legitimate maintainer and that the release " +
 				"corresponds to reviewed source changes; a first release from a new account is normal, " +
 				"a first release from a new account that also runs code at install time is worth verifying",

@@ -79,30 +79,62 @@ func (h *ReleaseHistory) PublisherAt(version string) (Publisher, bool) {
 	return p, true
 }
 
-// PriorPublishers returns the set of publisher keys seen STRICTLY BEFORE
-// version in the release timeline, along with whether the history was rich
-// enough to answer at all.
+// PriorPublisherSet is what is known about who published the releases BEFORE a
+// given version.
 //
-// The second return value is what keeps VC-011 honest: a package whose earlier
-// releases carry no publisher data cannot support the claim "this publisher is
-// new", and must produce no finding rather than a confident one built on
-// missing data.
-func (h *ReleaseHistory) PriorPublishers(version string) (keys map[string]bool, known bool) {
-	if h == nil || len(h.Publishers) == 0 {
-		return nil, false
+// Recorded and Unrecorded are tracked separately because the difference decides
+// what may be claimed (finding DS-REV-04). "This publisher appears in none of
+// the prior releases we can see" and "this publisher has never published this
+// package" are different statements, and only the second justifies escalating.
+type PriorPublisherSet struct {
+	// Keys is the set of publisher identities observed before the version.
+	Keys map[string]bool
+	// Recorded counts prior releases that carry a publisher identity.
+	Recorded int
+	// Unrecorded counts prior releases that do not. On crates.io this is
+	// routinely most of a package's history — published_by postdates many
+	// releases — so treating it as zero would make the strongest claim exactly
+	// where the evidence is thinnest.
+	Unrecorded int
+}
+
+// Evaluable reports whether any prior publisher is known at all. With none, no
+// statement about this publisher's history can be made.
+func (s PriorPublisherSet) Evaluable() bool { return s.Recorded > 0 }
+
+// Complete reports whether EVERY prior release carries a publisher identity.
+// Only then does "not among the prior publishers" mean "never published this
+// package before".
+func (s PriorPublisherSet) Complete() bool { return s.Recorded > 0 && s.Unrecorded == 0 }
+
+// Seen reports whether key published one of the prior releases.
+func (s PriorPublisherSet) Seen(key string) bool { return s.Keys[key] }
+
+// PriorPublishers returns what is known about publishers of the releases
+// strictly before version.
+//
+// This is what keeps VC-011 honest. A package whose earlier releases carry no
+// publisher data cannot support the claim "this publisher is new" — and a
+// package whose history is PARTIALLY recorded cannot either, because the
+// publisher in question may be sitting in one of the gaps.
+func (h *ReleaseHistory) PriorPublishers(version string) PriorPublisherSet {
+	out := PriorPublisherSet{Keys: map[string]bool{}}
+	if h == nil {
+		return out
 	}
 	idx := h.IndexOf(version)
 	if idx < 0 {
-		return nil, false
+		return out
 	}
-	keys = map[string]bool{}
 	for _, r := range h.Releases[:idx] {
 		if p, ok := h.Publishers[r.Version]; ok && !p.IsZero() {
-			keys[p.Key()] = true
-			known = true
+			out.Keys[p.Key()] = true
+			out.Recorded++
+			continue
 		}
+		out.Unrecorded++
 	}
-	return keys, known
+	return out
 }
 
 // Sort orders releases oldest to newest.

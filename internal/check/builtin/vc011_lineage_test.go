@@ -183,3 +183,86 @@ func TestVC011RecencyDecayIsSet(t *testing.T) {
 			fs[0].RecencyDecay)
 	}
 }
+
+// TestVC011PartialHistoryCannotClaimFirstTime is the DS-REV-04 guard. The
+// history alice / unknown / mallory does NOT support "mallory has never
+// published this package" — the unknown release could have been mallory's.
+func TestVC011PartialHistoryCannotClaimFirstTime(t *testing.T) {
+	h := lineageHistory("alice", "", "mallory")
+	fs := (PublisherLineage{}).Run(lineageCtx(h, versionAt(2), false))
+	if len(fs) != 1 {
+		t.Fatalf("VC-011 findings = %d, want 1", len(fs))
+	}
+	f := fs[0]
+
+	if strings.Contains(f.Title, "has not published this package before") {
+		t.Errorf("title makes an unqualified first-time claim on a partial history: %q", f.Title)
+	}
+	if !strings.Contains(f.Evidence, "LOWER BOUND") {
+		t.Errorf("evidence must state the limitation, got %q", f.Evidence)
+	}
+	if !strings.Contains(f.Evidence, "record no publisher") {
+		t.Errorf("evidence must say how much of the history is missing, got %q", f.Evidence)
+	}
+	if f.GateClass != finding.GateAdvisory {
+		t.Errorf("gate class = %q, want advisory: partial evidence must not gate", f.GateClass)
+	}
+}
+
+// TestVC011PartialHistoryDoesNotGateEvenWithAnInstallHook: composition
+// multiplies confidence, and a partial history has none to multiply. This is
+// the path that would otherwise produce a gate-eligible false positive.
+func TestVC011PartialHistoryDoesNotGateEvenWithAnInstallHook(t *testing.T) {
+	h := lineageHistory("alice", "", "mallory")
+	fs := (PublisherLineage{}).Run(lineageCtx(h, versionAt(2), true))
+	if len(fs) != 1 {
+		t.Fatalf("VC-011 findings = %d, want 1", len(fs))
+	}
+	if fs[0].GateClass != finding.GateAdvisory {
+		t.Errorf("gate class = %q; a partial history must stay advisory however it composes",
+			fs[0].GateClass)
+	}
+	if fs[0].Severity == finding.SevHigh {
+		t.Error("severity must be capped below high when the evidence is a lower bound")
+	}
+	// The composition is still reported — it is real context, just not grounds
+	// to gate.
+	if !strings.Contains(fs[0].Evidence, "install hook") {
+		t.Errorf("evidence should still note the install hook, got %q", fs[0].Evidence)
+	}
+}
+
+// TestVC011CompleteHistoryStillGates: the fix must not neuter the check where
+// the evidence genuinely is complete.
+func TestVC011CompleteHistoryStillGates(t *testing.T) {
+	h := lineageHistory("alice", "alice", "mallory")
+	fs := (PublisherLineage{}).Run(lineageCtx(h, versionAt(2), true))
+	if len(fs) != 1 {
+		t.Fatalf("VC-011 findings = %d, want 1", len(fs))
+	}
+	if fs[0].GateClass != finding.GateEligible || fs[0].Severity != finding.SevHigh {
+		t.Errorf("complete history + install hook: gate=%q severity=%q, want gate-eligible/high",
+			fs[0].GateClass, fs[0].Severity)
+	}
+	if !strings.Contains(fs[0].Title, "has not published this package before") {
+		t.Errorf("a complete history supports the unqualified claim, got %q", fs[0].Title)
+	}
+}
+
+func TestCapSeverity(t *testing.T) {
+	// The reason this helper exists: Severity is a string type, so a naive
+	// `sev > finding.SevMedium` compares "high" against "medium"
+	// lexicographically and never fires.
+	if finding.SevHigh > finding.SevMedium {
+		t.Fatal("assumption changed: SevHigh now sorts after SevMedium as a string")
+	}
+	if got := capSeverity(finding.SevHigh, finding.SevMedium); got != finding.SevMedium {
+		t.Errorf("capSeverity(high, medium) = %q, want medium", got)
+	}
+	if got := capSeverity(finding.SevLow, finding.SevMedium); got != finding.SevLow {
+		t.Errorf("capSeverity(low, medium) = %q, want low unchanged", got)
+	}
+	if got := capSeverity(finding.SevCritical, finding.SevMedium); got != finding.SevMedium {
+		t.Errorf("capSeverity(critical, medium) = %q, want medium", got)
+	}
+}
