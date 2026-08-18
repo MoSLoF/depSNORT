@@ -167,7 +167,7 @@ func resolveV2(g *graph.Graph, lf *lockfile) {
 		if name == "" || pkg.Version == "" {
 			continue
 		}
-		id := purl.NewNpm(name, pkg.Version).String()
+		id := npmNodeID(name, pkg)
 		n := g.AddNode(&graph.Node{
 			ID: id, Ecosystem: "npm", Name: name, Version: pkg.Version,
 			Direct: directNames[name],
@@ -214,7 +214,10 @@ func resolveV2(g *graph.Graph, lf *lockfile) {
 		if fromName == "" || fromVer == "" {
 			continue
 		}
-		fromID := purl.NewNpm(fromName, fromVer).String()
+		fromID := purl.NewNpm(fromName, fromVer).WithSource(classifyResolved(pkg.Resolved)).String()
+		if key == "" {
+			fromID = rootID // the root keeps its bare coordinate
+		}
 		// npm installs the ROOT project's devDependencies, but not those of any
 		// dependency — a package's own devDeps are never installed downstream.
 		// So devDeps produce edges for the root entry only.
@@ -231,7 +234,7 @@ func resolveV2(g *graph.Graph, lf *lockfile) {
 			if depPath, ok := resolveHoisted(lf.Packages, key, dep); ok {
 				dp := lf.Packages[depPath]
 				toName := pkgNameFromKey(depPath, dp.Name)
-				toID := purl.NewNpm(toName, dp.Version).String()
+				toID := npmNodeID(toName, dp)
 				g.AddEdge(fromID, toID, graph.EdgeDependsOn)
 			}
 		}
@@ -456,6 +459,19 @@ func mergeKeys(maps ...map[string]string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// npmNodeID builds the node identity for one lockfile entry, carrying the
+// package's origin when that origin is not a registry (D-42).
+//
+// npm can hold the same name@version twice in one tree — a registry copy
+// hoisted at the top and a git fork nested under a dependency that pinned it.
+// They shared a PURL before this, so the graph kept one node and the entry
+// parsed second overwrote its provenance: a registry package could report as
+// git-sourced, or a fork could be masked as registry and slip past VC-009.
+// The lockfile distinguishes them in `resolved`; now the identity does too.
+func npmNodeID(name string, pkg lockPackage) string {
+	return purl.NewNpm(name, pkg.Version).WithSource(classifyResolved(pkg.Resolved)).String()
 }
 
 // classifyResolved maps a package-lock `resolved` value onto an

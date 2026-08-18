@@ -38,9 +38,14 @@ func TestParsePackumentCapturesPerVersionPublisherAndHooks(t *testing.T) {
 		t.Errorf("Source = %q, want npm._npmUser", p.Source)
 	}
 
-	keys, known := h.PriorPublishers("1.0.2")
-	if !known || len(keys) != 1 || !keys["alice"] {
-		t.Errorf("prior publishers = %v (known=%v), want {alice}", keys, known)
+	prior := h.PriorPublishers("1.0.2")
+	if !prior.Evaluable() || len(prior.Keys) != 1 || !prior.Seen("alice") {
+		t.Errorf("prior publishers = %+v, want {alice}", prior)
+	}
+	// Every prior release carries _npmUser, so the history is COMPLETE and the
+	// first-time-publisher claim is fully supported.
+	if !prior.Complete() {
+		t.Errorf("prior history = %+v, want complete", prior)
 	}
 
 	// Hooks: only install-time names count. A `test` or `build` script is not

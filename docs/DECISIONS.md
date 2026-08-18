@@ -1148,3 +1148,171 @@ mirror would be exactly the warning tax that gets a detector muted.
 PyPI needed no adapter change: a PEP 508 direct reference is already unpinned and
 already degrades coverage through that path, and adding a second signal for the
 same fact would double-count it.
+
+## D-42 — external code validation (post-update): five findings, and what they have in common
+
+An external technical validation of the merged state returned CONDITIONAL FAIL
+with three High-severity correctness defects and two Medium validation gaps. All
+five were reproduced against the code before any of them were fixed, and two of
+the three blockers were mine, introduced with the state-transition work in D-40.
+
+They are worth recording together because four of the five are the same mistake
+in different clothes: **a mechanism that reported success based on whether it
+had DONE something, rather than on whether what it did answered the question.**
+
+**DS-REV-01 — the fallback tier measured presence, not coverage.** The
+compiled-in dataset held 156 advisories, zero of them malicious, and three
+coordinates with no advisories at all. Any hit incremented `FromBundled` and
+suppressed the gap, so an offline scan of a bundled coordinate returned clean,
+exit 0, even under `-fail-on-incomplete`. The tier is documented and gated as
+the offline stand-in for a live VC-001 check; the data could not serve that, and
+the accounting could not tell.
+
+The data was wrong by construction, not by accident. `refresh-bundled-snapshot.sh`
+seeded the dataset by scanning this repo's `realworld` fixtures — real popular
+packages pinned to deliberately VULNERABLE versions — which yields GHSA records
+and can never yield a MAL-* one. The generator's inputs guaranteed the output
+could not do its job, and nothing in the pipeline compared the two.
+
+Both halves are fixed, and both are needed: the accounting now requires a
+malicious advisory before a hit counts as coverage, and the generator now pulls
+MAL-* records from OSV's per-ecosystem exports and fails closed on zero
+malicious records or fewer than two ecosystems. The cap counts COORDINATES
+rather than advisories — capping advisories let NuGet contribute 4411
+coordinates against crates.io's 11, which is not ecosystem diversity.
+
+On freshness, the review asked for an invariant test. A test asserting "newer
+than N days" fails on an untouched repository and must be edited to stay green:
+the hardcoded-date time bomb this project already removed once. Freshness
+remains a runtime disclosure — `BundledDatasetAt` rides every bundled hit and
+the CLI prints its age — and the test guards the field's integrity instead of
+the calendar.
+
+**DS-REV-02 — the Cargo parser discarded the disambiguation Cargo added.**
+Cargo.lock qualifies a dependency with its version precisely when several
+versions are present. The parser kept the name and resolved edges by name, so
+the over-connection happened exactly in the case the qualification exists to
+prevent. Resolution is now most-specific-first and never widens; an ambiguous
+bare name is disclosed through the existing unresolved-coverage keys instead of
+guessed, because a guessed edge is indistinguishable from a real one once it is
+in the graph.
+
+Writing the fixture surfaced a second defect: two entries with the same
+name@version from different sources collapsed into one node whose source class
+was whichever was parsed last. That was first deferred and then closed in the
+same series — see D-43, which also explains why the deferral was the right call
+for about an hour and the wrong one after that.
+
+**DS-REV-03 — "deterministic" is not "correct".** `baseline.Index` kept one
+profile per package by PURL order and my comment called that deterministic. It
+was. It also selected 2.0.0 over 10.0.0, because PURL order is lexicographic —
+and fixing the ordering would not have fixed the defect. When two projects in a
+workspace have legitimately approved different versions, the right profile
+depends on WHICH PROJECT the candidate came from, and no ordering of versions
+answers that. The index now keeps every approved version and VC-010 declines
+when the answer is not determined, visibly: an informational finding, a stderr
+warning at load time, and a coverage entry that can reach exit 3.
+
+**DS-REV-04 — a partial history is not a complete one.** `PriorPublishers`
+returned `known=true` on the first prior identity it found, so alice / unknown /
+mallory supported "mallory has never published this package" — when the unknown
+release could have been mallory's. Measuring live crates.io while building the
+feature, serde carries `published_by` on 142 of 316 versions: partial is the
+normal shape there, so the check made its strongest claim exactly where its
+evidence was thinnest. Three states are now distinguished, and a partial history
+produces a qualified claim at reduced confidence that never gates however it
+composes. Composition multiplies confidence; there was none here to multiply.
+
+**DS-REV-05 — a guard that cannot fail.** Go tooling ignores `testdata`
+directories, so `go test ./...` never ran the adversarial corpus, while the CI
+comment asserted that it did. The companion shell harness counted failures,
+printed a tally, and exited 0 regardless — and two of its seven fixtures had
+been failing that way silently: one had no lockfile so no adapter matched, and
+one scanned clean because of a path defect in the Composer extractor.
+
+That defect is the sharpest thing the review produced indirectly. Paths were
+joined with the scan root before being handed to `securefs`, which joins
+relative paths onto its own root. An absolute scan path was unaffected; a
+relative one was joined twice, escaped, and was refused. `depsnort scan ./path`
+therefore skipped the root project's own manifest while `depsnort scan
+/abs/path` read it and blocked on the cradle inside. The refusal WAS disclosed
+as a coverage gap, which is the only reason this was a lost detection rather
+than a silent all-clear — the coverage model did its job while the analysis did
+not.
+
+The corpus now runs as its own CI step, the harness fails on a missed detection
+or an incomplete tally, and expectations are matched through a subsumption rule
+so a stronger classification satisfies a weaker expectation. Without that, every
+rule tightening breaks the harness and the pressure lands on loosening the rule.
+Both suites are kept: the Go corpus builds graphs in memory and cannot catch a
+fixture that never scans, and the shell harness drives the shipped binary and
+found both fixtures that didn't.
+
+**The common thread, and the standing rule.** Coverage accounting (D-24) is
+already the answer to "did we look?", and D-41 extended it to "could this lookup
+have answered?". These findings extend it once more: a mechanism must be judged
+by what it PROVIDES, not by whether it ran. A dataset that contains records, an
+index that returns a profile, a history that has an entry, a test job that
+executed — each reported success while answering nothing. Where a component
+cannot answer, the honest outputs are a disclosed gap and a refusal to conclude,
+and every one of these fixes is one of those two.
+
+
+## D-43 — a package's origin is part of its identity
+
+D-42 deferred half of DS-REV-02: a registry crate and a git fork of it at the
+same name@version stayed one node, because node identity across this tool is
+the PURL string and a PURL carried no origin. The graph kept whichever entry
+the parser reached first, and the other silently overwrote its provenance. A
+registry package could report as git-sourced; a fork could be masked as
+registry and never reach VC-009 at all. That one attribute decides whether the
+advisory lookup for a package meant anything, so the node was answering a
+question it had no basis to answer — the D-42 pattern, one layer down.
+
+The deferral was correct while three release blockers were open and this was a
+fourth thing to change underneath them. It stopped being correct the moment
+they were closed, because the same defect was then confirmed in npm: a registry
+copy hoisted at the top of a tree and a git fork nested under a dependency that
+pinned it share a name@version, and `resolved` distinguishes them while the
+identity did not. A mechanism that fixes a proven bug in two adapters is not
+follow-up work.
+
+**Non-registry origins are qualified; registry ones are not.** A fork renders as
+`pkg:cargo/name@1.0.0?source=git&source_ref=<origin>`. A registry package keeps
+its bare coordinate, and that asymmetry is the whole design: qualifying registry
+packages would change the identity of essentially every package in every tree —
+breaking transitive dedupe, committed baselines, and IOC ledgers — to fix a case
+that does not exist, because a registry coordinate is already globally unique.
+The blast radius is confined to exactly the packages that had the bug.
+
+Two custom qualifier keys rather than the spec's `vcs_url` and `download_url`:
+one rule ("a non-registry package carries its class, and its origin when the
+lockfile records one") is easier to hold than three keys chosen per class, and
+these strings are internal identity rather than an interop surface.
+
+**What the fuzzer found, immediately.** Giving `?` and `#` meaning in a PURL
+made them structural, and `encodeSegment` did not escape them — so a package
+named `a?source=git` rendered a PURL that parsed back with a FORGED qualifier,
+letting a hostile lockfile mint the identity of a differently-sourced package.
+That is precisely the identity-forging shape D-33 closed for name and version
+segments, reopened by extending the grammar. FuzzParse produced it in under
+twenty seconds, alongside a second bug where unpadded hex made one string
+render two identities on successive passes.
+
+The lesson is narrower than "fuzzing is good": **every time the identity grammar
+gains a character, every encoder that writes into it becomes wrong until proven
+otherwise.** The invariant is not "escape these five characters", it is "no
+value may render structure it does not own", and the fuzz target is what makes
+that invariant enforceable rather than aspirational.
+
+**One consequence, closed in the same change.** Baseline lookup keys on
+ecosystem+name, so a baseline can now hold a registry package and its fork at
+the same name AND version — identical on every field except identity. Lookup
+tries the full PURL first, and a version collision among several candidates
+resolves to nothing rather than to a guess: the same refusal DS-REV-03
+installed, arriving by a new route.
+
+What remains genuinely indistinguishable is two path crates, because Cargo.lock
+records no path for them. They keep the ambiguity disclosure. The rule holds:
+where the lockfile can tell two artifacts apart, so does the identity; where it
+cannot, nothing pretends otherwise.

@@ -57,7 +57,15 @@ type Context struct {
 	// to compare a candidate against a DIFFERENT version of the same package
 	// (Decision D-40). Empty when no -baseline was supplied, in which case the
 	// drift checks do not fire.
-	Baseline map[string]profile.Profile
+	//
+	// The value is every approved version under that key, not one chosen for
+	// the check (finding DS-REV-03). A baseline can legitimately hold several
+	// versions of one package — two projects in a workspace approving
+	// different pins — and picking between them by version order answers a
+	// question nobody asked: the right profile depends on which project the
+	// candidate came from. VC-010 refuses to conclude when the answer is not
+	// determined.
+	Baseline map[string][]profile.Profile
 	// Profiles is the candidate side: one profile per resolved package in this
 	// scan, keyed by PURL. Populated only when a baseline was supplied, since
 	// nothing else reads it.

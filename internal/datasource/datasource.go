@@ -77,14 +77,28 @@ type Stats struct {
 	// a dropped dependency pass as a clean result (Decision D-24).
 	UnparsedEntries int `json:"unparsed_entries,omitempty"`
 	// FromBundled counts coordinates served from a compiled-in fallback
-	// dataset — consulted only when neither the cache nor a live query had an
-	// answer. Tracked separately from FromCache/FromNet so a bundled-sourced
-	// finding is never mistaken for a live or freshly-cached one.
+	// dataset AS MALICIOUS-PACKAGE COVERAGE — consulted only when neither the
+	// cache nor a live query had an answer. Tracked separately from
+	// FromCache/FromNet so a bundled-sourced finding is never mistaken for a
+	// live or freshly-cached one.
+	//
+	// Only entries carrying at least one malicious-package advisory count here
+	// (finding DS-REV-01). The tier is documented as the offline substitute for
+	// a live VC-001 check, so an entry holding only ordinary CVEs has not
+	// answered that question and must not read as though it had.
 	FromBundled int `json:"from_bundled,omitempty"`
+	// BundledNonMalicious counts coordinates the fallback dataset DID hold, but
+	// with no malicious-package advisory. Their CVE context is still returned
+	// and reported; they simply also count as a gap, because nothing checked
+	// them for malware. Tracked separately from Gaps so a report can say which
+	// of the two happened rather than merging "not in the dataset" with "in the
+	// dataset, but not as malware coverage".
+	BundledNonMalicious int `json:"bundled_non_malicious,omitempty"`
 	// BundledDatasetAt is when the compiled-in fallback dataset was
-	// generated. Present only when FromBundled > 0, so a report can disclose
-	// exactly how stale a bundled-sourced answer might be rather than letting
-	// it read as equivalent to a live check (Decision D-24).
+	// generated. Present whenever the dataset was consulted successfully, so a
+	// report can disclose exactly how stale a bundled-sourced answer might be
+	// rather than letting it read as equivalent to a live check (Decision
+	// D-24).
 	BundledDatasetAt *time.Time `json:"bundled_dataset_generated_at,omitempty"`
 }
 

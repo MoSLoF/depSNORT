@@ -653,6 +653,15 @@ func cmdScan(args []string) int {
 			cov.Error = qErr.Error()
 			fmt.Fprintf(os.Stderr, "depsnort: warning: OSV coverage degraded: %v\n", qErr)
 		}
+		// A bundled entry with no malicious-package advisory is disclosed
+		// separately from a real bundled hit: it is present in the dataset but
+		// answered nothing about malware, and it counts as a gap (DS-REV-01).
+		if cov.Stats.BundledNonMalicious > 0 {
+			fmt.Fprintf(os.Stderr,
+				"depsnort: warning: %d coordinate(s) matched the embedded fallback dataset but carry no "+
+					"malicious-package advisory — CVE context only, NOT malicious-package coverage\n",
+				cov.Stats.BundledNonMalicious)
+		}
 		if cov.Stats.FromBundled > 0 {
 			age := ""
 			if cov.Stats.BundledDatasetAt != nil {
@@ -778,6 +787,23 @@ func cmdScan(args []string) int {
 		ctx.Profiles = profileGraph(g, ctx.Releases)
 		fmt.Fprintf(os.Stderr, "depsnort: baseline: %d known-good profile(s) from %s\n",
 			len(base), *baselinePath)
+		// A baseline holding several versions of one package cannot say which
+		// one a candidate should be compared against, so VC-010 will decline
+		// for those packages. Announce it here as well as in the finding: an
+		// operator who expected drift coverage should not have to read the
+		// report to learn part of it was skipped (DS-REV-03).
+		if amb := baseline.AmbiguousKeys(ctx.Baseline); len(amb) > 0 {
+			fmt.Fprintf(os.Stderr,
+				"depsnort: WARNING - %d package(s) appear in the baseline at more than one version "+
+					"(%s); drift is UNEVALUATED for them\n",
+				len(amb), strings.Join(amb, ", "))
+			// Not just a finding: an axis that could not be evaluated is
+			// missing coverage, so it belongs where -fail-on-incomplete can
+			// see it. Same treatment VC-009 gets for unverifiable provenance
+			// (D-41) — name it in the report AND let it reach an exit code.
+			dataSourceGaps = append(dataSourceGaps,
+				fmt.Sprintf("baseline (ambiguous for %d package(s))", len(amb)))
+		}
 	} else {
 		// Not a coverage gap — nothing failed — but never silent either: a scan
 		// that could not have reported drift should not read as one that looked

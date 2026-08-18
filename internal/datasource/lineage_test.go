@@ -49,38 +49,55 @@ func TestPublisherAtRequiresRealData(t *testing.T) {
 	}
 }
 
-// TestPriorPublishersKnownFlag is the guard that keeps the actor axis honest:
-// a package whose earlier releases carry no publisher data cannot support the
-// claim "this publisher is new".
-func TestPriorPublishersKnownFlag(t *testing.T) {
+// TestPriorPublisherCoverageIsThreeStates is the DS-REV-04 guard. "No prior
+// data", "partially recorded", and "fully recorded" are three different
+// evidential positions, and the check that consumes this must be able to tell
+// them apart — the middle one used to be reported as the last one.
+func TestPriorPublisherCoverageIsThreeStates(t *testing.T) {
 	h := history(t, "1.0.0", "1.0.1", "1.0.2")
 
-	if _, known := h.PriorPublishers("1.0.2"); known {
-		t.Error("no publisher data at all must report known=false")
+	// None recorded: nothing can be said.
+	got := h.PriorPublishers("1.0.2")
+	if got.Evaluable() || got.Complete() {
+		t.Errorf("no publisher data: Evaluable=%v Complete=%v, want both false",
+			got.Evaluable(), got.Complete())
 	}
 
-	// Only the CURRENT version has a publisher: nothing to compare against.
+	// Only the current version recorded: still nothing PRIOR to compare with.
 	h.Publishers = map[string]Publisher{"1.0.2": {ID: "mallory"}}
-	if keys, known := h.PriorPublishers("1.0.2"); known || len(keys) != 0 {
-		t.Errorf("keys=%v known=%v; history with no prior publishers must be unevaluable", keys, known)
+	got = h.PriorPublishers("1.0.2")
+	if got.Evaluable() || got.Recorded != 0 || got.Unrecorded != 2 {
+		t.Errorf("got %+v, want no recorded priors and two unrecorded", got)
 	}
 
+	// Partially recorded: evaluable, but NOT complete. This is the case the
+	// review found being treated as conclusive — the unknown 1.0.1 release
+	// could have been mallory's.
 	h.Publishers["1.0.0"] = Publisher{ID: "alice"}
+	got = h.PriorPublishers("1.0.2")
+	if !got.Evaluable() {
+		t.Error("one recorded prior publisher must be evaluable")
+	}
+	if got.Complete() {
+		t.Error("a history with an unrecorded prior release must NOT be complete")
+	}
+	if got.Recorded != 1 || got.Unrecorded != 1 {
+		t.Errorf("got Recorded=%d Unrecorded=%d, want 1 and 1", got.Recorded, got.Unrecorded)
+	}
+	if !got.Seen("alice") || got.Seen("mallory") {
+		t.Errorf("Keys = %v, want just alice", got.Keys)
+	}
+
+	// Fully recorded: only now does "never published before" hold.
 	h.Publishers["1.0.1"] = Publisher{ID: "alice"}
-	keys, known := h.PriorPublishers("1.0.2")
-	if !known {
-		t.Fatal("history with prior publishers must be evaluable")
-	}
-	if len(keys) != 1 || !keys["alice"] {
-		t.Errorf("prior publishers = %v, want {alice}", keys)
-	}
-	if keys["mallory"] {
-		t.Error("the version under test must not be included in its own prior set")
+	got = h.PriorPublishers("1.0.2")
+	if !got.Complete() || got.Unrecorded != 0 {
+		t.Errorf("got %+v, want a complete prior history", got)
 	}
 
 	// A version absent from the timeline cannot be positioned in it.
-	if _, known := h.PriorPublishers("9.9.9"); known {
-		t.Error("an unknown version must report known=false")
+	if got := h.PriorPublishers("9.9.9"); got.Evaluable() {
+		t.Error("an unknown version must not be evaluable")
 	}
 }
 
@@ -94,9 +111,9 @@ func TestPriorPublishersUsesTimelineOrder(t *testing.T) {
 		"1.0.2": {ID: "carol"},
 	}
 	for range 20 {
-		keys, known := h.PriorPublishers("1.0.1")
-		if !known || len(keys) != 1 || !keys["alice"] {
-			t.Fatalf("prior publishers of 1.0.1 = %v (known=%v), want exactly {alice}", keys, known)
+		got := h.PriorPublishers("1.0.1")
+		if !got.Evaluable() || len(got.Keys) != 1 || !got.Seen("alice") {
+			t.Fatalf("prior publishers of 1.0.1 = %+v, want exactly {alice}", got)
 		}
 	}
 }
