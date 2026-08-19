@@ -525,25 +525,37 @@ The CycloneDX SBOM generated from depSNORT's own embedded Go module graph should
 contain an empty `components` array. CI fails if that ever stops being true: a
 supply-chain-safety tool must pass its own audit.
 
-## Workspace scanning
+## Workspace scanning (full-send by default)
 
-`-recursive` treats a path as a workspace root, discovers supported projects
-beneath it, and merges them into one graph with multiple roots.
+A scan treats the path as a workspace root by default: it discovers **every**
+project beneath it — every ecosystem in a directory (a dir with a `yarn.lock` and
+a `Gemfile.lock` scans both), every depth, `dist/` build dirs included — and
+merges them into one graph with multiple roots.
 
 ```
-./depsnort scan -recursive -o ./reports /path/to/repos
-# depsnort: discovered 23 project(s) under /path/to/repos
+./depsnort scan -o ./reports /path/to/repo
+# depsnort: discovered 23 project(s) under /path/to/repo
 ```
 
 PURL identity deduplicates the same package/version across repositories, so one
 flagged dependency exposes its blast radius across the whole workspace instead of
 being rediscovered independently in each project.
 
-Discovery skips `node_modules`, `.git`, `vendor`, `venv`, `site-packages`,
-`target`, and similar (a vendored lockfile is not a project), caps depth at 8, and
-skips unreadable subtrees rather than aborting. Two checkouts declaring the same
-`name@version` merge into a single root, and the run says so explicitly rather
-than leaving an unexplained gap between the discovered count and the root count.
+Discovery prunes `node_modules`, `.git`, `vendor`, `venv`, `site-packages`, and
+similar — installed/vendored copies of already-resolved trees, not projects. It
+**descends `dist/`** (a Docker build context legitimately holds a project's real
+`requirements.txt`/`go.mod`); `target/` and `build/` are pruned by default
+(a built tree keeps a generated copy of the root manifest there) and descended
+only with `-include-build-dirs`. There is no depth bound — a deep monorepo is
+reached in full, protected from directory cycles by identity rather than an
+arbitrary cap — and unreadable subtrees are skipped rather than aborting. Two
+checkouts declaring the same `name@version` merge into a single root, and the run
+says so explicitly rather than leaving an unexplained gap between the discovered
+count and the root count.
+
+`-no-recursive` (alias `-shallow`) restricts a scan to the given directory,
+co-scanning every ecosystem in it but not descending; it then discloses the
+subdirectory projects it did not reach as incomplete coverage.
 
 ## Output formats
 

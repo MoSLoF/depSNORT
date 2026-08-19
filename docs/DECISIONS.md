@@ -2245,3 +2245,60 @@ file as an unread gap would be a spurious note on an already-covered repo — th
 same dedication reasoning applied to a name. A dot-prefixed FILE like
 `.terraform.lock.hcl` is reached because the walk's dot-skip is directory-only;
 file-level classification has no hidden-file filter (regression-tested).
+
+## D-67 — OPU-19..24: full-send is the default scan posture
+
+The scan posture was "one repo, one adapter, shallow, capped": a directory was
+claimed by a single ecosystem, the walk stopped at depth 8, build-output dirs
+were pruned, gap disclosure was capped at 50, and recursion was opt-in. Real
+evidence showed the cost — gitlab lost 3 of 4 ecosystems to one-adapter-per-dir,
+tpotce lost 100% of its coverage to `dist/` pruning, Titanis's disclosure was
+capped at 50 of 127. A single-repo scan now resolves everything present by
+default and discloses only what is genuinely unresolvable.
+
+Six coupled changes, landed together because a re-baseline only stabilizes once
+all are in and two of them are wrong in isolation:
+
+- **OPU-21 co-scan.** `discoverProjects` uses `Registry.DetectAll`, emitting one
+  project root PER ECOSYSTEM per directory. A dir with yarn.lock + Gemfile.lock +
+  Pipfile.lock scans all three. Each adapter still selects its own single
+  manifest, so there is no intra-ecosystem double-count; node-ID dedup collapses
+  shared packages across the merged roots.
+- **OPU-19 build dirs.** `skipDirs` splits into `neverDescend` (node_modules,
+  vendor, venv, site-packages, VCS, tooling caches — installed/vendored copies of
+  already-resolved trees, pruned always) and the descended build dirs. Only
+  `dist/` descends by default: the `DEPSNORT_FULLSEND` probe (run against realistic
+  BUILT trees, since these dirs are normally gitignored) showed `dist/` holds real
+  source (Docker build contexts, tpotce) while `target/` and `build/` hold a
+  generated copy of the root manifest on any built Maven or `cargo package`d tree —
+  a universal double-disclosure. `target/`/`build/` move behind `-include-build-dirs`.
+- **OPU-22 no depth bound.** `maxWalkDepth` is gone — a numeric bound is the same
+  silent-truncation sin as the 50-cap at a different threshold. `filepath.WalkDir`
+  never follows symlinks, so the only residual cycle risk is an exotic bind-mount
+  loop; a per-walk visited (device, inode) set (build-tagged, Unix; no-op
+  elsewhere) bounds that by actual cycles rather than by depth.
+- **OPU-20 no gap cap.** `maxGapProjects` is removed: a repo with 127 unresolved
+  `.csproj` discloses all 127, never a silent "50 of 127". Scanned projects were
+  never capped; only disclosure was.
+- **OPU-23 recursive by default.** `scan` and `baseline create` default to
+  full-send; `-no-recursive`/`-shallow` restricts to the given directory (still
+  co-scanning every ecosystem in it), and a single manifest FILE pointed at
+  directly is always a single target. Baseline discovery mirrors scan exactly, or
+  the first drift report would be the tool disagreeing with itself.
+- **OPU-24 gap reconciliation.** With every ecosystem co-scanned and full depth
+  reached, the old "unscanned-ecosystem … one ecosystem per directory" disclosure
+  is not just dead but WRONG — it reported gem/pypi as dropped in the same run
+  that now scans them (the probe caught this contradiction directly). It is
+  removed. The subdirectory-projects disclosure survives only on the
+  `-no-recursive` path. A "gap" now means exactly one thing: depSNORT recognizes
+  this manifest but has no resolver for it — never "chose a different ecosystem"
+  or "you forgot -recursive."
+
+The two walks (project discovery and gap discovery) share `skipWalkDir`, so they
+cannot disagree about what a scan reaches. What this does NOT do: no new
+resolvers (gemspec `add_dependency`, `.csproj` PackageReference stay disclosed,
+not scanned — the only remaining gaps, and honest structural ones), and no
+bulk/corpus mode (one repo at a time, full-send). Node counts move on real repos
+(gitlab ~2,260 → ~5,350; tpotce 0 → 41); the offline probe measured pure
+discovery/resolution deltas — the CVE surface moves too once the recovered
+ecosystems get live OSV, which the post-merge validation run measures.

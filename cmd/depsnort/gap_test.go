@@ -185,7 +185,7 @@ func TestDiscoverManifestGapsSkipsClaimed(t *testing.T) {
 	writeGapFile(t, filepath.Join(gapDir, "Svc.csproj"), "<Project/>")
 
 	claimed := map[string]bool{filepath.Clean(claimedDir): true}
-	got := discoverManifestGaps(root, claimed)
+	got := discoverManifestGaps(root, claimed, false)
 	if len(got) != 1 || filepath.Clean(got[0].Path) != filepath.Clean(gapDir) {
 		t.Fatalf("discoverManifestGaps = %+v, want only the unclaimed svc dir", got)
 	}
@@ -198,8 +198,9 @@ func writeGapFile(t *testing.T, path, content string) {
 	}
 }
 
-// OPU-12: a default (non-recursive) scan must disclose projects in
-// subdirectories it did not reach, rather than silently under-covering.
+// OPU-24: a --no-recursive scan must disclose projects in subdirectories it did
+// not reach, rather than silently under-covering. (Under the full-send default
+// this function is not consulted; it fires only on the shallow escape hatch.)
 func TestDiscoveryGapsSubdirProjects(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "svcA"), 0o755); err != nil {
@@ -219,48 +220,50 @@ func TestDiscoveryGapsSubdirProjects(t *testing.T) {
 		t.Fatalf("notes = %v, want 2 subdir-project disclosures", notes)
 	}
 	joined := strings.Join(notes, "|")
-	if !strings.Contains(joined, "additional-project") || !strings.Contains(joined, "-recursive") {
-		t.Errorf("subdir disclosure should name additional projects and recommend -recursive: %v", notes)
+	if !strings.Contains(joined, "additional-project") || !strings.Contains(joined, "--no-recursive") {
+		t.Errorf("subdir disclosure should name additional projects and reference --no-recursive: %v", notes)
 	}
 }
 
-// A same-directory polyglot root drops all-but-one ecosystem; the dropped ones
-// must be disclosed in BOTH default and recursive mode.
-func TestDiscoveryGapsSameDirPolyglot(t *testing.T) {
+// OPU-21/OPU-24: a same-directory polyglot root is now CO-SCANNED — every
+// ecosystem resolves — so it must produce ZERO discovery gaps, where the old
+// one-adapter-per-dir rule dropped and disclosed all-but-one.
+func TestDiscoveryGapsPolyglotCoScannedNoGaps(t *testing.T) {
 	dir := t.TempDir()
 	writeGapFile(t, filepath.Join(dir, "package-lock.json"), `{"name":"x","lockfileVersion":3,"packages":{"":{"name":"x"}}}`)
 	writeGapFile(t, filepath.Join(dir, "requirements.txt"), "flask==2.0.1\n")
 	writeGapFile(t, filepath.Join(dir, "go.mod"), "module x\ngo 1.21\n")
 
 	reg := adapterRegistry(true)
-	adapter, err := reg.Detect(dir)
-	if err != nil {
-		t.Fatalf("Detect: %v", err)
+	// DetectAll co-scans all three ecosystems in this one directory.
+	claimants := reg.DetectAll(dir)
+	if len(claimants) != 3 {
+		t.Fatalf("DetectAll = %d ecosystems, want 3 (npm, pypi, gomod)", len(claimants))
 	}
-	scanned := []discovered{{Path: dir, Adapter: adapter}}
-	for _, recursive := range []bool{false, true} {
-		notes := discoveryCoverageGaps(dir, scanned, reg, recursive)
-		var dropped int
-		for _, n := range notes {
-			if strings.Contains(n, "unscanned-ecosystem") {
-				dropped++
-			}
-		}
-		if dropped != 2 {
-			t.Errorf("recursive=%v: dropped-ecosystem disclosures = %d, want 2 (the two non-winning ecosystems)", recursive, dropped)
-		}
+	scanned := make([]discovered, 0, len(claimants))
+	for _, a := range claimants {
+		scanned = append(scanned, discovered{Path: dir, Adapter: a})
+	}
+	// No subdirectories, so a shallow scan of this dir has nothing left to disclose.
+	notes := discoveryCoverageGaps(dir, scanned, reg, false)
+	if len(notes) != 0 {
+		t.Errorf("a co-scanned polyglot dir must produce zero gaps, got %v", notes)
 	}
 }
 
-// A genuine single-project directory with no siblings and no subdir projects
-// must produce no disclosure — no false alarm.
+// A genuine single-project directory with no subdir projects must produce no
+// disclosure — no false alarm.
 func TestDiscoveryGapsSingleProjectQuiet(t *testing.T) {
 	dir := t.TempDir()
 	writeGapFile(t, filepath.Join(dir, "package-lock.json"), `{"name":"x","lockfileVersion":3,"packages":{"":{"name":"x"}}}`)
 
 	reg := adapterRegistry(true)
-	adapter, _ := reg.Detect(dir)
-	notes := discoveryCoverageGaps(dir, []discovered{{Path: dir, Adapter: adapter}}, reg, false)
+	claimants := reg.DetectAll(dir)
+	scanned := make([]discovered, 0, len(claimants))
+	for _, a := range claimants {
+		scanned = append(scanned, discovered{Path: dir, Adapter: a})
+	}
+	notes := discoveryCoverageGaps(dir, scanned, reg, false)
 	if len(notes) != 0 {
 		t.Errorf("a lone single-project directory must produce no disclosure, got %v", notes)
 	}
