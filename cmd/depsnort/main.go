@@ -122,8 +122,10 @@ func usage() {
 	fmt.Fprint(os.Stderr, `depSNORT — an IDS for the dependency supply chain (static, zero-execution)
 
 usage:
-  depsnort scan [flags] [path]     resolve and analyze a project (default path ".")
-                                   with -recursive, a workspace of projects
+  depsnort scan [flags] [path]     resolve and analyze a directory as a workspace:
+                                   every project beneath it, every ecosystem, merged
+                                   into one graph (default path "."; -no-recursive
+                                   scans only the given directory)
   depsnort baseline create [path]  record a known-good profile per package, for
                                    later comparison with scan -baseline
   depsnort checks                  list the registered vector checks
@@ -151,8 +153,12 @@ scan flags:
                            external service, and asserted versions still never gate
   -no-expand               alias for -expand=false: only what the files state
   -no-install-surface      skip static install-hook extraction (VC-002b..e)
-  -recursive               treat the path as a workspace root: discover every
-                           project beneath it and merge into one graph
+  -no-recursive            scan only the given directory, not its subdirectories
+                           (default is full-send: every project beneath the path,
+                           every ecosystem, every depth, dist/ build dirs included)
+  -include-build-dirs      also descend target/ and build/ (dist/ is always
+                           descended); off by default — built trees keep a
+                           generated copy of the root manifest there
   -internal-scopes string  comma-separated internal scopes (VC-007), e.g. @ihbv,@acme
   -internal-names string   comma-separated internal package names (VC-007)
   -ioc string              path to an IOC ledger feed (JSON); enables VC-003 —
@@ -609,7 +615,10 @@ func cmdScan(args []string) int {
 	expandDepth := fs.Int("expand-depth", 0, "stop expansion after N layers (0 = full depth); 1 steps one layer at a time")
 	depsDev := fs.Bool("depsdev", false, "consult deps.dev for real resolved versions before presuming (the asserted tier); opt-in, reaches an external service")
 	noInstallSurface := fs.Bool("no-install-surface", false, "skip static install-hook extraction")
-	recursive := fs.Bool("recursive", false, "treat the path as a workspace root: discover and merge every project beneath it")
+	recursive := fs.Bool("recursive", true, "walk the path as a workspace root: discover and merge every project beneath it (default; full-send)")
+	shallow := fs.Bool("no-recursive", false, "scan only the given directory, not its subdirectories (still co-scans every ecosystem in it)")
+	fs.BoolVar(shallow, "shallow", false, "alias for -no-recursive")
+	includeBuildDirs := fs.Bool("include-build-dirs", false, "also descend target/ and build/ (dist/ is always descended); off by default because built trees keep a generated copy of the root manifest there")
 	internalScopes := fs.String("internal-scopes", "", "comma-separated internal scopes for dependency-confusion (e.g. @ihbv,@acme)")
 	internalNames := fs.String("internal-names", "", "comma-separated internal package names for dependency-confusion")
 	iocPath := fs.String("ioc", "", "path to an IOC ledger feed (JSON); enables VC-003")
@@ -644,16 +653,21 @@ func cmdScan(args []string) int {
 	// a path that exists but carries no supported manifest (nothing to scan,
 	// exit clean). Separating them keeps a CI sweep's empty-but-valid repos from
 	// looking like the operator's typo.
-	if _, statErr := os.Stat(path); statErr != nil {
+	pathInfo, statErr := os.Stat(path)
+	if statErr != nil {
 		fmt.Fprintf(os.Stderr, "depsnort: %v\n", statErr)
 		return exitUsage
 	}
 
-	// -recursive the path is a workspace root and every project beneath it is
-	// discovered and merged into one graph.
+	// Full-send by default (OPU-23): a DIRECTORY is a workspace root and every
+	// project beneath it — every ecosystem, every depth, dist/ build dirs
+	// included — is discovered and merged into one graph. --no-recursive/--shallow
+	// restricts to the given directory, and a single manifest FILE pointed at
+	// directly is always a single target (there is nothing beneath a file to walk).
+	recurse := *recursive && !*shallow && pathInfo.IsDir()
 	var projects []discovered
-	if *recursive {
-		found, err := discoverProjects(path, adapters)
+	if recurse {
+		found, err := discoverProjects(path, adapters, *includeBuildDirs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "depsnort: discovery under %s: %v\n", path, err)
 			return exitInternal
@@ -665,10 +679,10 @@ func cmdScan(args []string) int {
 		for _, p := range found {
 			claimed[filepath.Clean(p.Path)] = true
 		}
-		gaps := discoverManifestGaps(path, claimed)
+		gaps := discoverManifestGaps(path, claimed, *includeBuildDirs)
 		if len(found) == 0 && len(gaps) == 0 {
 			// Nothing to scan is not an internal error and not a risk finding —
-			// a recursive sweep legitimately crosses repos with no supported
+			// a full-send sweep legitimately crosses repos with no supported
 			// ecosystem (Go, C, a docs tree). Exit clean with a loud stderr
 			// note, so a CI gate over many repos is not failed by an empty one.
 			fmt.Fprintf(os.Stderr, "depsnort: no supported projects found under %q (nothing to scan)\n", path)
@@ -680,41 +694,36 @@ func cmdScan(args []string) int {
 			fmt.Fprintf(os.Stderr, " (+%d with a recognized but unresolved manifest, disclosed as incomplete coverage)", len(gaps))
 		}
 		fmt.Fprintln(os.Stderr)
-		// Even a recursive sweep drops all-but-one ecosystem in a same-directory
-		// polyglot root (one adapter per directory); disclose the dropped ones
-		// rather than let them pass unmentioned (OPU-12).
-		if notes := discoveryCoverageGaps(path, found, adapters, true); len(notes) > 0 {
-			projects = append(projects, discovered{Path: path, Adapter: noteAdapter{notes}})
-			fmt.Fprintf(os.Stderr, "depsnort: %d same-directory ecosystem manifest(s) dropped by the one-per-directory rule; disclosed as incomplete coverage\n", len(notes))
-		}
+		// OPU-24: with every ecosystem co-scanned (OPU-21) and full depth reached,
+		// a full-send scan has nothing to disclose at the discovery layer — no
+		// dropped ecosystem, no unreached subtree. The only remaining gaps are the
+		// structural ones already folded in above (recognizedGapManifests).
 	} else {
-		adapter, derr := adapters.Detect(path)
-		if derr == nil {
-			projects = []discovered{{Path: path, Adapter: adapter}}
-		} else if gaps := recognizedGapManifests(path); len(gaps) > 0 {
-			// A recognized manifest no adapter can resolve (a bare .csproj, a
-			// pom.xml) is a real dependency-bearing project. Disclose it as
-			// incomplete coverage rather than the silent "nothing to scan" pass
-			// that is a green checkmark meaning "did not look" (D-59).
-			fmt.Fprintf(os.Stderr, "depsnort: a recognized manifest at %s could not be resolved by any adapter; reporting as incomplete coverage, not a clean pass\n", path)
-			projects = []discovered{{Path: path, Adapter: gapAdapter{gaps}}}
+		// --no-recursive: co-scan every ecosystem in this one directory (OPU-21),
+		// but do not descend. A recognized-but-unresolvable manifest still discloses
+		// as incomplete coverage rather than the silent "nothing to scan" pass (D-59).
+		for _, a := range adapters.DetectAll(path) {
+			projects = append(projects, discovered{Path: path, Adapter: a})
+		}
+		if len(projects) == 0 {
+			if gaps := recognizedGapManifests(path); len(gaps) > 0 {
+				fmt.Fprintf(os.Stderr, "depsnort: a recognized manifest at %s could not be resolved by any adapter; reporting as incomplete coverage, not a clean pass\n", path)
+				projects = []discovered{{Path: path, Adapter: gapAdapter{gaps}}}
+			}
 		}
 
-		// A default scan is single-project and single-ecosystem. Disclose the
-		// dependency surfaces it leaves unscanned — other ecosystems in the same
-		// directory, and projects in subdirectories -recursive would reach — so a
-		// multi-manifest repo cannot pass green while a project or ecosystem is
-		// silently omitted (OPU-12).
-		notes := discoveryCoverageGaps(path, projects, adapters, false)
+		// Disclose the projects in subdirectories this shallow scan did not reach,
+		// so --no-recursive cannot pass green while a subtree project is omitted.
+		notes := discoveryCoverageGaps(path, projects, adapters, *includeBuildDirs)
 		if len(projects) == 0 && len(notes) == 0 {
 			// No supported manifest here and nothing below — genuinely nothing to
 			// scan, not an internal error. Exit clean.
-			fmt.Fprintf(os.Stderr, "depsnort: %v (nothing to scan)\n", derr)
+			fmt.Fprintf(os.Stderr, "depsnort: no supported project at %q (nothing to scan)\n", path)
 			return exitClean
 		}
 		if len(notes) > 0 {
 			projects = append(projects, discovered{Path: path, Adapter: noteAdapter{notes}})
-			fmt.Fprintf(os.Stderr, "depsnort: %d dependency surface(s) present but not scanned (other ecosystems in this directory, and/or subdirectory projects -recursive would reach); disclosed as incomplete coverage — see report\n", len(notes))
+			fmt.Fprintf(os.Stderr, "depsnort: %d subdirectory project(s) present but not scanned under --no-recursive; disclosed as incomplete coverage — drop --no-recursive to scan them\n", len(notes))
 		}
 	}
 

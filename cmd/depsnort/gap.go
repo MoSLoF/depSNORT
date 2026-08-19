@@ -116,11 +116,6 @@ var adapterHandledLocks = map[string]bool{
 	"paket.lock":    true, // nuget (OPU-17)
 }
 
-// maxGapProjects bounds how many unread-manifest directories a recursive sweep
-// discloses, so a large polyglot monorepo does not turn the report into a wall
-// of gap entries. The cap itself is disclosed when hit.
-const maxGapProjects = 50
-
 // unreadManifest names one recognized-but-unresolved manifest and the ecosystem
 // it belongs to.
 type unreadManifest struct {
@@ -176,13 +171,16 @@ func classifyGapManifest(name string) (string, bool) {
 	return "", false
 }
 
-// discoverManifestGaps walks root (like discoverProjects) and returns a gap
-// pseudo-project for every directory carrying a recognized-but-unresolved
-// manifest that was NOT already claimed by a real adapter. Bounded by
-// maxGapProjects.
-func discoverManifestGaps(root string, claimed map[string]bool) []discovered {
+// discoverManifestGaps walks root (mirroring discoverProjects' descent rules)
+// and returns a gap pseudo-project for every directory carrying a
+// recognized-but-unresolved manifest that was NOT already claimed by a real
+// adapter. There is no cap (OPU-20): a repo with 127 unresolved .csproj discloses
+// all 127, never a silent "50 of 127". It shares skipWalkDir with the project
+// walk so the two agree on what a scan reaches (build dirs descended, vendored
+// copies pruned, no depth bound, cycle-guarded).
+func discoverManifestGaps(root string, claimed map[string]bool, includeBuildDirs bool) []discovered {
 	rootClean := filepath.Clean(root)
-	rootDepth := strings.Count(rootClean, string(os.PathSeparator))
+	visited := map[dirIdentity]bool{}
 
 	var out []discovered
 	_ = filepath.WalkDir(rootClean, func(path string, d fs.DirEntry, err error) error {
@@ -195,16 +193,7 @@ func discoverManifestGaps(root string, claimed map[string]bool) []discovered {
 		if !d.IsDir() {
 			return nil
 		}
-		name := d.Name()
-		if path != rootClean {
-			if skipDirs[name] || (strings.HasPrefix(name, ".") && name != ".") {
-				return fs.SkipDir
-			}
-		}
-		if strings.Count(path, string(os.PathSeparator))-rootDepth > maxWalkDepth {
-			return fs.SkipDir
-		}
-		if len(out) >= maxGapProjects {
+		if skipWalkDir(path, rootClean, d, includeBuildDirs, visited) {
 			return fs.SkipDir
 		}
 		if claimed[filepath.Clean(path)] {
@@ -265,45 +254,33 @@ func (a gapAdapter) Resolve(path string) (*graph.Graph, error) {
 	return g, nil
 }
 
-// discoveryCoverageGaps returns disclosure tokens for dependency surfaces a run
-// leaves unscanned but does not otherwise mention (OPU-12): a same-directory
-// polyglot root whose non-winning ecosystems are dropped by the one-adapter-
-// per-dir rule (both modes), and — for a DEFAULT (non-recursive) scan — projects
-// in subdirectories that only `-recursive` would reach. Both are the false-clean
-// class at the discovery layer: a real dependency surface, in scope, silently
-// skipped. `scanned` is the set of real projects this run WILL scan.
-func discoveryCoverageGaps(root string, scanned []discovered, reg *ecosystem.Registry, recursive bool) []string {
+// discoveryCoverageGaps returns disclosure tokens for dependency surfaces a
+// NON-recursive (--no-recursive) scan leaves unscanned: projects in
+// subdirectories a default full-send scan would reach. It is the false-clean
+// class at the discovery layer — a real dependency surface, in scope, silently
+// skipped by the shallow escape hatch.
+//
+// The old same-directory "dropped ecosystem" disclosure is gone (OPU-24): every
+// ecosystem in a directory is now co-scanned (OPU-21), so there is nothing to
+// drop and nothing to disclose. A "gap" now means exactly one thing — depSNORT
+// recognizes a manifest but has no resolver for it — never "chose a different
+// ecosystem" or "you forgot -recursive" on the default path. This is called only
+// on the --no-recursive branch; a full-send (default) scan produces no discovery
+// notes here at all.
+func discoveryCoverageGaps(root string, scanned []discovered, reg *ecosystem.Registry, includeBuildDirs bool) []string {
 	scannedDirs := map[string]bool{}
-	var tokens []string
-
-	// Same-directory dropped ecosystems (both modes): a directory claimed for one
-	// ecosystem may hold manifests for others, which the one-per-dir rule skips.
 	for _, p := range scanned {
 		scannedDirs[filepath.Clean(p.Path)] = true
-		claimants := reg.DetectAll(p.Path)
-		if len(claimants) <= 1 {
+	}
+
+	var tokens []string
+	found, _ := discoverProjects(root, reg, includeBuildDirs)
+	for _, f := range found {
+		if scannedDirs[filepath.Clean(f.Path)] {
 			continue
 		}
-		winner := p.Adapter.Name()
-		for _, a := range claimants {
-			if a.Name() == winner {
-				continue
-			}
-			tokens = append(tokens, "<unscanned-ecosystem: "+a.Name()+" manifest in "+dirLabel(root, p.Path)+" (one ecosystem per directory)>")
-		}
+		tokens = append(tokens, "<additional-project: "+f.Adapter.Name()+" in "+dirLabel(root, f.Path)+" — re-run without --no-recursive>")
 	}
-
-	// Subdirectory projects a default scan never reached; -recursive would.
-	if !recursive {
-		found, _ := discoverProjects(root, reg)
-		for _, f := range found {
-			if scannedDirs[filepath.Clean(f.Path)] {
-				continue
-			}
-			tokens = append(tokens, "<additional-project: "+f.Adapter.Name()+" in "+dirLabel(root, f.Path)+" — re-run with -recursive>")
-		}
-	}
-
 	sort.Strings(tokens)
 	return tokens
 }

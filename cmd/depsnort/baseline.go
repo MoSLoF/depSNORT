@@ -63,7 +63,9 @@ usage:
 
 create flags:
   -o, -out string          baseline file to write (default "depsnort-baseline.json")
-  -recursive               treat the path as a workspace root
+  -no-recursive            record only the given directory (default is full-send:
+                           every project beneath the path, every ecosystem)
+  -include-build-dirs      also descend target/ and build/ (dist/ is always descended)
   -offline                 use only local caches; never touch the network
   -no-registry             skip registry metadata (records no publisher identity)
   -registry-cache string   registry metadata cache directory
@@ -79,7 +81,10 @@ func cmdBaselineCreate(args []string) int {
 	var outPath string
 	fs.StringVar(&outPath, "o", "depsnort-baseline.json", "baseline file to write")
 	fs.StringVar(&outPath, "out", "depsnort-baseline.json", "alias for -o")
-	recursive := fs.Bool("recursive", false, "treat the path as a workspace root")
+	recursive := fs.Bool("recursive", true, "walk the path as a workspace root (default; full-send)")
+	shallow := fs.Bool("no-recursive", false, "record only the given directory, not its subdirectories")
+	fs.BoolVar(shallow, "shallow", false, "alias for -no-recursive")
+	includeBuildDirs := fs.Bool("include-build-dirs", false, "also descend target/ and build/ (dist/ is always descended)")
 	offline := fs.Bool("offline", false, "use only local caches; never touch the network")
 	noRegistry := fs.Bool("no-registry", false, "skip registry metadata (records no publisher identity)")
 	regCacheDir := fs.String("registry-cache", defaultCacheDir("registry"), "registry metadata cache directory")
@@ -94,9 +99,13 @@ func cmdBaselineCreate(args []string) int {
 
 	adapters := adapterRegistry(*offline)
 
+	// A baseline must be discovered by exactly the pipeline a later scan uses, or
+	// the first drift report would be an artifact of the tool disagreeing with
+	// itself. So this mirrors scan: full-send by default (OPU-23), co-scanning
+	// every ecosystem (OPU-21).
 	var projects []discovered
-	if *recursive {
-		found, err := discoverProjects(path, adapters)
+	if *recursive && !*shallow {
+		found, err := discoverProjects(path, adapters, *includeBuildDirs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "depsnort: discovery under %s: %v\n", path, err)
 			return exitInternal
@@ -107,12 +116,14 @@ func cmdBaselineCreate(args []string) int {
 		}
 		projects = found
 	} else {
-		adapter, err := adapters.Detect(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "depsnort: %v\n", err)
+		projects = nil
+		for _, a := range adapters.DetectAll(path) {
+			projects = append(projects, discovered{Path: path, Adapter: a})
+		}
+		if len(projects) == 0 {
+			fmt.Fprintf(os.Stderr, "depsnort: no supported project at %q\n", path)
 			return exitInternal
 		}
-		projects = []discovered{{Path: path, Adapter: adapter}}
 	}
 
 	pass := resolveProjects(projects, !*noInstallSurface)
