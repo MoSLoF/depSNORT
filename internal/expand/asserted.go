@@ -86,6 +86,12 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		return out, nil
 	}
 
+	// Depth by shortest path from the resolved root (index 0), so an asserted node
+	// ladders from the dependency it was resolved under rather than defaulting to
+	// 0 — a depth-0 transitive node reads as a project root and corrupts every
+	// check keyed on depth or direct-ness (the OPU-04 failure, one tier down).
+	depthOf := assertedDepths(rg, root.Depth)
+
 	// Map each resolved node index to a graph node ID. Index 0 is the root,
 	// which already exists as an observed node; do not re-add or re-version it.
 	ids := make([]string, len(rg.Nodes))
@@ -115,7 +121,7 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		}
 		child := g.AddNode(&graph.Node{
 			ID: ids[i], Kind: graph.KindPackage, Ecosystem: n.Ecosystem,
-			Name: n.Name, Version: n.Version,
+			Name: n.Name, Version: n.Version, Depth: depthOf[i],
 		})
 		setAttr(child, graph.AttrVersionTruth, graph.TruthAsserted)
 		setAttr(child, AttrAssertedBy, r.Name())
@@ -132,6 +138,45 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		g.AddEdge(ids[e.From], ids[e.To], graph.EdgeDependsOn)
 	}
 	return out, nil
+}
+
+// assertedDepths returns, per resolved-node index, its depth as the shortest
+// number of dependency edges from the resolved root (index 0), offset by
+// rootDepth — the depth of the coordinate the resolver was queried about. A node
+// the edges never reach (a disconnected entry a resolver can legitimately
+// return) falls back to rootDepth+1, one layer below the root, rather than 0.
+func assertedDepths(rg ResolvedGraph, rootDepth int) []int {
+	depth := make([]int, len(rg.Nodes))
+	for i := range depth {
+		depth[i] = -1
+	}
+	adj := map[int][]int{}
+	for _, e := range rg.Edges {
+		if e.From >= 0 && e.From < len(rg.Nodes) && e.To >= 0 && e.To < len(rg.Nodes) {
+			adj[e.From] = append(adj[e.From], e.To)
+		}
+	}
+	if len(rg.Nodes) > 0 {
+		depth[0] = 0
+		queue := []int{0}
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			for _, to := range adj[cur] {
+				if depth[to] == -1 {
+					depth[to] = depth[cur] + 1
+					queue = append(queue, to)
+				}
+			}
+		}
+	}
+	for i := range depth {
+		if depth[i] < 0 {
+			depth[i] = 1 // unreachable from the root: place one layer below it
+		}
+		depth[i] += rootDepth
+	}
+	return depth
 }
 
 // AttrAssertedBy names the resolver that supplied an asserted node's version, so

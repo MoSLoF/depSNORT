@@ -175,6 +175,14 @@ type Options struct {
 	// Presumer are available — the strictest posture, for an operator who wants
 	// nothing in the graph that a file did not state.
 	NoPresume bool
+	// Resolver, when set, supplies the asserted tier (deps.dev). It is queried
+	// per registry-queryable DIRECT dependency once that dependency has a
+	// coordinate — observed from a lockfile, or the version the seed phase
+	// presumes for a manifest-declared dep. It is never handed the local project
+	// root, which has no registry coordinate; that mis-target is what left the
+	// tier unreachable (OPU-06). A resolved dependency's whole subtree is merged
+	// as asserted and closed, so the presume walk never re-derives it.
+	Resolver Resolver
 }
 
 const defaultMaxDepth = 8
@@ -187,6 +195,10 @@ type Result struct {
 	// Presumed is how many of those carry a version this tool chose. The number
 	// that bounds what the scan may claim.
 	Presumed int `json:"presumed"`
+	// Asserted is how many nodes were added with a version a resolver (deps.dev)
+	// supplied, rather than one this tool presumed. Disjoint from Discovered so
+	// the two tiers are counted, and reported, separately.
+	Asserted int `json:"asserted"`
 	// Contested is how many had constraints admitting no version, or none that
 	// could be evaluated.
 	Contested int `json:"contested"`
@@ -363,6 +375,17 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 				res.Frontier++
 			}
 		}
+	}
+
+	// Asserted tier (D-44, OPU-06): every direct dependency now has a coordinate —
+	// observed from a lockfile, or presumed just above for a manifest-declared
+	// dep. Hand each registry-queryable one to the resolver; its concrete
+	// transitive graph is merged as asserted and the dependency is closed, so the
+	// presume walk below never re-derives what the resolver already resolved. The
+	// local project root is never handed to the resolver — it has no registry
+	// coordinate, and doing so is exactly what kept this tier from ever firing.
+	if opts.Resolver != nil {
+		w.assertDirectSubtrees(ctx, g, root, opts.Resolver, byName, inSubtree, expanded, &res)
 	}
 
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
@@ -598,6 +621,83 @@ func (w *Walker) presume(ctx context.Context, d Declarer, p *pending, opts Optio
 func registryQueryable(n *graph.Node) bool {
 	class, _ := n.SourceOf()
 	return class == graph.SourceRegistry || class == graph.SourceUnknown
+}
+
+// assertDirectSubtrees resolves each registry-queryable DIRECT dependency of the
+// root through the resolver and merges the concrete transitive graph it returns
+// as asserted nodes. A dependency the resolver answers for is then closed —
+// marked expanded so the presume walk does not re-derive its subtree with a
+// weaker claim — and its new nodes are folded into the walk's containment
+// (inSubtree) and dedupe (byName) index so a sibling that shares one links to it
+// rather than presuming a second copy.
+//
+// It is deliberately handed the direct dependencies, not the project root: the
+// root is the operator's own local project (path origin, D-41), which has no
+// registry coordinate the resolver could ever answer for. Aiming the resolver at
+// the root instead of its deps is what made the asserted tier a no-op (OPU-06).
+func (w *Walker) assertDirectSubtrees(ctx context.Context, g *graph.Graph, root *graph.Node, r Resolver,
+	byName map[string]*graph.Node, inSubtree, expanded map[string]bool, res *Result) {
+
+	var deps []*graph.Node
+	seen := map[string]bool{}
+	for _, root0 := range rootsOf(g, root) {
+		for _, id := range directDepIDs(g, root0.ID) {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			n := g.Get(id)
+			if n == nil || n.Kind != graph.KindPackage || n.Version == "" || !registryQueryable(n) {
+				continue
+			}
+			// Already resolved by a lockfile or an earlier assert — nothing to add.
+			if n.VersionTruth() == graph.TruthAsserted {
+				continue
+			}
+			deps = append(deps, n)
+		}
+	}
+	sort.Slice(deps, func(i, j int) bool { return deps[i].ID < deps[j].ID }) // determinism (D-13)
+
+	for _, dep := range deps {
+		ar, err := w.AssertRoot(ctx, g, dep, r)
+		if err != nil || !ar.Resolved || ar.Asserted == 0 {
+			continue
+		}
+		res.Asserted += ar.Asserted
+		// The resolver returned dep's COMPLETE subtree; do not presume beneath it.
+		expanded[dep.ID] = true
+		// Fold the freshly-asserted nodes into this walk's view so later frontier
+		// links resolve to them. Observed/presumed nodes already indexed win —
+		// only fill a name that has no node yet (asserted is the weaker claim).
+		for id := range reachable(g, dep.ID) {
+			inSubtree[id] = true
+			cn := g.Get(id)
+			if cn == nil || cn.Kind != graph.KindPackage {
+				continue
+			}
+			d := w.declarers[cn.Ecosystem]
+			if d == nil {
+				continue
+			}
+			if _, canon := d.Identify(cn.Name, cn.Version); canon != "" {
+				if _, ok := byName[cn.Ecosystem+"|"+canon]; !ok {
+					byName[cn.Ecosystem+"|"+canon] = cn
+				}
+			}
+		}
+	}
+}
+
+// directDepIDs returns the ids a node depends on directly, in graph edge order.
+func directDepIDs(g *graph.Graph, id string) []string {
+	var out []string
+	for _, e := range g.SortedEdges() {
+		if e.Type == graph.EdgeDependsOn && e.From == id {
+			out = append(out, e.To)
+		}
+	}
+	return out
 }
 
 // rootsOf returns the seed roots for a single ExpandRoot call. Today that is the

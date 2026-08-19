@@ -1744,3 +1744,37 @@ and does not reach `cli-table3` precisely because the successor is not yet
 corpus-listed — which is why the shape-based rule, not a data addition, is the
 generalizing fix. Regression: `cli-table3`/`cli-table2`/`cli-table-9` stay
 silent while `cli-tabel` still fires, pinning the boundary in both directions.
+
+## D-52 — the asserted tier is aimed at direct dependencies, not the root
+
+A live-fire scan found the deps.dev `asserted` tier never fired: every run
+reported `0 asserted`, and every transitive node fell through to `presumed`,
+even when deps.dev held the exact resolved graph. The cause was a mis-targeted
+call. `expandTransitive` invoked `AssertRoot` on each project **root**, and
+`AssertRoot` guards on the coordinate being registry-queryable — but the root is
+the operator's own local project (path origin, D-41), which never is. So the
+resolver was asked about a coordinate it could not answer, returned immediately,
+and the presume walk labelled the whole tree. The merge logic was correct; it
+was only ever handed the one node no resolver can resolve.
+
+The fix moves the resolver into the walk (`Options.Resolver`) and aims it where
+a coordinate exists: each root's registry-queryable **direct dependencies**,
+after the seed phase has given every manifest-declared dep a presumed version
+(or a lockfile has given it an observed one). A resolved dependency's whole
+transitive graph is merged as asserted and the dependency is **closed** — marked
+expanded, its nodes folded into the walk's containment and dedupe index — so the
+presume walk never re-derives beneath it. A dependency deps.dev has no record of
+simply stays on the presume path, unchanged. The project root is still walked
+for its direct deps; it is just never the thing handed to the resolver.
+
+Two correctness details rode along. Asserted nodes now ladder: `AssertRoot`
+assigns depth by shortest path from the resolved coordinate (offset by that
+coordinate's own depth), where before it left every asserted node at depth 0 —
+a depth-0 transitive node reads as a project root, the OPU-04 failure one tier
+down, and it had gone unnoticed only because the tier never fired. And the
+asserted and presumed counts stay disjoint in `Result`, so the report attributes
+each tier honestly. Regression: a path-origin manifest root declaring one
+registry dependency, a stub resolver returning that dependency's subtree, and
+assertions that the resolver is never handed the root, that the children come
+back `version_truth = asserted` with `asserted_by` attribution at the right
+depth, and that no presumed duplicate is created beneath the closed subtree.
