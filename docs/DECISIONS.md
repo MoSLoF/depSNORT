@@ -1452,3 +1452,20 @@ that findings on them are advisory. Cypher promotes `version_truth` to a
 queryable property. The rule is one line across all five: an observed node is a
 fact from a lockfile and a presumed one is this tool's best guess, and they must
 never look the same.
+
+**A conformance suite, so the seam stays honest.** With all six ecosystems
+expanding through the same three-method contract, the risk is the D-15 pattern
+at scale: a contract kept in five sources and missed in the sixth. One
+table-driven suite (`internal/ecosystem/conformance`) now runs every WalkSource
+through the invariants the engine relies on but cannot enforce, because they
+live in per-ecosystem code — identity normalization folds what must fold and
+separates what must not (BOTH the PURL and the canonical name the walk keys its
+match map on), an unreadable range declines rather than silently answering,
+version ordering is a strict total order consistent with a known ascending list,
+and the resolution direction matches the ecosystem's declared lowest/highest. It
+runs offline over the pure methods (no registry clients), and a coverage test
+fails if an ecosystem is wired into the CLI without a conformance case. Writing
+it caught one latent gap: the canonical-name half of PyPI's folding was
+untested, and `purl.NewPyPI` normalizing downstream had been masking it — a
+node identity that folded while the match key did not would silently under-dedupe
+exactly the way D-15 warned.
