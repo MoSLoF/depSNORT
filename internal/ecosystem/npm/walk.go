@@ -2,6 +2,7 @@ package npm
 
 import (
 	"context"
+	"strings"
 
 	"ihbv.io/depsnort/internal/datasource"
 	"ihbv.io/depsnort/internal/datasource/npmreg"
@@ -54,9 +55,10 @@ func (w *WalkSource) Declared(ctx context.Context, coords []datasource.Coord) (m
 			if r.Name == "" {
 				continue
 			}
+			name, constraint := resolveNpmAlias(r.Name, r.Range)
 			decls = append(decls, expand.Declaration{
-				Name:       r.Name,
-				Constraint: r.Range,
+				Name:       name,
+				Constraint: constraint,
 				Optional:   r.Optional,
 			})
 		}
@@ -103,3 +105,24 @@ var (
 	_ expand.VersionIndex = (*WalkSource)(nil)
 	_ expand.Presumer     = (*WalkSource)(nil)
 )
+
+// resolveNpmAlias handles npm's alias protocol: a dependency declared as
+// "some-name": "npm:real-package@^1.2.0" installs real-package under the local
+// alias some-name. The version to resolve belongs to the TARGET, not the alias,
+// so the walk must presume against real-package@^1.2.0 — resolving the alias
+// name against the registry finds a different package or nothing, which is why
+// an unhandled alias landed as "contested" in the field trial. Returns the
+// (name, constraint) to actually resolve; a non-alias range passes through.
+func resolveNpmAlias(declaredName, rng string) (name, constraint string) {
+	if !strings.HasPrefix(rng, "npm:") {
+		return declaredName, rng
+	}
+	spec := strings.TrimPrefix(rng, "npm:")
+	// The target is "name@range" or "@scope/name@range": the range follows the
+	// LAST "@" that is not the scope's leading one.
+	at := strings.LastIndex(spec, "@")
+	if at <= 0 { // no range, or "@scope" only -> alias to the whole package, any version
+		return strings.TrimSuffix(spec, "@"), ""
+	}
+	return spec[:at], spec[at+1:]
+}

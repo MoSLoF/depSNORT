@@ -1492,3 +1492,53 @@ answer is A build's fact, not THIS build's, so verdict demotes it exactly as it
 does presumed. The emitters distinguish all four states now — JSON/Cypher carry
 the raw `version_truth`, SARIF tags the finding, DOT labels the node, and the
 PDF marks an asserted version `+`, a presumed one `~`, a contested one `?`.
+
+## D-45 — trial by fire: four repos, four fixes before the PR
+
+Before opening the PR, the expansion work was run against four real repositories
+(two multi-ecosystem workspaces, two Python projects). All four scanned to
+completion with clean exits and correct coverage disclosure — the robustness bar
+held, including graceful degradation when OSV, deps.dev, and most registries were
+blocked by network policy. But the trial exposed four real defects, three of them
+in exactly the case the feature exists for, and all four are fixed here.
+
+**The manifest-only case was the whole point, and expansion missed it.** A
+project with no lockfile — an unpinned requirements.txt, or a pyproject.toml
+declaring PEP 621 / Poetry dependencies — is the most common thing a user points
+this tool at, and expansion discovered nothing for it. The walk sourced its
+declarations from the registry's per-version dependency metadata, which a LOCAL
+root has no coordinate for, so a project's own direct deps were recorded as an
+`unresolved` disclosure string and never presumed. Two halves:
+
+  - Adapters now record declared-but-unpinned direct deps WITH their constraints
+    on `graph.AttrDeclaredDeps` (name + constraint, no version), and expansion
+    has a seed phase that presumes a version for each before the frontier walk —
+    the declarations come from the local file, so they ride on the node rather
+    than being fetched. On the trial repos this turned "1 node, 49 stranded
+    names" into 115 nodes (113 presumed) and "no supported projects found" into
+    26 nodes.
+  - The PyPI adapter now reads pyproject.toml as a resolvable manifest (PEP 621
+    `[project].dependencies` and Poetry `[tool.poetry.dependencies]`,
+    line-scanned per D-10, no TOML dependency), gated so a pyproject that only
+    configures a build backend is not claimed as a project. A Poetry/PEP 621
+    project with no requirements.txt used to resolve to nothing.
+
+**Cargo picked the wrong roots.** The adapter assumed the first `[[package]]` in
+Cargo.lock was the project — but Cargo.lock is alphabetical, so it crowned
+whatever sorted first (adler2, android_system_properties). Roots are now the
+source-less crates (workspace members / local project) with no incoming edge,
+excluding collision-marked duplicates; a registry crate always has a source and
+is never a root. A root keeps the bare coordinate (it is the scan's subject, not
+a dependency to verify) via a new `graph.RenameNode`, while its path provenance
+stays on the source_class attr. Depth is now a multi-root shortest-distance BFS.
+
+**npm alias deps declined when they should resolve.** A dependency declared as
+`"string-width-cjs": "npm:string-width@^4.2.0"` (the npm alias protocol) landed
+as contested, because the walk resolved the alias name against the registry
+instead of the target. The npm walk now unwraps `npm:target@range` to resolve
+the real package. Contested alias nodes went to zero on the trial repos.
+
+The lesson the log should keep: the feature worked cleanly on lockfile'd trees —
+the case that is easy to test with fixtures — and failed on the manifest-only
+case that a real repository actually presents. Fixtures proved the machinery;
+the trial proved the product.

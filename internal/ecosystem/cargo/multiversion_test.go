@@ -251,6 +251,10 @@ func TestTopologyDigestReflectsTheCorrectEdges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
+	// The workspace root is a source-less crate, so it carries the ?source=path
+	// qualifier every local crate gets; its provenance also rides on the
+	// source_class attr. (It is selected as a root by being source-less with no
+	// incoming edge — not by being Cargo.lock's alphabetically-first entry.)
 	app := g.Get("pkg:cargo/app@0.1.0")
 	if app == nil {
 		t.Fatal("app node missing")

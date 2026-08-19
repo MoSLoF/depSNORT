@@ -412,3 +412,56 @@ func TestSelectionDirectionIsPerEcosystem(t *testing.T) {
 		t.Error("lowest-wins ecosystem wrongly took the newest")
 	}
 }
+
+// The manifest-only case the trial exposed: a root that declares direct deps
+// with constraints but no lockfile pinned them (unpinned requirements.txt,
+// pyproject [project]). The adapter records them on the root; expansion must
+// presume versions and walk from them. Before the seed phase this discovered
+// nothing.
+func TestSeedsFromManifestDeclaredDeps(t *testing.T) {
+	d := &fakePyPI{
+		table: map[string][]expand.Declaration{
+			"pypi|fastapi|0.110.0": {{Name: "starlette", Constraint: ">=0.36"}},
+		},
+		versions: map[string][]string{
+			"fastapi":   {"0.100.0", "0.110.0"},
+			"starlette": {"0.36.0", "0.37.0"},
+		},
+	}
+	g := graph.New()
+	// A manifest-only root: versioned (the project itself) but its deps are only
+	// declared, not pinned — recorded in AttrDeclaredDeps, no child nodes.
+	root := g.AddNode(&graph.Node{
+		ID: "pkg:pypi/app@0.0.0", Kind: graph.KindPackage, Ecosystem: "pypi",
+		Name: "app", Version: "0.0.0",
+		Attr: map[string]string{
+			graph.AttrDeclaredDeps: graph.EncodeDeclaredDeps([]graph.DeclaredDep{
+				{Name: "fastapi", Constraint: ">=0.100"},
+			}),
+		},
+	})
+	g.MarkRoot(root.ID)
+
+	res, err := expand.NewWalker(d).WithVersionIndex(d).
+		ExpandRoot(context.Background(), g, root, expand.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range g.SortedNodes() {
+		t.Logf("d%d %-28s truth=%s", n.Depth, n.ID, n.VersionTruth())
+	}
+	// fastapi presumed to highest satisfying >=0.100, then its own dep walked.
+	fa := g.Get("pkg:pypi/fastapi@0.110.0")
+	if fa == nil {
+		t.Fatal("declared dep fastapi was not seeded and presumed")
+	}
+	if !fa.Presumed() || fa.Depth != 1 || !fa.Direct {
+		t.Errorf("fastapi node wrong: presumed=%v depth=%d direct=%v", fa.Presumed(), fa.Depth, fa.Direct)
+	}
+	if g.Get("pkg:pypi/starlette@0.37.0") == nil {
+		t.Error("transitive dep of a seeded declared dep was not walked (depth 2 not reached)")
+	}
+	if res.Discovered < 2 {
+		t.Errorf("discovered = %d, want >= 2 (fastapi + starlette)", res.Discovered)
+	}
+}

@@ -300,6 +300,71 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		}
 	}
 
+	// Seed phase: a manifest-only root (unpinned requirements.txt, pyproject
+	// [project]) declares direct dependencies the lockfile never pinned, so they
+	// are not yet nodes and the registry has no record of the LOCAL root to ask.
+	// The adapter recorded them on the root (graph.AttrDeclaredDeps); presume a
+	// version for each here, creating a depth-1 node that then enters the walk.
+	// This is the case transitive expansion exists for and the frontier-only
+	// walk missed: without it, an unpinned project expands nothing.
+	for _, root0 := range rootsOf(g, root) {
+		d := w.declarers[root0.Ecosystem]
+		if d == nil {
+			continue
+		}
+		for _, dd := range root0.DeclaredDepsOf() {
+			_, canon := d.Identify(dd.Name, "")
+			if canon == "" {
+				continue
+			}
+			mk := root0.Ecosystem + "|" + canon
+			if byName[mk] != nil {
+				g.AddEdge(root0.ID, byName[mk].ID, graph.EdgeDependsOn)
+				continue
+			}
+			p := &pending{eco: root0.Ecosystem, canonical: canon, parents: []string{root0.ID}, depth: root0.Depth + 1}
+			if dd.Constraint != "" {
+				p.constraints = []string{dd.Constraint}
+			}
+			version, truth, candidates := w.presume(ctx, d, p, opts)
+			id, cn := d.Identify(canon, version)
+			if id == "" {
+				continue
+			}
+			child := g.Get(id)
+			if child == nil {
+				child = g.AddNode(&graph.Node{
+					ID: id, Kind: graph.KindPackage, Ecosystem: root0.Ecosystem,
+					Name: cn, Version: version, Direct: true, Depth: root0.Depth + 1,
+				})
+				setAttr(child, graph.AttrVersionTruth, truth)
+				setAttr(child, graph.AttrDeclaredConstraint, dd.Constraint)
+				if candidates > 0 {
+					setAttr(child, graph.AttrVersionCandidates, strconv.Itoa(candidates))
+				}
+				res.Discovered++
+				switch truth {
+				case graph.TruthPresumed, graph.TruthAsserted:
+					res.Presumed++
+				case graph.TruthContested:
+					res.Contested++
+				}
+			}
+			g.AddEdge(root0.ID, child.ID, graph.EdgeDependsOn)
+			byName[mk] = child
+			inSubtree[child.ID] = true
+			if child.Depth > res.DepthReached {
+				res.DepthReached = child.Depth
+			}
+			if child.Version != "" && !expanded[child.ID] {
+				frontier = append(frontier, child)
+			} else if child.Version == "" {
+				markFrontier(child)
+				res.Frontier++
+			}
+		}
+	}
+
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
 		// PHASE 1 — read this layer's declarations and accumulate, per declared
 		// package, every constraint its parents placed on it. Accumulating
@@ -533,6 +598,16 @@ func (w *Walker) presume(ctx context.Context, d Declarer, p *pending, opts Optio
 func registryQueryable(n *graph.Node) bool {
 	class, _ := n.SourceOf()
 	return class == graph.SourceRegistry || class == graph.SourceUnknown
+}
+
+// rootsOf returns the seed roots for a single ExpandRoot call. Today that is the
+// one root passed in; it is a function so the seed phase reads the same whether
+// or not a future change seeds several.
+func rootsOf(g *graph.Graph, root *graph.Node) []*graph.Node {
+	if root == nil {
+		return nil
+	}
+	return []*graph.Node{root}
 }
 
 // reachable returns the node IDs reachable from id over declared edges.

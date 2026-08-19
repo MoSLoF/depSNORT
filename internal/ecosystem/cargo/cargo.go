@@ -197,9 +197,6 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 		return nil, fmt.Errorf("cargo: %s contained no packages", cargoLockName)
 	}
 
-	// The first [[package]] in Cargo.lock is typically the project itself.
-	root := rootNode(g, path, entries[0])
-
 	// Build nodes, keyed by FULL identity: name, version, and source.
 	//
 	// A crate vendored from a git fork is different code from the registry
@@ -211,21 +208,15 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 	byNV := map[string][]string{}       // "name\x00version" -> node IDs
 	byName := map[string][]string{}     // name -> node IDs, for name-only deps
 	unresolved := map[string][]string{} // parent node ID -> ambiguous dep names
+	var localIDs []string               // source-less crates: workspace members / local project
 
 	nv := func(name, version string) string { return name + "\x00" + version }
 
-	for i, e := range entries {
+	for _, e := range entries {
 		if e.name == "" || e.version == "" {
 			continue
 		}
 		k := cargoKey{e.name, e.version, e.source}
-		if i == 0 && e.name == root.Name {
-			byKey[k] = root.ID
-			byNV[nv(e.name, e.version)] = append(byNV[nv(e.name, e.version)], root.ID)
-			byName[e.name] = append(byName[e.name], root.ID)
-			continue
-		}
-
 		class, ref := classifySource(e.source)
 		id := purl.NewCargo(e.name, e.version).WithSource(class, ref).String()
 
@@ -256,6 +247,9 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 		byKey[k] = id
 		byNV[nv(e.name, e.version)] = append(byNV[nv(e.name, e.version)], id)
 		byName[e.name] = append(byName[e.name], id)
+		if e.source == "" {
+			localIDs = append(localIDs, id)
+		}
 	}
 
 	// Build edges by DEPENDENCY IDENTITY, not by name (finding DS-REV-02).
@@ -308,16 +302,43 @@ func parseCargoLock(path string, raw []byte) (*graph.Graph, error) {
 		n.Attr[graph.AttrUnresolvedCount] = strconv.Itoa(len(names))
 	}
 
-	// Mark direct dependencies (deps of root).
+	// Determine roots. Cargo.lock lists packages ALPHABETICALLY, so the first
+	// entry is not the project — it is whatever sorts first (adler2,
+	// android_system_properties). The real roots are the workspace members: the
+	// source-less crates (local, no registry/git origin) that nothing else
+	// depends on. A registry crate always has a source and is never a root.
+	roots := cargoRoots(g, localIDs, entries)
+	// A root is the SUBJECT of the scan, not a dependency to verify, so it
+	// carries the bare coordinate rather than the ?source=path qualifier a local
+	// crate gets during parsing. Provenance still rides on the source_class
+	// attr, so nothing is lost. Known only now that roots are determined.
+	for i, id := range roots {
+		if n := g.Get(id); n != nil && n.Version != "" {
+			if bare := purl.NewCargo(n.Name, n.Version).String(); bare != id && g.RenameNode(id, bare) {
+				id = bare
+				roots[i] = bare
+			}
+		}
+		g.MarkRoot(id)
+		if n := g.Get(id); n != nil {
+			n.Depth = 0
+		}
+	}
+
+	// Direct dependencies are the deps of any root.
+	rootSet := map[string]bool{}
+	for _, id := range roots {
+		rootSet[id] = true
+	}
 	for _, e := range g.SortedEdges() {
-		if e.From == root.ID && e.Type == graph.EdgeDependsOn {
+		if rootSet[e.From] && e.Type == graph.EdgeDependsOn {
 			if n := g.Get(e.To); n != nil {
 				n.Direct = true
 			}
 		}
 	}
 
-	assignDepths(g, root.ID)
+	assignDepths(g, roots...)
 	return g, nil
 }
 
@@ -374,24 +395,56 @@ func appendUnique(list []string, s string) []string {
 	return append(list, s)
 }
 
-func rootNode(g *graph.Graph, path string, first cargoEntry) *graph.Node {
-	name := first.name
-	if name == "" {
-		name = filepath.Base(strings.TrimSuffix(filepath.Clean(path), string(filepath.Separator)))
-		if name == "." || name == "" || name == cargoLockName {
-			name = "rust-project"
+// cargoRoots picks the workspace roots: source-less crates (local project /
+// workspace members) with no incoming depends-on edge. Falls back to all
+// source-less crates if edges make none in-degree-0 (a member depended on by a
+// sibling), and finally to the first source-less crate or the first entry, so a
+// graph always has at least one root.
+func cargoRoots(g *graph.Graph, localIDs []string, entries []cargoEntry) []string {
+	if len(localIDs) == 0 {
+		// No source-less crates at all (unusual): fall back to the first entry
+		// so depth assignment still has an anchor.
+		if len(entries) > 0 {
+			if id := firstEntryID(g, entries[0]); id != "" {
+				return []string{id}
+			}
+		}
+		return nil
+	}
+	indeg := map[string]int{}
+	for _, e := range g.SortedEdges() {
+		if e.Type == graph.EdgeDependsOn {
+			indeg[e.To]++
 		}
 	}
-	version := first.version
-	if version == "" {
-		version = "0.0.0"
+	var roots []string
+	for _, id := range localIDs {
+		if indeg[id] != 0 {
+			continue
+		}
+		// A crate with a source collision (two lock entries share its identity)
+		// is an ambiguous dependency, not a project root — a root is a distinct,
+		// resolvable crate.
+		if n := g.Get(id); n != nil && n.Attr["cargo.source_collision"] == "true" {
+			continue
+		}
+		roots = append(roots, id)
 	}
-	id := purl.NewCargo(name, version).String()
-	n := g.AddNode(&graph.Node{
-		ID: id, Ecosystem: "cargo", Name: name, Version: version, Depth: 0,
-	})
-	g.MarkRoot(id)
-	return n
+	if len(roots) == 0 {
+		// Every local crate is depended on by another (a cyclic or fully
+		// interlinked workspace); treat them all as roots rather than none.
+		roots = append(roots, localIDs...)
+	}
+	return roots
+}
+
+func firstEntryID(g *graph.Graph, e cargoEntry) string {
+	class, ref := classifySource(e.source)
+	id := purl.NewCargo(e.name, e.version).WithSource(class, ref).String()
+	if g.Get(id) != nil {
+		return id
+	}
+	return ""
 }
 
 // classifySource maps a Cargo.lock `source` value onto an ecosystem-neutral
@@ -435,16 +488,26 @@ func extractTOMLString(line string) string {
 	return strings.Trim(val, `"'`)
 }
 
-func assignDepths(g *graph.Graph, rootID string) {
+func assignDepths(g *graph.Graph, rootIDs ...string) {
 	adj := map[string][]string{}
 	for _, e := range g.Edges {
 		if e.Type == graph.EdgeDependsOn {
 			adj[e.From] = append(adj[e.From], e.To)
 		}
 	}
-	depth := map[string]int{rootID: 0}
-	seen := map[string]bool{rootID: true}
-	queue := []string{rootID}
+	// Multi-source BFS: a node's depth is its SHORTEST distance from ANY root
+	// (D-24), so all roots are seeded at depth 0 before the traversal begins
+	// rather than each overwriting the last.
+	depth := map[string]int{}
+	seen := map[string]bool{}
+	var queue []string
+	for _, rootID := range rootIDs {
+		if !seen[rootID] {
+			seen[rootID] = true
+			depth[rootID] = 0
+			queue = append(queue, rootID)
+		}
+	}
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]

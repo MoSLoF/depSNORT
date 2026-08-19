@@ -1,5 +1,7 @@
 package graph
 
+import "strings"
+
 // Version truth (the expansion axis).
 //
 // These keys are ECOSYSTEM-NEUTRAL and live here for the same reason the
@@ -75,4 +77,64 @@ func (n *Node) Presumed() bool {
 		return true
 	}
 	return false
+}
+
+// AttrDeclaredDeps carries a root's DIRECT dependencies that a manifest declared
+// but no lockfile pinned — an unpinned requirements.txt line, a pyproject
+// [project] entry. Each is a name and a raw constraint with no version, encoded
+// as "name\tconstraint" per line (constraint may be empty). It is the seam that
+// lets transitive expansion presume versions for a manifest-only project: the
+// declarations come from the local file (not a registry, which has no record of
+// the local root), so the adapter records them here for the walk to read.
+//
+// This is distinct from AttrUnresolved, which is the human-facing coverage
+// disclosure ("these were not pinned"). Both can be present: the deps are
+// disclosed as unpinned AND made available for presumption.
+const AttrDeclaredDeps = "depsnort.declared_deps"
+
+// DeclaredDep is one manifest-declared direct dependency without a version.
+type DeclaredDep struct {
+	Name       string
+	Constraint string
+}
+
+// EncodeDeclaredDeps renders declared deps for AttrDeclaredDeps. Deterministic:
+// entries are emitted in the order given, and a name containing a tab or
+// newline is skipped rather than corrupting the encoding (no real package name
+// contains either).
+func EncodeDeclaredDeps(deps []DeclaredDep) string {
+	var b strings.Builder
+	for _, d := range deps {
+		if d.Name == "" || strings.ContainsAny(d.Name, "\t\n") || strings.ContainsRune(d.Constraint, '\n') {
+			continue
+		}
+		b.WriteString(d.Name)
+		b.WriteByte('\t')
+		b.WriteString(d.Constraint)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// DecodeDeclaredDeps parses what EncodeDeclaredDeps wrote.
+func DecodeDeclaredDeps(s string) []DeclaredDep {
+	var out []DeclaredDep
+	for _, line := range strings.Split(s, "\n") {
+		if line == "" {
+			continue
+		}
+		name, constraint, _ := strings.Cut(line, "\t")
+		if name != "" {
+			out = append(out, DeclaredDep{Name: name, Constraint: constraint})
+		}
+	}
+	return out
+}
+
+// DeclaredDepsOf returns a node's manifest-declared direct dependencies.
+func (n *Node) DeclaredDepsOf() []DeclaredDep {
+	if n == nil || n.Attr == nil {
+		return nil
+	}
+	return DecodeDeclaredDeps(n.Attr[AttrDeclaredDeps])
 }

@@ -59,6 +59,7 @@ func (*Adapter) Name() string { return "pypi" }
 const (
 	requirementsName = "requirements.txt"
 	pipfileLockName  = "Pipfile.lock"
+	pyprojectName    = "pyproject.toml"
 )
 
 // inputPath resolves a directory or file to a supported lockfile path and its
@@ -76,6 +77,13 @@ func inputPath(path string) (file, kind string) {
 		if p := filepath.Join(path, requirementsName); fileExists(p) {
 			return p, "requirements"
 		}
+		// pyproject.toml is the lowest-priority PyPI input: it is a manifest, not
+		// a lockfile, so its deps are declared (name + constraint) and expansion
+		// presumes their versions. Only treated as a project root when it
+		// actually declares dependencies (checked in parsePyproject).
+		if p := filepath.Join(path, pyprojectName); fileExists(p) && pyprojectDeclaresDeps(p) {
+			return p, "pyproject"
+		}
 		return "", ""
 	}
 	switch filepath.Base(path) {
@@ -83,6 +91,10 @@ func inputPath(path string) (file, kind string) {
 		return path, "pipfile"
 	case requirementsName:
 		return path, "requirements"
+	case pyprojectName:
+		if pyprojectDeclaresDeps(path) {
+			return path, "pyproject"
+		}
 	}
 	return "", ""
 }
@@ -111,6 +123,8 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 	switch kind {
 	case "pipfile":
 		return parsePipfileLock(path, raw)
+	case "pyproject":
+		return parsePyproject(path, raw)
 	default:
 		return parseRequirements(path, raw)
 	}
@@ -123,7 +137,7 @@ func rootNode(g *graph.Graph, path string) *graph.Node {
 	if name == "." || name == "" || name == requirementsName || name == pipfileLockName {
 		name = "python-project"
 	}
-	if strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".lock") {
+	if strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".lock") || name == pyprojectName {
 		name = filepath.Base(filepath.Dir(path))
 	}
 	id := purl.NewPyPI(name, "0.0.0").String()
@@ -177,6 +191,7 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 	}
 	var entries []entry
 	var unpinned []string
+	var declared []graph.DeclaredDep
 	var markerExcluded []string
 	// hasProvenance is true the moment any line contributes a `# via` parent.
 	// A file with zero provenance (plain `pip freeze` output) resolves every
@@ -247,6 +262,7 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 		}
 
 		name, version, pinned, marker := pep508.Split(body)
+		_, specifier, _ := pep508.SplitSpecifier(body)
 		if name == "" {
 			// pep508.Split could not read this line as a requirement at all — a
 			// bare URL or local path, a name violating PEP 508's grammar, a
@@ -262,6 +278,10 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 				markerExcluded = append(markerExcluded, name)
 			} else {
 				unpinned = append(unpinned, name)
+				// Keep the constraint (Split discards a range; SplitSpecifier
+				// keeps it) so transitive expansion can presume a version rather
+				// than leaving the dependency merely disclosed as unresolved.
+				declared = append(declared, graph.DeclaredDep{Name: purl.NormalizePyPI(name), Constraint: specifier})
 			}
 			continue
 		}
@@ -325,6 +345,14 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 		// silently reported as a clean, fully-resolved tree.
 		root.Attr[graph.AttrUnresolved] = strings.Join(unpinned, ",")
 		root.Attr[graph.AttrUnresolvedCount] = fmt.Sprintf("%d", len(unpinned))
+	}
+	// Record the unpinned deps WITH their constraints so transitive expansion can
+	// presume a version for each (the local root has no registry coordinate, so
+	// the walk cannot fetch these from a registry — they must ride on the node).
+	// Kept separate from AttrUnresolved, which stays the coverage disclosure.
+	if len(declared) > 0 {
+		sort.Slice(declared, func(i, j int) bool { return declared[i].Name < declared[j].Name })
+		root.Attr[graph.AttrDeclaredDeps] = graph.EncodeDeclaredDeps(declared)
 	}
 	if len(markerExcluded) > 0 {
 		sort.Strings(markerExcluded)

@@ -163,3 +163,21 @@ func TestNpmOptionalDependenciesExcludedByDefault(t *testing.T) {
 		t.Error("optionalDependency pulled in without IncludeOptional")
 	}
 }
+
+func TestResolveNpmAlias(t *testing.T) {
+	for _, tc := range []struct {
+		declared, rng   string
+		wantName, wantC string
+	}{
+		{"string-width-cjs", "npm:string-width@^4.2.0", "string-width", "^4.2.0"},
+		{"my-lodash", "npm:lodash@4.17.21", "lodash", "4.17.21"},
+		{"aliased", "npm:@scope/pkg@^1.0.0", "@scope/pkg", "^1.0.0"},
+		{"whole", "npm:@scope/pkg", "@scope/pkg", ""},
+		{"normal", "^1.2.3", "normal", "^1.2.3"}, // non-alias passes through
+	} {
+		n, c := resolveNpmAlias(tc.declared, tc.rng)
+		if n != tc.wantName || c != tc.wantC {
+			t.Errorf("resolveNpmAlias(%q,%q) = (%q,%q), want (%q,%q)", tc.declared, tc.rng, n, c, tc.wantName, tc.wantC)
+		}
+	}
+}
