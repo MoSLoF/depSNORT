@@ -90,7 +90,7 @@ Seven ecosystems share the same graph, check, verdict, and output model:
 
 | Ecosystem | Lockfile(s) / manifest | PURL type | Install-time surface |
 |-----------|-------------|-----------|----------------------|
-| **npm** | `package-lock.json` (v1–v3), or `package.json` | `pkg:npm/` | `preinstall`/`postinstall` and related lifecycle scripts |
+| **npm** | `package-lock.json` (v1–v3), `yarn.lock` (v1 + Berry), or `package.json` | `pkg:npm/` | `preinstall`/`postinstall` and related lifecycle scripts |
 | **PyPI** | `requirements.txt`, `Pipfile.lock`, `pyproject.toml`, `setup.py` | `pkg:pypi/` | `setup.py`, PEP 517 build backends, `.pth` files |
 | **RubyGems** | `Gemfile.lock` | `pkg:gem/` | `extconf.rb` / native-extension install paths |
 | **Cargo** | `Cargo.lock` | `pkg:cargo/` | `build.rs` and compile-time code paths |
@@ -681,7 +681,8 @@ differentiation is the intersection of:
   -level drift for other ecosystems needs artifact retrieval);
 - ⬜ PR-native dependency delta: summarize only newly introduced dependencies,
   versions, capabilities, and gate changes in pull requests;
-- ⬜ Maven/Gradle adapters; pnpm, Yarn Berry, Poetry, and uv lockfile dialects
+- ✅ `yarn.lock` (Yarn v1 classic and v2+ Berry) — resolved via the sibling `package.json`
+- ⬜ Maven/Gradle adapters; pnpm, Poetry, and uv lockfile dialects
   (Go modules are implemented; these lockfiles currently fall back to a sibling
   manifest where one exists);
 - ⬜ policy-as-code for thresholds, allowlists, and approved publishers, over

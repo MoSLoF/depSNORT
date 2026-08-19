@@ -1778,3 +1778,36 @@ registry dependency, a stub resolver returning that dependency's subtree, and
 assertions that the resolver is never handed the root, that the children come
 back `version_truth = asserted` with `asserted_by` attribution at the right
 depth, and that no presumed duplicate is created beneath the closed subtree.
+
+## D-53 — yarn.lock is resolved by joining it to package.json
+
+Live-fire round 2 found kibana's real dependency tree invisible: kibana uses
+`yarn.lock`, the npm adapter parsed only `package-lock.json`, and the whole
+application tree read as "no supported lockfile". yarn.lock is a widely used
+resolved lockfile; not reading it is a real coverage hole, not a niche gap.
+
+yarn.lock is shaped unlike package-lock.json: it is a FLAT map from each
+requested "name@range" descriptor to the concrete version yarn chose, with that
+version's own dependency descriptors — and it carries no root node. The project
+root and its direct dependencies live in the sibling `package.json`. So the
+adapter joins the two: package.json names the root and its direct deps;
+yarn.lock resolves every descriptor to a version and supplies the transitive
+edges. A descriptor reference resolves by exact normalized match, falling back
+to the single-version-per-name case; with no package.json (or none of its deps
+matched) the root anchors on in-degree-0 packages, the same topology anchor
+Cargo uses (D-50), so the tree still ladders instead of collapsing to depth 0.
+
+Both dialects are read by one parser. Yarn v1 ("classic") is a bespoke
+indentation format; Yarn v2+ ("Berry") is YAML. They differ only in
+punctuation — v1 quotes each descriptor and separates key from value with a
+space; Berry joins descriptors in one quoted string, uses YAML colons, and
+prefixes ranges with `npm:`. Normalizing the range (dropping a leading `npm:`)
+makes one descriptor set match across both, so the join logic is dialect-blind.
+
+What yarn.lock does NOT record, the adapter does not invent: an install-script
+flag, a per-package dev marking, or an on-disk node_modules path. Install-surface
+extraction keys on that path, so a yarn tree contributes none and surfaces as
+source-unavailable rather than a fabricated location — honest under D-24, and
+the one place a yarn scan is weaker than a package-lock scan. The parser is
+fuzzed on the same terms as the other lockfile parsers (D-33): a hostile or
+truncated yarn.lock yields a partial, self-consistent graph, never a panic.

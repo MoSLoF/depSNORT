@@ -38,8 +38,12 @@ func manifestPath(path string) string {
 		}
 		dir = filepath.Dir(path)
 	}
-	// A lockfile beside it wins; this fallback is only for the lockless case.
+	// A resolved lockfile beside it wins; this fallback is only for the case where
+	// neither a package-lock.json nor a yarn.lock is present.
 	if _, err := os.Stat(filepath.Join(dir, lockName)); err == nil {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(dir, yarnLockName)); err == nil {
 		return ""
 	}
 	p := filepath.Join(dir, manifestName)
