@@ -63,6 +63,42 @@ func bareName(name string) string {
 // isScoped reports whether an npm package name carries an @scope prefix.
 func isScoped(name string) bool { return strings.HasPrefix(name, "@") }
 
+// isVersionedSuccessor reports whether bare is target with ONLY an appended
+// numeric version token — a run of trailing digits, optionally set off by a
+// single -, _ or . separator: cli-table -> cli-table3, through -> through2,
+// lodash -> lodash.4. That is the legitimate-successor shape, which pure edit
+// distance cannot tell from a squat, so VC-006 suppresses it (OPU-05).
+//
+// It deliberately handles only the DIGIT shape, not word suffixes like `-ng` or
+// `-next`. Those are three or more edits from the predecessor, past this check's
+// distance-2 ceiling (typosquatMaxDist), so they never produce a finding to
+// suppress in the first place — a suffix list here would be untested dead code.
+// A 1-2 digit token, by contrast, sits at exactly distance 1-2 and is precisely
+// what fired on cli-table3.
+//
+// The relationship is a strict prefix: an appended token only. A substitution or
+// an interior edit (cli-tabl3, cli-tab1e) is not a successor and still fires.
+func isVersionedSuccessor(bare, target string) bool {
+	if target == "" || bare == target || !strings.HasPrefix(bare, target) {
+		return false
+	}
+	suffix := strings.TrimLeft(bare[len(target):], "-._")
+	return isAllDigits(suffix)
+}
+
+// isAllDigits reports whether s is non-empty and every byte is an ASCII digit.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // popularParents indexes, per node ID, whether any package that depends on it is
 // itself in the popular corpus.
 //
@@ -160,6 +196,17 @@ func (Typosquat) Run(ctx *check.Context) []finding.Finding {
 		case best == 2 && len(bare) >= typosquatDist2MinLen:
 			conf = 0.4
 		default:
+			continue
+		}
+
+		// FAILURE MODE 4 — versioned successor packages. `cli-table3` is the
+		// maintained successor to the abandoned `cli-table`; `through2` to
+		// `through`. The only delta from the popular name is an appended version
+		// token, so under pure edit distance the successor shape is identical to a
+		// squat. Suppress it rather than tax every `foo` -> `foo2`/`foo3` rename —
+		// the same precision philosophy VC-002 uses: flag the shape that is
+		// actually suspicious, not the one that merely looks like it. (OPU-05.)
+		if isVersionedSuccessor(bare, nearest) {
 			continue
 		}
 

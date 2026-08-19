@@ -78,6 +78,50 @@ func TestVC006StillCatchesRealSquats(t *testing.T) {
 	}
 }
 
+// OPU-05: a versioned successor package (`cli-table3`, the maintained heir of
+// the abandoned `cli-table`) differs from its corpus predecessor only by an
+// appended version token, so pure edit distance reads it as a distance-1 squat.
+// It must stay silent — while a genuine transposition squat of the same
+// predecessor (`cli-tabel`) must still fire. This pins the boundary in both
+// directions, the way the vouched-parent and real-squat tests pin theirs.
+func TestVC006SuppressesVersionedSuccessorsButNotSquats(t *testing.T) {
+	// Each is the corpus package `cli-table` plus only a numeric version token,
+	// so each lands within the distance-2 ceiling with `cli-table` as its nearest
+	// match — the exact shape that fired on the real npm/cli scan.
+	silent := []string{
+		"cli-table3",  // +1 digit, distance 1 — the real observed case
+		"cli-table2",  // +1 digit, distance 1
+		"cli-table-9", // separator + digit, distance 2
+	}
+	for _, name := range silent {
+		g := graph.New()
+		id := "pkg:npm/" + name + "@1.0.0"
+		g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "npm", Name: name, Version: "1.0.0"})
+		for _, f := range (Typosquat{}).Run(&check.Context{Graph: g}) {
+			if f.NodeID == id {
+				t.Errorf("versioned successor %q was flagged as a typosquat: %s", name, f.Evidence)
+			}
+		}
+	}
+
+	// The suppression must not blind the check to an actual squat of the same
+	// predecessor: `cli-tabel` transposes two letters of `cli-table` and is not a
+	// prefix-plus-version-token, so it still fires.
+	fires := "cli-tabel"
+	g := graph.New()
+	id := "pkg:npm/" + fires + "@1.0.0"
+	g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "npm", Name: fires, Version: "1.0.0"})
+	var hit bool
+	for _, f := range (Typosquat{}).Run(&check.Context{Graph: g}) {
+		if f.NodeID == id {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Errorf("transposition squat %q should still fire", fires)
+	}
+}
+
 // Provenance by association: a package pulled in BY a well-known package is not
 // a squat — nobody typos their way into a transitive dependency.
 func TestVC006SkipsPackagesVouchedForByPopularParents(t *testing.T) {
