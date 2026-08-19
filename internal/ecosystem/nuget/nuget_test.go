@@ -294,3 +294,51 @@ func TestResolveDepths(t *testing.T) {
 		t.Errorf("Serilog.Sinks.Console depth = %d, want 2", ssc.Depth)
 	}
 }
+
+// OPU-14: the node Name must be the CANONICAL-case NuGet id, because the OSV
+// coordinate is built straight from n.Name and OSV's NuGet ecosystem is
+// case-sensitive. Lowercasing it silently missed every advisory. Dedup/identity
+// (the PURL id) still fold case.
+func TestNuGetNameIsCanonicalForOSV(t *testing.T) {
+	lock := []byte(`{"version":1,"dependencies":{"net6.0":{
+		"Newtonsoft.Json":{"type":"Direct","resolved":"12.0.3"},
+		"System.Net.Http":{"type":"Direct","resolved":"4.3.0"}
+	}}}`)
+	g, err := parsePackagesLock("proj", lock)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// Identity/PURL stays lowercase; the OSV-facing Name stays canonical.
+	nj := g.Get("pkg:nuget/newtonsoft.json@12.0.3")
+	if nj == nil {
+		t.Fatal("Newtonsoft.Json node missing")
+	}
+	if nj.Name != "Newtonsoft.Json" {
+		t.Errorf("node Name = %q, want canonical Newtonsoft.Json (OSV coordinate is case-sensitive)", nj.Name)
+	}
+	if snh := g.Get("pkg:nuget/system.net.http@4.3.0"); snh == nil || snh.Name != "System.Net.Http" {
+		t.Errorf("System.Net.Http Name wrong: %+v", snh)
+	}
+}
+
+// Dedup still folds case: the same package listed in mixed case across TFMs is
+// one node, not two.
+func TestNuGetMixedCaseDedup(t *testing.T) {
+	lock := []byte(`{"version":1,"dependencies":{
+		"net6.0":{"Newtonsoft.Json":{"type":"Direct","resolved":"12.0.3"}},
+		"net8.0":{"newtonsoft.json":{"type":"Direct","resolved":"12.0.3"}}
+	}}`)
+	g, err := parsePackagesLock("proj", lock)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	count := 0
+	for _, n := range g.SortedNodes() {
+		if n.ID == "pkg:nuget/newtonsoft.json@12.0.3" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("mixed-case package produced %d nodes, want 1 (dedup folds case)", count)
+	}
+}
