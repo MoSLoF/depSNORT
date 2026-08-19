@@ -41,7 +41,7 @@ trap 'rm -rf "$TMP"' EXIT
 #
 # Ecosystem names are OSV's, not depSNORT's; the mapping to depSNORT ecosystem
 # strings lives in the Python block below.
-ECOSYSTEMS="npm PyPI crates.io RubyGems Packagist NuGet"
+ECOSYSTEMS="npm PyPI crates.io RubyGems Packagist NuGet Go"
 
 # Per-ecosystem cap on COORDINATES, newest advisory first. Malicious packages
 # are pulled from registries quickly, so recency is the right selection axis:

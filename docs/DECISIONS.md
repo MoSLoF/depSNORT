@@ -1639,3 +1639,44 @@ Module identity is the full path including any /vN major suffix; the PURL encode
 its slashes, and reports render the raw path from the node name. The Go module
 proxy's !-escaping of uppercase letters is a transport detail confined to the
 proxy client.
+
+## D-49 — Go, wired across every axis; and a references sweep
+
+D-48 gave Go resolution and expansion. This finishes the integration so "seven
+ecosystems" is true on every axis the README claims, rather than only for the
+dependency graph.
+
+- **Malicious + CVE (VC-001 / VC-008).** `ecosystemName` mapped six ecosystems;
+  a `gomod` node fell through to the default and returned "gomod", which OSV does
+  not recognize — Go nodes silently got zero advisory coverage. One line
+  (`case "gomod": return "Go"`) closes it, and "Go" joins the offline-snapshot
+  export list so a first air-gapped scan carries Go malicious coordinates too.
+- **Temporal (VC-004 / VC-005).** The Go proxy has no bulk publish-time
+  endpoint, so `goproxy.Client` now implements `RegistrySource` by reading the
+  version list plus one `@v/{version}.info` per version for its timestamp —
+  N+1 requests per module where every other registry needs one document. It is
+  bounded-concurrent and long-TTL cached (both the list and each `.info` are
+  immutable once published), so the cost is paid once per module and re-runs are
+  free; a real 56-module scan made 577 requests in ~5s. This is the one place Go
+  is structurally more expensive than the other ecosystems, and the cache is why
+  it is acceptable.
+- **Publisher lineage (VC-011).** The proxy exposes no per-version publisher, so
+  Go records the absence as coverage state — the same non-answer the four
+  registries without publisher metadata already give. Nothing to build; the
+  "two of the seven registries expose it" count simply grows its denominator.
+- **Fuzzing.** `go.mod` is attacker-controlled in a hostile checkout, so it gets
+  a fuzz target on the same terms as the other lockfile parsers (D-33): never
+  panic, and a produced graph is self-consistent.
+
+**What is deliberately NOT done: Go install-surface extraction.** Go's
+install-time reach — `//go:generate`, `cgo` link flags, package `init()` side
+effects — is a real VC-002-family surface, but extracting it statically is its
+own body of work, and claiming it before it exists would be exactly the
+overclaim this sweep exists to remove. The README says so plainly rather than
+listing a surface the tool does not read.
+
+The rest of the change is the references it makes true: the ecosystem table, the
+version-truth enum, the architecture tree, the roadmap, and every "six" that was
+really "how many ecosystems" — each verified against what the code now does, not
+flipped blindly (the "six" that are historical decision records, or count a
+surface Go still lacks, stayed six).
