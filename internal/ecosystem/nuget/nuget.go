@@ -11,7 +11,9 @@
 package nuget
 
 import (
+	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,18 +33,26 @@ func New() *Adapter { return &Adapter{} }
 // Name implements ecosystem.Adapter.
 func (*Adapter) Name() string { return "nuget" }
 
-const packagesLockName = "packages.lock.json"
+const (
+	packagesLockName   = "packages.lock.json"
+	packagesConfigName = "packages.config"
+)
 
-// Detect implements ecosystem.Adapter.
+// Detect implements ecosystem.Adapter. A packages.lock.json (a resolved tree)
+// claims the directory; failing that, a packages.config (the legacy .NET
+// Framework XML manifest, still common) claims it too — it was previously only
+// disclosed as an unresolvable gap, never parsed (OPU-15).
 func (*Adapter) Detect(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false
 	}
 	if info.IsDir() {
-		return fileExists(filepath.Join(path, packagesLockName))
+		return fileExists(filepath.Join(path, packagesLockName)) ||
+			fileExists(filepath.Join(path, packagesConfigName))
 	}
-	return filepath.Base(path) == packagesLockName
+	base := filepath.Base(path)
+	return base == packagesLockName || base == packagesConfigName
 }
 
 func fileExists(p string) bool {
@@ -50,21 +60,37 @@ func fileExists(p string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// Resolve implements ecosystem.Adapter.
+// Resolve implements ecosystem.Adapter. packages.lock.json (a resolved tree)
+// takes precedence; otherwise a packages.config is parsed into its declared
+// package set.
 func (*Adapter) Resolve(path string) (*graph.Graph, error) {
-	file := path
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("nuget: %w", err)
 	}
-	if info.IsDir() {
-		file = filepath.Join(path, packagesLockName)
+	if !info.IsDir() {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("nuget: reading %s: %w", filepath.Base(path), err)
+		}
+		if filepath.Base(path) == packagesConfigName {
+			return parsePackagesConfig(path, raw)
+		}
+		return parsePackagesLock(path, raw)
 	}
-	raw, err := os.ReadFile(file)
+	if lock := filepath.Join(path, packagesLockName); fileExists(lock) {
+		raw, err := os.ReadFile(lock)
+		if err != nil {
+			return nil, fmt.Errorf("nuget: reading %s: %w", packagesLockName, err)
+		}
+		return parsePackagesLock(path, raw)
+	}
+	config := filepath.Join(path, packagesConfigName)
+	raw, err := os.ReadFile(config)
 	if err != nil {
-		return nil, fmt.Errorf("nuget: reading %s: %w", packagesLockName, err)
+		return nil, fmt.Errorf("nuget: reading %s: %w", packagesConfigName, err)
 	}
-	return parsePackagesLock(path, raw)
+	return parsePackagesConfig(path, raw)
 }
 
 // nugetLockFile represents the structure of packages.lock.json.
@@ -243,9 +269,66 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 	return g, nil
 }
 
+// packagesConfig is the legacy NuGet packages.config XML: a flat list of
+// resolved packages with no dependency graph.
+//
+//	<packages>
+//	  <package id="Newtonsoft.Json" version="12.0.3" targetFramework="net472" />
+//	</packages>
+type packagesConfig struct {
+	XMLName  xml.Name `xml:"packages"`
+	Packages []struct {
+		ID              string `xml:"id,attr"`
+		Version         string `xml:"version,attr"`
+		TargetFramework string `xml:"targetFramework,attr"`
+	} `xml:"package"`
+}
+
+// parsePackagesConfig parses a packages.config into direct NuGet package nodes.
+// The file is a FLAT list — both direct and transitive packages appear with no
+// edges — so every entry becomes a direct dependency of the root. Names are kept
+// in canonical case for the case-sensitive OSV coordinate (OPU-14); a leading
+// UTF-8 BOM (common on Windows-authored configs) is stripped first.
+func parsePackagesConfig(path string, raw []byte) (*graph.Graph, error) {
+	raw = bytes.TrimPrefix(raw, []byte("\uFEFF"))
+	var cfg packagesConfig
+	if err := xml.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("nuget: parsing %s: %w", packagesConfigName, err)
+	}
+
+	g := graph.New()
+	root := rootNode(g, path)
+	seen := map[string]bool{}
+	for _, p := range cfg.Packages {
+		if p.ID == "" || p.Version == "" {
+			continue
+		}
+		id := purl.NewNuGet(p.ID, p.Version).String()
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		attr := map[string]string{"nuget.source": packagesConfigName}
+		if p.TargetFramework != "" {
+			attr["nuget.tfm"] = p.TargetFramework
+		}
+		n := g.AddNode(&graph.Node{
+			ID: id, Ecosystem: "nuget", Name: p.ID, Version: p.Version,
+			Direct: true, Depth: 1, Attr: attr,
+		})
+		n.SetSource(graph.SourceRegistry, "")
+		g.AddEdge(root.ID, id, graph.EdgeDependsOn)
+	}
+	if g.Len() == 1 {
+		return nil, fmt.Errorf("nuget: %s contained no packages", packagesConfigName)
+	}
+	assignDepths(g, root.ID)
+	return g, nil
+}
+
 func rootNode(g *graph.Graph, path string) *graph.Node {
 	name := filepath.Base(strings.TrimSuffix(filepath.Clean(path), string(filepath.Separator)))
-	if name == "." || name == "" || name == packagesLockName {
+	if name == "." || name == "" || name == packagesLockName || name == packagesConfigName {
 		name = filepath.Base(filepath.Dir(path))
 	}
 	if name == "." || name == "" {

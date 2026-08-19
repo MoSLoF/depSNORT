@@ -95,7 +95,7 @@ Seven ecosystems share the same graph, check, verdict, and output model:
 | **RubyGems** | `Gemfile.lock` | `pkg:gem/` | `extconf.rb` / native-extension install paths |
 | **Cargo** | `Cargo.lock` | `pkg:cargo/` | `build.rs` and compile-time code paths |
 | **Composer** | `composer.lock`, or `composer.json` | `pkg:composer/` | scripts, plugin packages, plugin entrypoints |
-| **NuGet** | `packages.lock.json` | `pkg:nuget/` | install/init scripts and package build assets |
+| **NuGet** | `packages.lock.json`, or `packages.config` | `pkg:nuget/` | install/init scripts and package build assets |
 | **Go** | `go.mod` | `pkg:golang/` | not yet extracted — Go has resolution, expansion, OSV advisories, and the temporal axis, but no install-surface analysis yet |
 
 A lockfile gives a fully-resolved tree; a bare manifest (an unpinned

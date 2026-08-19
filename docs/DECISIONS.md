@@ -2074,3 +2074,38 @@ OSV/registry coordinate. It applies to every future NuGet input (the
 packages.config and Paket work in this same round observe it). npm is
 lowercase-canonical and PyPI normalizes, so both are unaffected; Cargo, Go, gem,
 and Composer preserve case already.
+
+## D-63 — OPU-15: NuGet packages.config is parsed, not just disclosed
+
+`packages.config` — the legacy .NET Framework XML manifest, still common in the
+wild — was on the D-59 recognized-manifest list, so a directory carrying one was
+DISCLOSED as incomplete coverage (an honest gap, not a silent skip). But it was
+never parsed: NuGet support was effectively `packages.lock.json`-only, and the
+package doc comment ("packages.config only — PackageReference ignores it")
+implied a capability that did not exist. Disclosure is the floor, not the goal —
+a real, readable dependency surface should be scanned, not merely flagged as
+unread.
+
+`packages.config` is a FLAT resolved list — `<package id="X" version="Y"
+targetFramework="Z" />` entries, both direct and transitive, with no dependency
+graph. The parser (`parsePackagesConfig`, `encoding/xml`) emits one direct node
+per entry hung off the project root at depth 1. Three deliberate choices:
+
+- **Canonical-case names.** Names come straight from the `id` attribute,
+  unfolded, so the OSV coordinate matches — the D-62 rule (fold for
+  identity/dedup, never for the OSV/registry coordinate) applied to this new
+  input. The PURL id still lowercases via `purl.NewNuGet`, so dedup and identity
+  are unchanged.
+- **A leading UTF-8 BOM is stripped.** Windows-authored configs routinely carry
+  one; `encoding/xml` rejects a BOM before the declaration, so it is trimmed
+  first. (The regression fixture carries a real BOM to lock this in.)
+- **Empty or malformed degrades honestly.** A truncated file is an
+  `xml.Unmarshal` error; a well-formed file with no `<package>` entries returns
+  "contained no packages". Both surface as an adapter error the scan flow turns
+  into incomplete coverage (D-24) — never a crash, never a silent clean pass.
+
+`packages.lock.json` (a full resolved tree) still takes precedence when both are
+present, mirroring the directory resolution order. `packages.config` is removed
+from the `gap.go` recognized-manifest map: it is now claimed by the adapter's
+Detect and never reaches the gap path, so listing it there would be dead code
+that risks double-counting.

@@ -26,7 +26,6 @@ import (
 // carrying one is CLAIMED by an adapter's Detect and never reaches this path, so
 // listing them here would only risk firing on a legitimately dependency-less one.
 var gapManifestByName = map[string]string{
-	"packages.config":  "nuget",
 	"pom.xml":          "maven",
 	"build.gradle":     "gradle",
 	"build.gradle.kts": "gradle",
