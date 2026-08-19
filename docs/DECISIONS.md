@@ -1680,3 +1680,37 @@ version-truth enum, the architecture tree, the roadmap, and every "six" that was
 really "how many ecosystems" — each verified against what the code now does, not
 flipped blindly (the "six" that are historical decision records, or count a
 surface Go still lacks, stayed six).
+
+## D-50 — a Cargo.lock scanned in isolation infers its root from topology
+
+Cargo root selection preferred the source-less crates — the workspace members
+and the local project, which Cargo.lock records with no `source` line (D-41).
+That is the right signal when the whole workspace is present. But it left a
+fallback that was wrong: when a lock has *no* source-less crate at all,
+`cargoRoots` anchored the root on `entries[0]` — Cargo.lock's alphabetically
+first package (`adler2`, `android_system_properties`), which is a leaf, not the
+project.
+
+The deployment shape where this bites is not exotic: a `Cargo.lock` scanned on
+its own in a CI gate, split from the workspace member that would otherwise
+anchor it. Every crate then carries a `source`, `localIDs` is empty, and the
+scan anchored depth 0 / direct-ness on a leaf. The blast radius is bounded —
+the depends-on **edges** are still correct, so every per-node check (VC-001
+malicious, VC-002 install-surface, VC-008 CVE) still fires exactly as before.
+What breaks is everything keyed on the *laddering*: node depth, direct vs.
+transitive, root identity, and the topology digest the drift axis compares.
+Reproduced cleanly — an all-sourced `realroot → leaf-utils` lock collapsed both
+crates to depth 0 / `direct:false`; making `realroot` source-less snapped
+`leaf-utils` back to depth 1 / `direct:true`, isolating the cause to this one
+branch.
+
+The fix keeps the source-less signal as the primary root selector and replaces
+only the fallback: with no source-less crate, compute in-degree over the whole
+graph and take the in-degree-0 crates as roots — the same topological criterion
+the healthy path already applies to workspace members, now applied to every
+crate. `entries[0]` survives as a last resort for a genuinely fully cyclic lock
+(every crate has an incoming edge, so none is in-degree-0), where an arbitrary
+anchor is the only way to give depth assignment somewhere to start. The
+pathological lock now ladders like a healthy one, and the source-collision skip
+carries over unchanged: a crate whose identity two lock entries share is an
+ambiguous dependency, never a root.

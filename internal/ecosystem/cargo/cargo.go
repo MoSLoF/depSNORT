@@ -401,41 +401,71 @@ func appendUnique(list []string, s string) []string {
 // sibling), and finally to the first source-less crate or the first entry, so a
 // graph always has at least one root.
 func cargoRoots(g *graph.Graph, localIDs []string, entries []cargoEntry) []string {
-	if len(localIDs) == 0 {
-		// No source-less crates at all (unusual): fall back to the first entry
-		// so depth assignment still has an anchor.
-		if len(entries) > 0 {
-			if id := firstEntryID(g, entries[0]); id != "" {
-				return []string{id}
-			}
-		}
-		return nil
-	}
 	indeg := map[string]int{}
 	for _, e := range g.SortedEdges() {
 		if e.Type == graph.EdgeDependsOn {
 			indeg[e.To]++
 		}
 	}
-	var roots []string
-	for _, id := range localIDs {
-		if indeg[id] != 0 {
-			continue
+
+	if len(localIDs) == 0 {
+		// No source-less crate at all — a Cargo.lock scanned in isolation, split
+		// from the workspace member that would otherwise anchor it (a lone lock
+		// in a CI gate is the common shape). Source class can no longer name the
+		// roots, so fall back to topology: the crates nothing depends on ARE the
+		// roots. This makes the split lock behave like a whole workspace instead
+		// of anchoring depth/direct-ness on entries[0] — whatever sorts first
+		// alphabetically (adler2, android_system_properties), which is never the
+		// project.
+		roots := inDegreeZeroRoots(g, indeg, allCrateIDs(g))
+		if len(roots) == 0 {
+			// Genuinely fully cyclic (every crate has an incoming edge): keep a
+			// single anchor so depth assignment still has somewhere to start.
+			if len(entries) > 0 {
+				if id := firstEntryID(g, entries[0]); id != "" {
+					return []string{id}
+				}
+			}
+			return nil
 		}
-		// A crate with a source collision (two lock entries share its identity)
-		// is an ambiguous dependency, not a project root — a root is a distinct,
-		// resolvable crate.
-		if n := g.Get(id); n != nil && n.Attr["cargo.source_collision"] == "true" {
-			continue
-		}
-		roots = append(roots, id)
+		return roots
 	}
+
+	roots := inDegreeZeroRoots(g, indeg, localIDs)
 	if len(roots) == 0 {
 		// Every local crate is depended on by another (a cyclic or fully
 		// interlinked workspace); treat them all as roots rather than none.
 		roots = append(roots, localIDs...)
 	}
 	return roots
+}
+
+// inDegreeZeroRoots returns the candidate IDs with no incoming depends-on edge,
+// skipping source collisions — a crate whose identity two lock entries share is
+// an ambiguous dependency, not a distinct, resolvable project root.
+func inDegreeZeroRoots(g *graph.Graph, indeg map[string]int, candidates []string) []string {
+	var roots []string
+	for _, id := range candidates {
+		if indeg[id] != 0 {
+			continue
+		}
+		if n := g.Get(id); n != nil && n.Attr["cargo.source_collision"] == "true" {
+			continue
+		}
+		roots = append(roots, id)
+	}
+	return roots
+}
+
+// allCrateIDs returns every cargo node ID in the graph, in deterministic order.
+func allCrateIDs(g *graph.Graph) []string {
+	var ids []string
+	for _, n := range g.SortedNodes() {
+		if n.Ecosystem == "cargo" {
+			ids = append(ids, n.ID)
+		}
+	}
+	return ids
 }
 
 func firstEntryID(g *graph.Graph, e cargoEntry) string {
