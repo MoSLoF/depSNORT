@@ -3,14 +3,11 @@ package registry
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"ihbv.io/depsnort/internal/datasource"
@@ -67,92 +64,25 @@ func (c *PyPIDepsClient) cacheKey(coord datasource.Coord) string {
 // A coordinate whose fetch fails is omitted from the result map and counted
 // in Stats.Gaps — mirroring Client.Histories's contract exactly, including
 // the offline-cold-cache-is-a-gap-not-an-error and 404-is-not-an-error rules.
+// Requirements returns each coordinate's dependencies WITH version specifiers,
+// for the Nth-layer walk. It shares fetch, cache, concurrency, and Stats with
+// RequiresDist through fetchParsed; the two differ only in the parse.
+func (c *PyPIDepsClient) Requirements(ctx context.Context, coords []datasource.Coord) (map[string][]Requirement, error) {
+	return fetchParsed(c, ctx, coords, parseRequirements)
+}
+
+// RequiresDist returns dependency NAMES only — all D-01 re-parenting needs.
 func (c *PyPIDepsClient) RequiresDist(ctx context.Context, coords []datasource.Coord) (map[string][]string, error) {
-	now := time.Now
-	if c.Now != nil {
-		now = c.Now
-	}
-	out := make(map[string][]string, len(coords))
-	c.Stats = datasource.Stats{Queried: len(coords), Offline: c.Offline}
+	return fetchParsed(c, ctx, coords, parseRequiresDist)
+}
 
-	var misses []datasource.Coord
-	for _, coord := range coords {
-		key := c.cacheKey(coord)
-		if raw, fresh, ok := c.Cache.GetRaw(key); ok && (fresh || c.Offline) {
-			if names, unparsed, err := parseRequiresDist(raw); err == nil {
-				out[coord.Key()] = names
-				c.Stats.FromCache++
-				c.Stats.UnparsedEntries += unparsed
-				continue
-			}
-		}
-		if c.Offline {
-			c.Stats.Gaps++
-			continue
-		}
-		misses = append(misses, coord)
-	}
-	if len(misses) == 0 {
-		return out, nil
-	}
-
-	type result struct {
-		coord    datasource.Coord
-		names    []string
-		unparsed int
-		raw      []byte
-		err      error
-	}
-	var (
-		mu      sync.Mutex
-		wg      sync.WaitGroup
-		errsBy  = map[string]error{}
-		sem     = make(chan struct{}, concurrency)
-		results = make([]result, len(misses))
-	)
-	for i, coord := range misses {
-		wg.Add(1)
-		go func(i int, coord datasource.Coord) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			raw, err := c.fetch(ctx, coord)
-			if err != nil {
-				results[i] = result{coord: coord, err: err}
-				return
-			}
-			names, unparsed, err := parseRequiresDist(raw)
-			results[i] = result{coord: coord, names: names, unparsed: unparsed, raw: raw, err: err}
-		}(i, coord)
-	}
-	wg.Wait()
-
-	for _, r := range results {
-		if r.err != nil {
-			if errors.Is(r.err, ErrNotFound) {
-				c.Stats.NotFound++
-				continue
-			}
-			c.Stats.Gaps++
-			mu.Lock()
-			errsBy[r.coord.Key()] = r.err
-			mu.Unlock()
-			continue
-		}
-		out[r.coord.Key()] = r.names
-		c.Stats.FromNet++
-		c.Stats.UnparsedEntries += r.unparsed
-		_ = c.Cache.PutRaw(c.cacheKey(r.coord), r.raw, now())
-	}
-	if len(errsBy) > 0 {
-		sorted := make([]string, 0, len(errsBy))
-		for k := range errsBy {
-			sorted = append(sorted, k)
-		}
-		sort.Strings(sorted)
-		return out, errsBy[sorted[0]]
-	}
-	return out, nil
+func fetchParsed[T any](c *PyPIDepsClient, ctx context.Context, coords []datasource.Coord, parse func([]byte) ([]T, int, error)) (map[string][]T, error) {
+	out, stats, err := fetchCoords(coordFetcher{
+		cache: c.Cache, offline: c.Offline, now: c.Now,
+		cacheKey: c.cacheKey, fetch: c.fetch,
+	}, ctx, coords, parse)
+	c.Stats = stats
+	return out, err
 }
 
 func (c *PyPIDepsClient) fetch(ctx context.Context, coord datasource.Coord) ([]byte, error) {
@@ -183,6 +113,39 @@ type pypiDepsResponse struct {
 	} `json:"info"`
 }
 
+// Requirement is one requires_dist entry with its version specifier preserved.
+// RequiresDist reduces these to names (all D-01 reconstruction needs); the
+// Nth-layer walk needs the specifier to presume a version, so it reads these.
+type Requirement struct {
+	Name      string // PEP 503 normalized
+	Specifier string // raw, e.g. ">=1.21,<2.0"; "" when unconstrained
+	Marker    string // environment marker, e.g. extra == "async"
+}
+
+// parseRequirements extracts info.requires_dist into structured entries,
+// preserving the specifier. Unparseable entries are counted, not dropped
+// silently (D-24), and extras-gated ones are excluded exactly as
+// parseRequiresDist excludes them, so the two views of the same response never
+// disagree about which edges exist.
+func parseRequirements(raw []byte) (reqs []Requirement, unparsed int, err error) {
+	var resp pypiDepsResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, 0, fmt.Errorf("pypi-requires-dist: parsing response: %w", err)
+	}
+	for _, entry := range resp.Info.RequiresDist {
+		name, spec, marker := pep508.SplitSpecifier(entry)
+		if name == "" {
+			unparsed++
+			continue
+		}
+		if pep508.GatedByExtra(marker) {
+			continue
+		}
+		reqs = append(reqs, Requirement{Name: purl.NormalizePyPI(name), Specifier: spec, Marker: marker})
+	}
+	return reqs, unparsed, nil
+}
+
 // parseRequiresDist extracts info.requires_dist and reduces each PEP 508
 // requirement string to a plain, PEP-503-normalized dependency name,
 // dropping anything extras-gated (see RequiresDist's doc comment for why).
@@ -193,22 +156,12 @@ type pypiDepsResponse struct {
 // `name == "" || GatedByExtra(marker)` skip did — hid the second behind the
 // first (Decision D-24).
 func parseRequiresDist(raw []byte) (names []string, unparsed int, err error) {
-	var resp pypiDepsResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, 0, fmt.Errorf("pypi-requires-dist: parsing response: %w", err)
+	reqs, unparsed, err := parseRequirements(raw)
+	if err != nil {
+		return nil, 0, err
 	}
-	for _, entry := range resp.Info.RequiresDist {
-		name, _, _, marker := pep508.Split(entry)
-		if name == "" {
-			// Unreadable specifier: whatever edge it described is now missing.
-			unparsed++
-			continue
-		}
-		if pep508.GatedByExtra(marker) {
-			// Deliberate: this tool never knows which extras were requested.
-			continue
-		}
-		names = append(names, purl.NormalizePyPI(name))
+	for _, r := range reqs {
+		names = append(names, r.Name)
 	}
 	return names, unparsed, nil
 }

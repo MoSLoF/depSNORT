@@ -52,7 +52,7 @@ func lockPath(path string) string {
 }
 
 // Detect implements ecosystem.Adapter.
-func (*Adapter) Detect(path string) bool { return lockPath(path) != "" }
+func (*Adapter) Detect(path string) bool { return lockPath(path) != "" || manifestPath(path) != "" }
 
 // lockfile is the subset of package-lock.json we parse.
 type lockfile struct {
@@ -94,15 +94,23 @@ type lockDepV1 struct {
 
 // Resolve implements ecosystem.Adapter.
 func (*Adapter) Resolve(path string) (*graph.Graph, error) {
-	lp := lockPath(path)
-	if lp == "" {
-		return nil, fmt.Errorf("npm: no %s found at %q", lockName, path)
+	if lp := lockPath(path); lp != "" {
+		raw, err := os.ReadFile(lp)
+		if err != nil {
+			return nil, fmt.Errorf("npm: reading lockfile: %w", err)
+		}
+		return parseLock(raw)
 	}
-	raw, err := os.ReadFile(lp)
-	if err != nil {
-		return nil, fmt.Errorf("npm: reading lockfile: %w", err)
+	// No lockfile: fall back to the package.json manifest, whose declared deps
+	// transitive expansion will presume versions for (D-44 / D-45).
+	if mp := manifestPath(path); mp != "" {
+		raw, err := os.ReadFile(mp)
+		if err != nil {
+			return nil, fmt.Errorf("npm: reading manifest: %w", err)
+		}
+		return parseManifest(mp, raw)
 	}
-	return parseLock(raw)
+	return nil, fmt.Errorf("npm: no %s found at %q", lockName, path)
 }
 
 // parseLock turns package-lock.json bytes into a graph. Split out from Resolve

@@ -1316,3 +1316,326 @@ What remains genuinely indistinguishable is two path crates, because Cargo.lock
 records no path for them. They keep the ambiguity disclosure. The rule holds:
 where the lockfile can tell two artifacts apart, so does the identity; where it
 cannot, nothing pretends otherwise.
+
+## D-44 — expansion looks past the manifest by default, and grades what it finds
+
+A lockfile-first scan sees exactly one layer below a flat pin. `requirements.txt`
+with `totallyInnocent==0.11.2` resolved one node; whatever it dragged in — the
+layers an attacker would rather stayed unread — was nowhere in the file, and the
+scan said `PASSED`. D-24 made that gap VISIBLE (coverage degrades, the banner
+reads INCOMPLETE). It did not close it. A supply-chain IDS that only reads what
+the operator already listed is not doing the job the name claims.
+
+The walk closes it: from each versioned node it reads that package's own
+published dependencies and descends, layer after layer, per root. It is on by
+default (`-expand`, default true), because looking only at face value defeats
+the tool. `-no-expand` (or `-expand=false`) restores the manifest-only posture
+for an operator who wants nothing in the graph a file did not state, and
+`-expand-depth=N` stops after N layers so the tree can be stepped through one
+layer at a time.
+
+**Why this is not the resolver D-01 refused.** A dependency is declared as a
+NAME and a CONSTRAINT (`requests>=2.0`), never a version. To put a node in the
+graph the walk presumes one: the highest published version satisfying the
+constraints its dependents accumulated. That is a filter and a sort — no
+backtracking, no marker evaluation, no conflict search — and it is what pip,
+npm, and cargo actually do absent a conflict, so it is right in the common case
+and wrong in a knowable direction. It is not a resolver, and the tool never
+presents its output as observed fact.
+
+**The version is a truth axis, the way risk, coverage, and origin already are
+(D-05/D-06, D-24, D-41).** `depsnort.version_truth` grades every node: OBSERVED
+(a lockfile said so), PRESUMED (this tool chose it), ASSERTED (an external
+resolved-graph service supplied it — the D-01-sanctioned deps.dev path, not yet
+built), CONTESTED (constraints admit nothing, or could not be evaluated — no
+version assigned, walk stops). Grading the claim is what makes depth safe:
+before it, the only honest walk was a shallow one.
+
+**Presumed nodes never gate.** `verdict.applyPresumedDemotion` demotes every
+finding on a presumed node to advisory, enforced beside the recency demotion so
+no check can opt out. A block on a version nobody installed is a false positive
+with a build failure attached, and one of those teaches an operator to disable
+expansion permanently — costing every true finding the deeper layers would have
+surfaced. It demotes block class where recency demotion refuses to, and the
+difference is the premise: recency acts on an OBSERVED release, where severity
+still stands; a presumed node's version was never observed, so a block about it
+is a confident claim about a coordinate that may not be in the build. Demoted,
+never dropped — a typosquat found four layers down stays in the report, which is
+the whole reason for walking that deep.
+
+**What it costs, disclosed not hidden.** The walk stops at a FRONTIER — a node
+whose dependencies it could not read — for three distinct reasons it keeps
+apart: the `-expand-depth` cap (a limit the operator chose), a contested version
+(the data would not resolve), and an unread coordinate (a fetch that did not
+happen). Only the last degrades coverage, surfacing as the `pypi-expand` data
+source going degraded, exactly as a failed OSV lookup does. An offline scan
+therefore now reports INCOMPLETE where before it silently attempted nothing —
+the more honest answer, and the one D-24 demands: a walk that could not see the
+deep layers must say so, not imply an all-clear.
+
+**Scope today.** The engine (`internal/expand`) and the truth axis
+(`internal/graph`) are ecosystem-neutral; the per-ecosystem surface is one seam
+— declare, index versions, judge a constraint — and each ecosystem implements
+all three on one struct, so one walk spans several. PyPI reads requires_dist and
+judges with PEP 440 (`internal/pep440`); npm reads the packument's per-version
+`dependencies` and judges with a semver-range evaluator in `internal/semver`
+(caret, tilde, x-ranges, hyphen ranges, AND/OR); Cargo reads the crates.io
+per-version dependencies endpoint and judges with `SatisfiesCargo`, which shares
+that evaluator's caret/tilde math but flips two defaults — a bare requirement is
+caret, not exact, and AND is a comma. NuGet reads dependency groups from the
+registration index (the one document that also carries the version list) and
+judges with `internal/nugetver`, a separate version model because NuGet needs
+what semver cannot give: four-part versions (`1.2.3.4`) and interval ranges
+(`[1.0,2.0)`), where a bare version is a MINIMUM, not exact and not caret. All
+reuse the registry clients VC-004/VC-005 already run; the per-coordinate deps
+clients share one `coordFetcher` for the cache/concurrency/coverage plumbing.
+
+NuGet also forced the walk to stop assuming a universal selection direction. npm,
+PyPI, and Cargo install the HIGHEST version satisfying a constraint; NuGet
+installs the LOWEST. Presuming the highest for NuGet would model a restore no
+client performs, so an ecosystem now declares its direction through the optional
+`LowestResolver` interface, and the walk sorts candidates accordingly — highest
+by default, lowest when the declarer says so. The selection is the installer's,
+not the tool's.
+
+RubyGems and Composer completed the set with no engine change — grammar only.
+Their `~>` (Ruby) and `~` (Composer) are the SAME "pessimistic" operator
+(`~> 1.2` and `~1.2` both mean `>=1.2.0 <2.0.0`), distinct from npm's tilde
+(`~1.2` = `<1.3.0`), so `internal/semver` grew one shared `pessimistic` helper
+and two entry points over the existing caret/comparator machinery. RubyGems
+reads runtime dependencies per version from the v2 API (development
+dependencies excluded, like npm devDeps); Composer reads the `require` map from
+the Packagist p2 document (which, like the npm packument and the NuGet
+registration index, carries every version's dependencies in one fetch, so its
+deps client batches by name), filtering platform requirements — php, ext-*,
+lib-* — that name the runtime rather than an installable package. With these
+two, expansion covers every ecosystem depSNORT resolves. Cargo also keeps build-dependencies (they
+run build.rs at compile time — the install-time subgraph's own subject, D-02)
+and drops dev-dependencies, which Cargo never compiles transitively. The other
+three ecosystems expand as each grows its own range grammar; until one does, its
+nodes stay at the frontier rather than being presumed wrongly, the D-15
+decline-when-you-lack-a-basis rule.
+
+**One guard the Cargo fixture forced, applying to every ecosystem.** The walk
+descends from versioned nodes, and a vendored crate is a versioned node — but
+one the lockfile recorded as path- or git-sourced (D-41). Querying a registry
+for that name would answer with whatever real package happens to share it, and
+graft that package's dependency tree onto the local fork: the exact
+name-confusion the source class exists to prevent. The walk therefore queries a
+registry only for registry-origin and unqualified nodes (D-43 qualifies only
+non-registry origins, so an ordinary registry package carries no source
+attribute), and leaves an explicitly non-registry node at the frontier.
+
+npm forced one design choice the single-ecosystem sketch hid: the walker cannot
+hold one global version index, because npm and PyPI resolve versions through
+different clients. A declarer that also indexes its own versions (both
+`WalkSource`s do) is therefore preferred per-ecosystem, and the global index is
+only a fallback. That in turn surfaced a containment subtlety worth recording:
+with presuming on, a declared package is created by identity graph-wide, so if
+root A presumes the same coordinate root B observed, they legitimately share one
+node — dedup, not borrowing, because A presumed it independently from the
+registry. The guarantee that survives is narrower and correct: A's resolution is
+never SWAYED by B's pin. When B has pinned a version A's constraint excludes, A
+presumes its own and the two do not touch.
+
+**Surfacing, once the walk shipped.** A presumed version that renders
+identically to an observed one re-creates the very confusion the truth axis
+exists to prevent, so every emitter now distinguishes them. JSON promotes
+`version_truth` to a first-class node field, emitted only when not observed, so
+its absence still means "from a lockfile". SARIF tags a finding whose subject is
+presumed with `versionTruth`/`presumedVersion` properties, so a code-scanning
+dashboard can deprioritize a finding about a coordinate that may not be in any
+build — the same reason verdict already demoted it. DOT gives presumed and
+contested nodes a dashed outline and a `(presumed)`/`(contested)` label. The PDF
+risk table marks a presumed version `~` and a contested one `?`, with a note
+that findings on them are advisory. Cypher promotes `version_truth` to a
+queryable property. The rule is one line across all five: an observed node is a
+fact from a lockfile and a presumed one is this tool's best guess, and they must
+never look the same.
+
+**A conformance suite, so the seam stays honest.** With all six ecosystems
+expanding through the same three-method contract, the risk is the D-15 pattern
+at scale: a contract kept in five sources and missed in the sixth. One
+table-driven suite (`internal/ecosystem/conformance`) now runs every WalkSource
+through the invariants the engine relies on but cannot enforce, because they
+live in per-ecosystem code — identity normalization folds what must fold and
+separates what must not (BOTH the PURL and the canonical name the walk keys its
+match map on), an unreadable range declines rather than silently answering,
+version ordering is a strict total order consistent with a known ascending list,
+and the resolution direction matches the ecosystem's declared lowest/highest. It
+runs offline over the pure methods (no registry clients), and a coverage test
+fails if an ecosystem is wired into the CLI without a conformance case. Writing
+it caught one latent gap: the canonical-name half of PyPI's folding was
+untested, and `purl.NewPyPI` normalizing downstream had been masking it — a
+node identity that folded while the match key did not would silently under-dedupe
+exactly the way D-15 warned.
+
+**The asserted tier: deps.dev, opt-in.** Presuming is this tool's guess at what
+an installer would pick; deps.dev is a service that actually ran a resolver, and
+its answer is a concrete version for every dependency of a coordinate. That is
+the `asserted` tier the truth axis reserved from the start (D-01 named deps.dev
+for exactly this). It is a distinct walk operation, not a `presume` hook,
+because deps.dev resolves a WHOLE transitive graph per coordinate rather than a
+single constraint: `expand.AssertRoot` merges that graph, marking every resolved
+dependency `asserted` and attributing it (`asserted_by = deps.dev`), and the
+presume walk then treats an asserted subtree as a closed frontier so a guess
+never overwrites a real resolution. The two tiers compose cleanly — asserted
+where deps.dev has an answer, presumed for the rest (deps.dev has no Composer
+system, so Composer roots always fall through to presume).
+
+Three properties keep it honest. It is OPT-IN (`-depsdev`): reaching a new
+external service is an operator's policy choice, not a default, and the trust
+posture differs from the package registries the tool already consults. The
+observed root is never re-versioned — an asserted version for a lockfile pin
+would demote a fact to a claim. And asserted still NEVER GATES: a resolver's
+answer is A build's fact, not THIS build's, so verdict demotes it exactly as it
+does presumed. The emitters distinguish all four states now — JSON/Cypher carry
+the raw `version_truth`, SARIF tags the finding, DOT labels the node, and the
+PDF marks an asserted version `+`, a presumed one `~`, a contested one `?`.
+
+## D-45 — trial by fire: four repos, four fixes before the PR
+
+Before opening the PR, the expansion work was run against four real repositories
+(two multi-ecosystem workspaces, two Python projects). All four scanned to
+completion with clean exits and correct coverage disclosure — the robustness bar
+held, including graceful degradation when OSV, deps.dev, and most registries were
+blocked by network policy. But the trial exposed four real defects, three of them
+in exactly the case the feature exists for, and all four are fixed here.
+
+**The manifest-only case was the whole point, and expansion missed it.** A
+project with no lockfile — an unpinned requirements.txt, or a pyproject.toml
+declaring PEP 621 / Poetry dependencies — is the most common thing a user points
+this tool at, and expansion discovered nothing for it. The walk sourced its
+declarations from the registry's per-version dependency metadata, which a LOCAL
+root has no coordinate for, so a project's own direct deps were recorded as an
+`unresolved` disclosure string and never presumed. Two halves:
+
+  - Adapters now record declared-but-unpinned direct deps WITH their constraints
+    on `graph.AttrDeclaredDeps` (name + constraint, no version), and expansion
+    has a seed phase that presumes a version for each before the frontier walk —
+    the declarations come from the local file, so they ride on the node rather
+    than being fetched. On the trial repos this turned "1 node, 49 stranded
+    names" into 115 nodes (113 presumed) and "no supported projects found" into
+    26 nodes.
+  - The PyPI adapter now reads pyproject.toml as a resolvable manifest (PEP 621
+    `[project].dependencies` and Poetry `[tool.poetry.dependencies]`,
+    line-scanned per D-10, no TOML dependency), gated so a pyproject that only
+    configures a build backend is not claimed as a project. A Poetry/PEP 621
+    project with no requirements.txt used to resolve to nothing.
+
+**Cargo picked the wrong roots.** The adapter assumed the first `[[package]]` in
+Cargo.lock was the project — but Cargo.lock is alphabetical, so it crowned
+whatever sorted first (adler2, android_system_properties). Roots are now the
+source-less crates (workspace members / local project) with no incoming edge,
+excluding collision-marked duplicates; a registry crate always has a source and
+is never a root. A root keeps the bare coordinate (it is the scan's subject, not
+a dependency to verify) via a new `graph.RenameNode`, while its path provenance
+stays on the source_class attr. Depth is now a multi-root shortest-distance BFS.
+
+**npm alias deps declined when they should resolve.** A dependency declared as
+`"string-width-cjs": "npm:string-width@^4.2.0"` (the npm alias protocol) landed
+as contested, because the walk resolved the alias name against the registry
+instead of the target. The npm walk now unwraps `npm:target@range` to resolve
+the real package. Contested alias nodes went to zero on the trial repos.
+
+The lesson the log should keep: the feature worked cleanly on lockfile'd trees —
+the case that is easy to test with fixtures — and failed on the manifest-only
+case that a real repository actually presents. Fixtures proved the machinery;
+the trial proved the product.
+
+## D-46 — trial by fire, round two: setup.py, the last manifest gap
+
+A second set of four repositories, run before the PR. Three of the four
+immediately discovered their trees on the round-one fixes — the new pyproject and
+unpinned-requirements handling working on fresh code (57, 37, and 90 presumed
+packages). The fourth, Reticulum, still reported "no supported projects found":
+it declares its dependencies only in setup.py.
+
+setup.py is arbitrary Python and D-04 forbids running it, but the common case is
+static — a literal list, or a list variable referenced by install_requires —
+and Reticulum is exactly that (`requirements = ['cryptography>=3.4.7',
+'pyserial>=3.5']`, then `install_requires=requirements`). The adapter now reads
+those two shapes statically: an inline `install_requires=[...]` literal, and an
+`install_requires=<name>` that points at one or more `<name> = [...]`
+assignments (union across a pure/full conditional). A setup.py that builds its
+list dynamically — reads a file, calls parse_requirements — yields nothing and is
+NOT claimed as a project, because asserting a dependency set the code does not
+statically declare would be worse than missing it. Reticulum went from zero to a
+resolved six-node tree.
+
+That closes the manifest gap the two trials mapped out: requirements.txt (pinned
+and unpinned), Pipfile.lock, pyproject.toml (PEP 621 and Poetry), and now
+setup.py. The pattern across both rounds held — the machinery was sound, and
+every gap was a real-world INPUT SHAPE that fixtures had not exercised. Two
+rounds of real repositories found five such shapes; a fixture suite would have
+found none of them.
+
+## D-47 — trial by fire, round three: exit codes and the npm manifest
+
+Eleven repositories, the widest net yet, spanning Cargo, npm, PyPI (requirements,
+pyproject, setup.py, poetry.lock, uv.lock), Go, and a Gradle/QNX project. Eight
+resolved cleanly on the earlier fixes — including the setup.py projects from
+round two and the poetry.lock/uv.lock projects, which fell through to their
+pyproject/requirements siblings. Two defects surfaced, both fixed.
+
+**"No supported projects" was returning exit 70 (internal error).** A recursive
+sweep that crossed a Go-only, C/RTOS, or otherwise manifest-less repo failed with
+the internal-error code — which would break a CI gate run across many repos, none
+of them actually broken. Nothing to scan is neither a risk finding nor an
+internal error: it now exits CLEAN (0) with a loud stderr note, on both the
+recursive and single-target paths. A path that does not EXIST is kept distinct —
+that is a usage error (64), the operator's bad argument, not an empty-but-valid
+tree. The earlier trials had reported exit 0 here only because the measurement
+piped through `head`; the bug was long-standing, and the round-three harness
+captured the real code.
+
+**An npm package.json without a lockfile resolved to nothing.** A committed npm
+app missing its package-lock.json is a manifest, not a resolved tree — the same
+shape the PyPI pyproject fix (D-45) handled, one ecosystem over. The npm adapter
+now falls back to package.json when no lock is present, emitting its runtime and
+optional dependencies (dev excluded, aliases unwrapped) as declared deps for
+expansion to presume. A real repo went from "no supported projects" to a 180-node
+tree resolved six layers deep.
+
+Three rounds, twelve repositories that landed something, and every single
+finding was an INPUT SHAPE the fixtures never had: unpinned requirements,
+pyproject, setup.py, npm aliases, Cargo's alphabetical lock, a manifest-less
+tree's exit code, a lockless package.json. The machinery was right from the
+start; the trials were about contact with how projects are actually committed.
+What remains uncovered is disclosed, not silently wrong: Go and Gradle have no
+adapter and now say "nothing to scan" cleanly, and poetry.lock/uv.lock defer to
+their manifest siblings.
+
+## D-48 — the Go module adapter, and MVS as a lowest-resolver
+
+Go was the one primary ecosystem depSNORT could not read: a go.mod repo reported
+"no supported projects". The adapter now reads go.mod's resolved require set —
+every module, direct and indirect, at the exact version Go's
+minimal-version-selection already pinned — with no execution (D-04: `go` is never
+run). go.mod records no inter-module edges, so it is a FLAT resolution like a
+pinned requirements.txt (D-24), disclosed as such; go.sum is a hash ledger, not
+parsed for structure.
+
+Expansion rebuilds the real tree by reading each module's own go.mod from
+proxy.golang.org (in the egress allowlist, so it works where the other registry
+hosts are blocked). Go slots into the existing walk with no engine change once
+one fact is modeled right: a go.mod `require M vX` is a MINIMUM, and MVS selects,
+per module, the maximum among all required minimums — which is the LOWEST version
+satisfying every ">= vX" at once. So Go expresses each require as ">=version" and
+declares PrefersLowest, the same NuGet-shaped resolution the walk already
+supports. Presuming the newest version instead would model an upgrade Go never
+performs; a live scan confirmed the walk presumes the lowest satisfying version
+and never the newest.
+
+Two properties a real scan verified. The go.mod pins are already the global MVS
+result, so when a dependency requires a module at a lower minimum than the root
+resolved, the walk must LINK to the observed pin, not presume a lower duplicate —
+and on a 145-module project every module appeared exactly once, no
+observed/presumed version split. And Go 1.17 module-graph pruning omits
+deps-of-deps the root does not import, so expansion legitimately discovered 87
+modules past the pruned go.mod, each read from the proxy.
+
+Module identity is the full path including any /vN major suffix; the PURL encodes
+its slashes, and reports render the raw path from the node name. The Go module
+proxy's !-escaping of uppercase letters is a transport detail confined to the
+proxy client.

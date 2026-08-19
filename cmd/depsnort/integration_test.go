@@ -40,10 +40,12 @@ func TestScanUnknownFormatReturnsUsage(t *testing.T) {
 	}
 }
 
-func TestScanNonExistentPathReturnsInternal(t *testing.T) {
+func TestScanNonExistentPathReturnsUsage(t *testing.T) {
+	// A path that does not exist is a usage error (bad argument), distinct from
+	// a valid path with no supported manifest (nothing to scan, exit clean).
 	code := run([]string{"scan", "/nonexistent/path/that/does/not/exist"})
-	if code != exitInternal {
-		t.Errorf("nonexistent path exit code = %d, want %d", code, exitInternal)
+	if code != exitUsage {
+		t.Errorf("nonexistent path exit code = %d, want %d", code, exitUsage)
 	}
 }
 

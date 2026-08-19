@@ -188,6 +188,17 @@ func (SARIF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo)
 		if f.Remediation != "" {
 			props["remediation"] = f.Remediation
 		}
+		// When the finding's subject is a node whose version this tool presumed
+		// rather than observed (D-44), say so as a property. A code-scanning
+		// dashboard can then deprioritize it: the finding is real, but the
+		// coordinate it is about may not be in any actual build — which is
+		// exactly why verdict demoted it to advisory and it can never gate.
+		if n := g.Get(f.NodeID); n != nil && n.VersionTruth() != graph.TruthObserved {
+			props["versionTruth"] = n.VersionTruth()
+			if n.Presumed() {
+				props["presumedVersion"] = "true"
+			}
+		}
 		run.Results = append(run.Results, sarifResult{
 			RuleID:  f.CheckID,
 			Level:   sarifLevel(f),

@@ -117,6 +117,15 @@ func NewComposer(name, version string) PURL {
 
 // NewNuGet builds a PURL for a NuGet (.NET) package. NuGet names are
 // case-insensitive; we lowercase for deduplication.
+// NewGo builds a PURL for a Go module. The module path is hierarchical and
+// opaque (github.com/foo/bar, with an optional /vN major suffix that is part of
+// the path), so it is kept whole as the name rather than split into a
+// namespace — Go's identity IS the full module path, and splitting it would
+// make github.com/foo/bar/v3's "name" the bare "v3".
+func NewGo(module, version string) PURL {
+	return PURL{Type: "golang", Name: strings.TrimSpace(module), Version: version}
+}
+
 func NewNuGet(name, version string) PURL {
 	return PURL{Type: "nuget", Name: strings.ToLower(strings.TrimSpace(name)), Version: version}
 }

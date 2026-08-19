@@ -108,6 +108,41 @@ func isSpecifierStart(b byte) bool {
 // NOTE: "==1.0.*" is treated as a pin to "1.0". That is pre-existing
 // prefix-match-as-pin behavior with a test asserting it, and is out of scope
 // for this parser fix.
+// SplitSpecifier separates a PEP 508 requirement into its distribution name,
+// its RAW version specifier, and its environment marker. Unlike Split — which
+// answers "is this an exact pin?" and reports a version only for "==" — this
+// preserves the whole specifier (">=1.21,<2.0", "~=3.0"), because the Nth-layer
+// walk must evaluate a range, not just recognize a pin.
+//
+// name is "" for input that is not a requirement at all (a bare URL, a wheel
+// filename), matching Split's disclosure rule: a leading token that is not a
+// legal name never masquerades as a package. An absent specifier yields an
+// empty spec, which pep440 treats as "admits everything".
+func SplitSpecifier(s string) (name, spec, marker string) {
+	if i := strings.IndexByte(s, ';'); i >= 0 {
+		marker = strings.TrimSpace(s[i+1:])
+		s = s[:i]
+	}
+	s = strings.TrimPrefix(strings.TrimSpace(s), utf8BOM)
+	s = unwrapLegacyParenSpec(strings.TrimSpace(s))
+
+	idx := nameAndExtrasRe.FindStringSubmatchIndex(s)
+	if idx == nil {
+		return "", "", marker
+	}
+	name = s[idx[2]:idx[3]]
+	rest := strings.TrimSpace(s[idx[1]:])
+	if rest == "" {
+		return name, "", marker
+	}
+	if !isSpecifierStart(rest[0]) {
+		// Same rule as Split: the name did not end at a legal boundary, so this
+		// is not a requirement. Disclose it rather than inventing a name.
+		return "", "", marker
+	}
+	return name, rest, marker
+}
+
 func Split(s string) (name, version string, pinned bool, marker string) {
 	// Environment markers: "pkg==1.0 ; python_version < '3.9'"
 	if i := strings.IndexByte(s, ';'); i >= 0 {

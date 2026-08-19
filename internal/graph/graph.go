@@ -101,6 +101,52 @@ func (g *Graph) AddNode(n *Node) *Node {
 	return n
 }
 
+// RenameNode changes a node's ID from old to new, updating the node map,
+// insertion order, every edge endpoint, and the root list. No-op if old is
+// absent; refuses (returns false) if new already exists, so the caller ensures
+// new is free. Used where canonical identity is known only after the graph is
+// built: a Cargo workspace root is a source-less crate that gets a provenance
+// qualifier during parsing but, as the scan's SUBJECT, should carry the bare
+// coordinate.
+func (g *Graph) RenameNode(old, new string) bool {
+	if old == new {
+		return true
+	}
+	n, ok := g.Nodes[old]
+	if !ok {
+		return false
+	}
+	if _, exists := g.Nodes[new]; exists {
+		return false
+	}
+	delete(g.Nodes, old)
+	n.ID = new
+	g.Nodes[new] = n
+	for i, id := range g.order {
+		if id == old {
+			g.order[i] = new
+		}
+	}
+	for i := range g.Edges {
+		if g.Edges[i].From == old {
+			g.Edges[i].From = new
+		}
+		if g.Edges[i].To == old {
+			g.Edges[i].To = new
+		}
+	}
+	for i, r := range g.Roots {
+		if r == old {
+			g.Roots[i] = new
+		}
+	}
+	g.edgeSeen = make(map[string]struct{}, len(g.Edges))
+	for _, e := range g.Edges {
+		g.edgeSeen[e.From+"\x00"+e.To+"\x00"+string(e.Type)] = struct{}{}
+	}
+	return true
+}
+
 // AddEdge adds a typed edge, deduping exact repeats.
 func (g *Graph) AddEdge(from, to string, t EdgeType) {
 	key := from + "\x00" + to + "\x00" + string(t)

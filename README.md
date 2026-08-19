@@ -252,6 +252,36 @@ Only metadata is fetched for the temporal axis — never a tarball, never an
 install. Results are cached; `-offline` uses the cache exclusively and
 `-no-registry` disables registry enrichment entirely.
 
+**Transitive expansion.** A lockfile-first scan sees one layer below a flat pin;
+whatever that layer drags in is nowhere in the file. By default depSNORT walks
+past it — reading each package's own published dependencies and descending layer
+by layer — so a single `requirements.txt` line is scanned to the depth an
+attacker actually hides at. A declared dependency is a name and a *constraint*,
+not a version, so the walk presumes one (the highest published version
+satisfying the accumulated constraints) and labels it: every node carries
+`version_truth` ∈ {`observed`, `presumed`, `contested`}. Presumed nodes are
+reported but **never gate** — a block on a version nobody installed is a false
+positive with a build failure attached. With `-depsdev` (opt-in, reaches an
+external service) the walk first consults deps.dev for a REAL resolved version
+of each dependency — the *asserted* tier, `version_truth = asserted` — and only
+presumes what deps.dev cannot resolve; asserted versions are stronger than a
+guess but still never gate, since they are not this build's lockfile.
+`-no-expand` restores the manifest-only posture; `-expand-depth=N` steps
+through the tree one layer at a time. Expansion covers all seven ecosystems: PyPI (PEP 440), npm (semver ranges),
+Cargo (crates.io, where a bare requirement means caret), NuGet (interval
+ranges like `[1.0,2.0)`, a bare version is a minimum, and the resolver picks
+the LOWEST satisfying version), RubyGems (the `~>` pessimistic operator), Composer
+(npm-family semver whose `~` is pessimistic, not npm’s tilde), and Go (module
+requires are minimum versions; MVS selects the lowest satisfying, read from
+`go.mod` and the module proxy). Each
+reads only the registry metadata the tool already fetches for the temporal
+axis; a dependency the lockfile records as git-, path-, or url-sourced is
+never walked against a registry, since its name could collide with a real
+package. A dependency the lockfile records as git-, path-, or
+url-sourced is never walked against a registry — its name could collide with a
+real package, and grafting that package’s tree onto a local fork is the
+confusion the source class exists to prevent.
+
 Temporal findings use exponential recency decay with a 90-day half-life:
 `score = severity × confidence × recency_decay`. "Recent" is a curve rather than
 a cliff, so a three-year-old dormancy event scores near zero instead of shouting

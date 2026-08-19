@@ -30,6 +30,8 @@ import (
 	"ihbv.io/depsnort/internal/check"
 	"ihbv.io/depsnort/internal/check/builtin"
 	"ihbv.io/depsnort/internal/datasource"
+	"ihbv.io/depsnort/internal/datasource/depsdev"
+	"ihbv.io/depsnort/internal/datasource/goproxy"
 	"ihbv.io/depsnort/internal/datasource/ioc"
 	"ihbv.io/depsnort/internal/datasource/npmreg"
 	"ihbv.io/depsnort/internal/datasource/osv"
@@ -37,12 +39,14 @@ import (
 	"ihbv.io/depsnort/internal/ecosystem"
 	"ihbv.io/depsnort/internal/ecosystem/cargo"
 	"ihbv.io/depsnort/internal/ecosystem/composer"
+	"ihbv.io/depsnort/internal/ecosystem/gomod"
 	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/ecosystem/npm"
 	"ihbv.io/depsnort/internal/ecosystem/nuget"
 	"ihbv.io/depsnort/internal/ecosystem/pypi"
 	"ihbv.io/depsnort/internal/ecosystem/rubygems"
 	"ihbv.io/depsnort/internal/emit"
+	"ihbv.io/depsnort/internal/expand"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/verdict"
 )
@@ -56,6 +60,7 @@ import (
 var version = "dev"
 
 const (
+	exitClean    = 0
 	exitUsage    = 64
 	exitInternal = 70
 )
@@ -136,6 +141,15 @@ scan flags:
   -osv-cache string        OSV advisory cache directory
   -no-registry             skip registry metadata (disables VC-004 / VC-005)
   -registry-cache string   registry metadata cache directory
+  -expand                  discover transitive layers a manifest does not name,
+                           past what the lockfile recorded (default true); the
+                           versions it presumes are labelled and never gate
+  -expand-depth int        stop expansion after N layers (0 = full depth); set 1
+                           to step through the tree one layer at a time
+  -depsdev                 consult deps.dev for REAL resolved versions before
+                           presuming (asserted tier); opt-in — reaches an
+                           external service, and asserted versions still never gate
+  -no-expand               alias for -expand=false: only what the files state
   -no-install-surface      skip static install-hook extraction (VC-002b..e)
   -recursive               treat the path as a workspace root: discover every
                            project beneath it and merge into one graph
@@ -198,6 +212,7 @@ func adapterRegistry(offline bool) *ecosystem.Registry {
 		cargo.New(),
 		composer.New(),
 		nuget.New(),
+		gomod.New(),
 	)
 }
 
@@ -464,6 +479,54 @@ func reconstructPyPIDepth(g *graph.Graph, client *registry.PyPIDepsClient, roots
 	return cov
 }
 
+// expandTransitive walks each root past what its lockfile recorded, discovering
+// the layers a manifest does not name and presuming a published version at each
+// (Decisions D-24 for coverage honesty, and the version-truth axis for the
+// presumption grade). It is per-root by construction: a declaration in one
+// project is never satisfied by another project's pinned version.
+//
+// depth is the -expand-depth cap (0 = full). The returned coverage folds every
+// root's frontier and unread counts into one data-source entry, so a walk that
+// was bounded by the network — rather than by the tree or by the cap — degrades
+// coverage exactly as the reconstruction stage does.
+func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Declarer, resolver expand.Resolver, depth int) emit.DataSourceCoverage {
+	cov := emit.DataSourceCoverage{Name: "expand"}
+	walker := expand.NewWalker(sources...)
+	opts := expand.Options{MaxDepth: depth}
+
+	var discovered, presumed, contested, unread, asserted int
+	for _, root := range roots {
+		// Asserted tier first (D-44): where deps.dev has a real resolution, its
+		// concrete versions are merged and the presume walk then treats those
+		// subtrees as closed, so a guess never overwrites a resolver's answer.
+		if resolver != nil {
+			ar, err := walker.AssertRoot(context.Background(), g, root, resolver)
+			if err != nil && cov.Error == "" {
+				cov.Error = err.Error()
+			}
+			asserted += ar.Asserted
+		}
+		res, err := walker.ExpandRoot(context.Background(), g, root, opts)
+		if err != nil && cov.Error == "" {
+			cov.Error = err.Error()
+		}
+		discovered += res.Discovered
+		presumed += res.Presumed
+		contested += res.Contested
+		unread += res.Unread
+	}
+	// Queried counts what we set out to learn; Gaps is the honest shortfall —
+	// a coordinate whose metadata never came back is a layer we could not read,
+	// which degrades coverage rather than passing as a complete walk (D-24).
+	cov.Stats.Gaps = unread
+	if discovered > 0 || asserted > 0 {
+		fmt.Fprintf(os.Stderr, "depsnort: expansion discovered %d transitive package(s) past the manifest (%d asserted, %d presumed, %d contested, %d unread)\n",
+			discovered+asserted, asserted, presumed, contested, unread)
+	}
+	cov.Stats.Queried = discovered + asserted
+	return cov
+}
+
 // resolveResult is what one pass over a project list produced: the merged
 // graph plus every way that pass fell short of seeing the whole tree.
 type resolveResult struct {
@@ -539,6 +602,10 @@ func cmdScan(args []string) int {
 	noBundled := fs.Bool("no-osv-bundled", false, "never use the compiled-in fallback advisory dataset, even when the network is unreachable")
 	regCacheDir := fs.String("registry-cache", defaultCacheDir("registry"), "registry metadata cache directory")
 	noRegistry := fs.Bool("no-registry", false, "skip registry-metadata source (disables VC-004/VC-005)")
+	expandTree := fs.Bool("expand", true, "discover transitive layers past what the lockfile recorded; presumed versions are labelled and never gate")
+	noExpand := fs.Bool("no-expand", false, "alias for -expand=false")
+	expandDepth := fs.Int("expand-depth", 0, "stop expansion after N layers (0 = full depth); 1 steps one layer at a time")
+	depsDev := fs.Bool("depsdev", false, "consult deps.dev for real resolved versions before presuming (the asserted tier); opt-in, reaches an external service")
 	noInstallSurface := fs.Bool("no-install-surface", false, "skip static install-hook extraction")
 	recursive := fs.Bool("recursive", false, "treat the path as a workspace root: discover and merge every project beneath it")
 	internalScopes := fs.String("internal-scopes", "", "comma-separated internal scopes for dependency-confusion (e.g. @ihbv,@acme)")
@@ -571,6 +638,15 @@ func cmdScan(args []string) int {
 	checks := checkRegistry()
 
 	// Build the list of projects to scan. A single path is one project; with
+	// A path that does not exist is a USAGE error (a bad argument), distinct from
+	// a path that exists but carries no supported manifest (nothing to scan,
+	// exit clean). Separating them keeps a CI sweep's empty-but-valid repos from
+	// looking like the operator's typo.
+	if _, statErr := os.Stat(path); statErr != nil {
+		fmt.Fprintf(os.Stderr, "depsnort: %v\n", statErr)
+		return exitUsage
+	}
+
 	// -recursive the path is a workspace root and every project beneath it is
 	// discovered and merged into one graph.
 	var projects []discovered
@@ -581,16 +657,23 @@ func cmdScan(args []string) int {
 			return exitInternal
 		}
 		if len(found) == 0 {
-			fmt.Fprintf(os.Stderr, "depsnort: no supported projects found under %q\n", path)
-			return exitInternal
+			// Nothing to scan is not an internal error and not a risk finding —
+			// a recursive sweep legitimately crosses repos with no supported
+			// ecosystem (Go, C, a docs tree). Exit clean with a loud stderr
+			// note, so a CI gate over many repos is not failed by an empty one.
+			fmt.Fprintf(os.Stderr, "depsnort: no supported projects found under %q (nothing to scan)\n", path)
+			return exitClean
 		}
 		projects = found
 		fmt.Fprintf(os.Stderr, "depsnort: discovered %d project(s) under %s\n", len(projects), path)
 	} else {
 		adapter, err := adapters.Detect(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "depsnort: %v\n", err)
-			return exitInternal
+			// No supported manifest at this path is "nothing to scan", not an
+			// internal error — exit clean rather than failing a caller that
+			// points at a target with no supported ecosystem.
+			fmt.Fprintf(os.Stderr, "depsnort: %v (nothing to scan)\n", err)
+			return exitClean
 		}
 		projects = []discovered{{Path: path, Adapter: adapter}}
 	}
@@ -621,6 +704,9 @@ func cmdScan(args []string) int {
 	// Data-source stage: fetch advisories once (unless disabled). A network
 	// failure degrades coverage but does not abort the scan — the coverage is
 	// reported so a degraded run is never mistaken for a clean one.
+	if *noExpand {
+		*expandTree = false
+	}
 	ctx := &check.Context{Graph: g, Now: time.Now(), Config: check.Config{
 		InternalScopes: splitCSV(*internalScopes),
 		InternalNames:  splitCSV(*internalNames),
@@ -734,6 +820,45 @@ func cmdScan(args []string) int {
 			dataSourceGaps = append(dataSourceGaps, depsCov.Name)
 		}
 		info.DataSources = append(info.DataSources, depsCov)
+
+		// Transitive expansion (default on): walk past what the lockfile
+		// recorded, presuming a published version at each layer. Presumed nodes
+		// are labelled (graph.AttrVersionTruth) and can never gate — the
+		// guarantee is enforced in verdict, not here. Reuses the requires_dist
+		// client above for declarations and a dedicated PyPI release client for
+		// the version list; no new network surface beyond what -no-registry and
+		// -offline already govern.
+		if *expandTree {
+			pypiIdx := registry.NewPyPI(datasource.NewCache(filepath.Join(*regCacheDir, "pypi"), 24*time.Hour), *offline)
+			npmReg := npmreg.New(datasource.NewCache(filepath.Join(*regCacheDir, "npm"), 24*time.Hour), *offline)
+			cargoDeps := registry.NewCargoDeps(datasource.NewCache(filepath.Join(*regCacheDir, "cargo-deps"), 24*time.Hour), *offline)
+			cargoIdx := registry.NewCargo(datasource.NewCache(filepath.Join(*regCacheDir, "cargo"), 24*time.Hour), *offline)
+			nugetDeps := registry.NewNuGetDeps(datasource.NewCache(filepath.Join(*regCacheDir, "nuget-deps"), 24*time.Hour), *offline)
+			nugetIdx := registry.NewNuGet(datasource.NewCache(filepath.Join(*regCacheDir, "nuget"), 24*time.Hour), *offline)
+			gemDeps := registry.NewGemDeps(datasource.NewCache(filepath.Join(*regCacheDir, "gem-deps"), 24*time.Hour), *offline)
+			gemIdx := registry.NewGem(datasource.NewCache(filepath.Join(*regCacheDir, "gem"), 24*time.Hour), *offline)
+			composerDeps := registry.NewComposerDeps(datasource.NewCache(filepath.Join(*regCacheDir, "composer-deps"), 24*time.Hour), *offline)
+			composerIdx := registry.NewComposer(datasource.NewCache(filepath.Join(*regCacheDir, "composer"), 24*time.Hour), *offline)
+			goProxy := goproxy.New(datasource.NewCache(filepath.Join(*regCacheDir, "goproxy"), 24*time.Hour), *offline)
+			sources := []expand.Declarer{
+				&pypi.WalkSource{Deps: depsClient, Index: pypiIdx},
+				&npm.WalkSource{Reg: npmReg},
+				&cargo.WalkSource{Deps: cargoDeps, Index: cargoIdx},
+				&nuget.WalkSource{Deps: nugetDeps, Index: nugetIdx},
+				&rubygems.WalkSource{Deps: gemDeps, Index: gemIdx},
+				&composer.WalkSource{Deps: composerDeps, Index: composerIdx},
+				&gomod.WalkSource{Proxy: goProxy},
+			}
+			var resolver expand.Resolver
+			if *depsDev {
+				resolver = depsdev.New(datasource.NewCache(filepath.Join(*regCacheDir, "depsdev"), 24*time.Hour), *offline)
+			}
+			expCov := expandTransitive(g, rootNodes, sources, resolver, *expandDepth)
+			if expCov.Stats.Gaps > 0 {
+				dataSourceGaps = append(dataSourceGaps, expCov.Name)
+			}
+			info.DataSources = append(info.DataSources, expCov)
+		}
 	} else {
 		// -no-registry means requires_dist was never even fetched: a flat PyPI
 		// root must say so explicitly rather than silently carrying no
