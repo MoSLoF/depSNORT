@@ -1841,3 +1841,40 @@ unfollowable → disclosed; the one thing that can no longer happen is a
 referenced file going unread AND unmentioned. The scan-root bound rides on the
 PyPI adapter (set once from the top-level path); with none set, includes are
 disclosed rather than followed, so the parser stays safe by default.
+
+## D-55 — a yarn alias's security identity is the real package, not the alias
+
+Two defects in the yarn.lock support (D-53), found scanning kibana's real tree
+with live OSV.
+
+**OPU-08 (critical): alias mis-identification → a false malicious block.** A
+yarn alias binds a local name to a different real package:
+
+    "elasticsearch-8.x@npm:@elastic/elasticsearch@8.19.1":
+      version "8.19.1"
+      resolved "https://registry.yarnpkg.com/@elastic/elasticsearch/-/..."
+
+kibana installs the official `@elastic/elasticsearch@8.19.1` under the local
+alias `elasticsearch-8.x`. The parser took the descriptor's LOCAL name as the
+node identity, so OSV was queried as `elasticsearch-8.x` — and matched
+`MAL-2025-41971`, a genuinely malicious package an attacker published under that
+bare name. The result was a critical BLOCK, exit 1, on the innocent aliased
+package: a false positive with real teeth, and by the same mechanism a route to
+false negatives. The manifest side already unwrapped aliases
+(`resolveNpmAlias`); the lockfile-entry side did not, and that asymmetry was the
+bug. The fix unwraps a `npm:` alias to its real coordinate for the node's
+identity — the name OSV, the registry, and typosquat see is the real package;
+the alias is kept only as an `npm.alias` display label. A plain `npm:` range
+(`foo@npm:^1`, `@babel/core@npm:^7` — a bare range with no embedded name) is not
+an alias and keeps its own name. The corrected node is indexed under both the
+alias descriptor and the real coordinate, so no edge is lost.
+
+**OPU-07 (low): Berry phantom nodes.** Berry's `__metadata:` header and each
+workspace self-entry (`"app@workspace:."`) are indent-0 blocks, so the scanner
+turned them into nodes — a phantom package named `__metadata`, and a
+`0.0.0-use.local` duplicate of the real root. Non-package blocks are now dropped
+before node creation: an entry named `__metadata`, or one whose range protocol
+is `workspace:`/`portal:`/`link:` (a local self-description, not a resolved
+registry package — the real root comes from package.json). Representing
+workspace MEMBERS as their own nodes is deliberately left out; when it is done
+they should resolve to the root, not emit a `use.local` node.
