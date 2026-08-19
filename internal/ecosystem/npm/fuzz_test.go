@@ -31,3 +31,32 @@ func FuzzParseLock(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseYarnLock drives arbitrary bytes at the yarn.lock parser (both
+// dialects) paired with arbitrary manifest bytes. A yarn.lock is
+// attacker-controlled in a hostile checkout, so a malformed one must yield a
+// self-consistent partial graph — never a panic, never a nil graph with a nil
+// error (D-33).
+func FuzzParseYarnLock(f *testing.F) {
+	f.Add([]byte("a@^1:\n  version \"1.0.0\"\n"), []byte(`{"name":"r","dependencies":{"a":"^1"}}`))
+	f.Add([]byte("\"a@npm:^1, a@npm:^1.2\":\n  version: 1.2.0\n  dependencies:\n    b: \"npm:^2\"\n"), []byte(`{}`))
+	f.Add([]byte("chalk@^5:\n  version \"5.3.0\"\n  dependencies:\n    ansi-styles \"^6\"\n\"ansi-styles@^6\":\n  version \"6.2.1\"\n"), []byte(`{"dependencies":{"chalk":"^5"}}`))
+	f.Add([]byte(":::\n  version\n"), []byte(nil))
+	f.Add([]byte("@scope/x@npm:^1:\n  resolution: \"@scope/x@npm:1.0.0\"\n"), []byte(`{`))
+
+	f.Fuzz(func(t *testing.T, lockRaw, manifestRaw []byte) {
+		g, err := parseYarnLock(lockRaw, manifestRaw, "/tmp/proj")
+		if err != nil {
+			return
+		}
+		if g == nil {
+			t.Fatal("nil graph with nil error")
+		}
+		_ = g.Coverage()
+		_ = g.CountByKind()
+		_ = g.Orphans()
+		for _, n := range g.SortedNodes() {
+			_ = n.ID
+		}
+	})
+}
