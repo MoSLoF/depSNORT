@@ -91,51 +91,102 @@ func TestDiscoverCoScansAllEcosystems(t *testing.T) {
 	}
 }
 
-// OPU-19: a manifest under dist/ (a Docker build context, tpotce shape) is
-// SCANNED by default; a manifest under node_modules stays pruned; target/ is
-// pruned unless -include-build-dirs is set.
+func discoverHas(found []discovered, sub string) bool {
+	for _, f := range found {
+		if strings.Contains(filepath.ToSlash(f.Path), sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// OPU-19/OPU-25: dist/, build/, and target/ are all SCANNED by default (a real
+// dependency-bearing project under any of them is exposed); node_modules stays
+// pruned; -no-build-dirs suppresses build/target but not dist/.
 func TestDiscoverBuildDirRules(t *testing.T) {
 	root := t.TempDir()
 	mkdirAll(t, filepath.Join(root, "svc", "dist"))
 	writeGapFile(t, filepath.Join(root, "svc", "dist", "requirements.txt"), "requests==2.20.0\n")
 	mkdirAll(t, filepath.Join(root, "node_modules", "leftpad"))
 	writeGapFile(t, filepath.Join(root, "node_modules", "leftpad", "requirements.txt"), "evil==1.0.0\n")
-	mkdirAll(t, filepath.Join(root, "app", "target"))
-	writeGapFile(t, filepath.Join(root, "app", "target", "requirements.txt"), "generated==1.0.0\n")
+	// A REAL tooling project under build/ (the Titanis case: src/build/Tool/…).
+	mkdirAll(t, filepath.Join(root, "src", "build", "Tooling"))
+	writeGapFile(t, filepath.Join(root, "src", "build", "Tooling", "requirements.txt"), "tool==1.0.0\n")
+	// A real project under target/ that is NOT an artifact subdir.
+	mkdirAll(t, filepath.Join(root, "app", "target", "MyProject"))
+	writeGapFile(t, filepath.Join(root, "app", "target", "MyProject", "requirements.txt"), "real==1.0.0\n")
 
 	adapters := adapterRegistry(true)
-	has := func(found []discovered, sub string) bool {
-		for _, f := range found {
-			if strings.Contains(filepath.ToSlash(f.Path), sub) {
-				return true
-			}
-		}
-		return false
-	}
 
 	found, err := discoverProjects(root, adapters, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !has(found, "/svc/dist") {
-		t.Error("dist/ manifest must be scanned by default (OPU-19)")
+	if !discoverHas(found, "/svc/dist") {
+		t.Error("dist/ manifest must be scanned by default")
 	}
-	if has(found, "node_modules") {
+	if !discoverHas(found, "/src/build/Tooling") {
+		t.Error("a real project under build/ must be scanned by default (OPU-25, Titanis case)")
+	}
+	if !discoverHas(found, "/target/MyProject") {
+		t.Error("a real project under target/ must be scanned by default (OPU-25)")
+	}
+	if discoverHas(found, "node_modules") {
 		t.Error("node_modules manifest must stay pruned")
 	}
-	if has(found, "/target") {
-		t.Error("target/ must be pruned unless -include-build-dirs is set")
-	}
 
-	withBuild, err := discoverProjects(root, adapters, true)
+	noBuild, err := discoverProjects(root, adapters, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !has(withBuild, "/target") {
-		t.Error("target/ must be scanned with -include-build-dirs")
+	if discoverHas(noBuild, "/src/build/") || discoverHas(noBuild, "/target/") {
+		t.Error("-no-build-dirs must suppress build/ and target/")
 	}
-	if has(withBuild, "node_modules") {
-		t.Error("node_modules must stay pruned even with -include-build-dirs")
+	if !discoverHas(noBuild, "/svc/dist") {
+		t.Error("-no-build-dirs must NOT suppress dist/")
+	}
+}
+
+// OPU-25: generated-artifact subdirs INSIDE a build/target tree are pruned (their
+// manifests are copies of ones resolved elsewhere), but a directory of the same
+// name OUTSIDE a build tree is real source and is scanned.
+func TestDiscoverBuildArtifactPruneIsPathContextual(t *testing.T) {
+	root := t.TempDir()
+	// Maven: root pom + a generated pom under target/classes/META-INF/maven/….
+	mkdirAll(t, filepath.Join(root, "mvn"))
+	writeGapFile(t, filepath.Join(root, "mvn", "pom.xml"), "<project/>")
+	mkdirAll(t, filepath.Join(root, "mvn", "target", "classes", "META-INF", "maven", "g", "a"))
+	writeGapFile(t, filepath.Join(root, "mvn", "target", "classes", "META-INF", "maven", "g", "a", "pom.xml"), "<project/>")
+	// Rust: root Cargo.lock + a packaged copy under target/package/app-0.1.0/.
+	mkdirAll(t, filepath.Join(root, "rs"))
+	writeGapFile(t, filepath.Join(root, "rs", "Cargo.lock"), "[[package]]\nname=\"app\"\nversion=\"0.1.0\"\n")
+	mkdirAll(t, filepath.Join(root, "rs", "target", "package", "app-0.1.0"))
+	writeGapFile(t, filepath.Join(root, "rs", "target", "package", "app-0.1.0", "Cargo.lock"), "[[package]]\nname=\"app\"\nversion=\"0.1.0\"\n")
+	// A real source dir named "package" and one named "resources", NOT under a
+	// build tree — must be scanned (path-contextual prune).
+	mkdirAll(t, filepath.Join(root, "src", "package"))
+	writeGapFile(t, filepath.Join(root, "src", "package", "requirements.txt"), "realpkg==1.0.0\n")
+	mkdirAll(t, filepath.Join(root, "app", "resources"))
+	writeGapFile(t, filepath.Join(root, "app", "resources", "requirements.txt"), "realres==1.0.0\n")
+
+	adapters := adapterRegistry(true)
+	found, err := discoverProjects(root, adapters, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Artifact copies suppressed.
+	if discoverHas(found, "target/classes") {
+		t.Error("Maven target/classes copy must be pruned")
+	}
+	if discoverHas(found, "target/package") {
+		t.Error("Rust target/package copy must be pruned")
+	}
+	// Real same-named source dirs outside build trees preserved.
+	if !discoverHas(found, "/src/package") {
+		t.Error("a real src/package (outside a build tree) must be scanned — prune is path-contextual")
+	}
+	if !discoverHas(found, "/app/resources") {
+		t.Error("a real app/resources (outside a build tree) must be scanned — prune is path-contextual")
 	}
 }
 

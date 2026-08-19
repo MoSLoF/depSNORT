@@ -178,7 +178,7 @@ func classifyGapManifest(name string) (string, bool) {
 // all 127, never a silent "50 of 127". It shares skipWalkDir with the project
 // walk so the two agree on what a scan reaches (build dirs descended, vendored
 // copies pruned, no depth bound, cycle-guarded).
-func discoverManifestGaps(root string, claimed map[string]bool, includeBuildDirs bool) []discovered {
+func discoverManifestGaps(root string, claimed map[string]bool, noBuildDirs bool) []discovered {
 	rootClean := filepath.Clean(root)
 	visited := map[dirIdentity]bool{}
 
@@ -193,7 +193,7 @@ func discoverManifestGaps(root string, claimed map[string]bool, includeBuildDirs
 		if !d.IsDir() {
 			return nil
 		}
-		if skipWalkDir(path, rootClean, d, includeBuildDirs, visited) {
+		if skipWalkDir(path, rootClean, d, noBuildDirs, visited) {
 			return fs.SkipDir
 		}
 		if claimed[filepath.Clean(path)] {
@@ -267,14 +267,14 @@ func (a gapAdapter) Resolve(path string) (*graph.Graph, error) {
 // ecosystem" or "you forgot -recursive" on the default path. This is called only
 // on the --no-recursive branch; a full-send (default) scan produces no discovery
 // notes here at all.
-func discoveryCoverageGaps(root string, scanned []discovered, reg *ecosystem.Registry, includeBuildDirs bool) []string {
+func discoveryCoverageGaps(root string, scanned []discovered, reg *ecosystem.Registry, noBuildDirs bool) []string {
 	scannedDirs := map[string]bool{}
 	for _, p := range scanned {
 		scannedDirs[filepath.Clean(p.Path)] = true
 	}
 
 	var tokens []string
-	found, _ := discoverProjects(root, reg, includeBuildDirs)
+	found, _ := discoverProjects(root, reg, noBuildDirs)
 	for _, f := range found {
 		if scannedDirs[filepath.Clean(f.Path)] {
 			continue

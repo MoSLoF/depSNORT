@@ -65,7 +65,7 @@ create flags:
   -o, -out string          baseline file to write (default "depsnort-baseline.json")
   -no-recursive            record only the given directory (default is full-send:
                            every project beneath the path, every ecosystem)
-  -include-build-dirs      also descend target/ and build/ (dist/ is always descended)
+  -no-build-dirs           do not descend build/ or target/ (dist/ is still descended)
   -offline                 use only local caches; never touch the network
   -no-registry             skip registry metadata (records no publisher identity)
   -registry-cache string   registry metadata cache directory
@@ -84,7 +84,7 @@ func cmdBaselineCreate(args []string) int {
 	recursive := fs.Bool("recursive", true, "walk the path as a workspace root (default; full-send)")
 	shallow := fs.Bool("no-recursive", false, "record only the given directory, not its subdirectories")
 	fs.BoolVar(shallow, "shallow", false, "alias for -no-recursive")
-	includeBuildDirs := fs.Bool("include-build-dirs", false, "also descend target/ and build/ (dist/ is always descended)")
+	noBuildDirs := fs.Bool("no-build-dirs", false, "do not descend build/ or target/ (dist/ is still descended)")
 	offline := fs.Bool("offline", false, "use only local caches; never touch the network")
 	noRegistry := fs.Bool("no-registry", false, "skip registry metadata (records no publisher identity)")
 	regCacheDir := fs.String("registry-cache", defaultCacheDir("registry"), "registry metadata cache directory")
@@ -105,7 +105,7 @@ func cmdBaselineCreate(args []string) int {
 	// every ecosystem (OPU-21).
 	var projects []discovered
 	if *recursive && !*shallow {
-		found, err := discoverProjects(path, adapters, *includeBuildDirs)
+		found, err := discoverProjects(path, adapters, *noBuildDirs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "depsnort: discovery under %s: %v\n", path, err)
 			return exitInternal

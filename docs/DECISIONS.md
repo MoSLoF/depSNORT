@@ -2302,3 +2302,44 @@ bulk/corpus mode (one repo at a time, full-send). Node counts move on real repos
 (gitlab ~2,260 → ~5,350; tpotce 0 → 41); the offline probe measured pure
 discovery/resolution deltas — the CVE surface moves too once the recovered
 ecosystems get live OSV, which the post-merge validation run measures.
+
+## D-68 — OPU-25: build/ and target/ descend by default, artifact subdirs pruned
+
+D-67 (OPU-19) held `build/` and `target/` behind `-include-build-dirs`, on the
+probe finding that they hold generated copies of the root manifest (Maven's
+packaged pom, cargo's `target/package` lock) that inflate counts. That was too
+broad. Real evidence: Titanis keeps four real .NET projects under `src/build/…`
+(build-*tooling* source, not build output); the `dist`-only default silently
+pruned them, disclosing 123 of 127 `.csproj`. The directive — if a `build/` or
+`target/` directory holds actual dependencies, expose them by default — and the
+constraint — suppress the generated copies — agree: the duplication lives in
+specific tool-output SUBdirectories, not the whole tree.
+
+So `build` and `target` join `dist` in `buildDirs` (descended by default), and
+the generated-artifact copies beneath them are pruned by a curated set of
+tool-output subdirectory names (`buildArtifactDirs`: Maven `classes` /
+`generated-sources` / `maven-status`, cargo `package` / `debug` / `deps` /
+`.fingerprint`, Gradle `generated` / `intermediates` / `libs`, …).
+
+The one subtlety is that this must be **path-contextual, not global**. Several of
+those names (`classes`, `package`, `resources`, `debug`, `release`, `libs`,
+`tmp`, `doc`) are legitimate SOURCE directory names outside a build tree — a
+Python `package/`, a `resources/` source root. `buildArtifactDirs` is consulted
+ONLY when the walk is inside a `build/`/`target/` subtree (`insideBuildTree`
+checks the path's ancestors), so a real `src/package/` is untouched. These names
+are deliberately NOT added to `neverDescend`, which prunes globally. This keys on
+WHERE a file is (a known generated location), never on WHAT it contains — it is
+not the content-based root-dedup the architecture spec ruled out, so a genuinely
+distinct project under `build/` is exposed even if its dep set matches another's.
+`dist/` is excluded from the artifact-context check: its contents are real
+source, not compiler output, and it never carried the copy problem.
+
+`-include-build-dirs` is retired; `-no-build-dirs` is its inverse — skip `build/`
+and `target/` entirely for the rare user scanning a fully-built tree where even a
+duplicate disclosure is unwanted. `dist/` is never suppressed.
+
+`buildArtifactDirs` is curated, not exhaustive: an unlisted output subdir leaks a
+DUPLICATE disclosure — a harmless note, never a false block or false CVE. That is
+the safe direction. Over-exposing a generated copy is a cosmetic gap-count bump;
+under-exposing real source hides actual dependencies, which is the failure this
+closes. If a tool's layout is found to leak, its subdir is added to the list.

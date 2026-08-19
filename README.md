@@ -543,15 +543,19 @@ being rediscovered independently in each project.
 
 Discovery prunes `node_modules`, `.git`, `vendor`, `venv`, `site-packages`, and
 similar — installed/vendored copies of already-resolved trees, not projects. It
-**descends `dist/`** (a Docker build context legitimately holds a project's real
-`requirements.txt`/`go.mod`); `target/` and `build/` are pruned by default
-(a built tree keeps a generated copy of the root manifest there) and descended
-only with `-include-build-dirs`. There is no depth bound — a deep monorepo is
-reached in full, protected from directory cycles by identity rather than an
-arbitrary cap — and unreadable subtrees are skipped rather than aborting. Two
-checkouts declaring the same `name@version` merge into a single root, and the run
-says so explicitly rather than leaving an unexplained gap between the discovered
-count and the root count.
+**descends `dist/`, `build/`, and `target/`** by default, because these hold real
+dependency-bearing source too (a Docker build context's `requirements.txt`, a
+.NET tooling project under `src/build/…`). The generated-artifact *subdirectories*
+inside a `build/`/`target/` tree — Maven's `target/classes/META-INF/maven/…`,
+cargo's `target/package/…` — are pruned path-contextually (a real source dir of
+the same name *outside* a build tree is untouched), so exposing the real projects
+never re-introduces the packaged-manifest copies. `-no-build-dirs` skips `build/`
+and `target/` entirely (`dist/` still descends). There is no depth bound — a deep
+monorepo is reached in full, protected from directory cycles by identity rather
+than an arbitrary cap — and unreadable subtrees are skipped rather than aborting.
+Two checkouts declaring the same `name@version` merge into a single root, and the
+run says so explicitly rather than leaving an unexplained gap between the
+discovered count and the root count.
 
 `-no-recursive` (alias `-shallow`) restricts a scan to the given directory,
 co-scanning every ecosystem in it but not descending; it then discloses the
