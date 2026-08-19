@@ -36,14 +36,54 @@ var gapManifestByName = map[string]string{
 	// Paket's manifest. Its resolved paket.lock IS parsed (the nuget adapter
 	// claims it), so only the lock-less dependencies manifest reaches here (OPU-17).
 	"paket.dependencies": "nuget",
+
+	// OPU-18. Dependency-bearing files whose EXTENSION is too general to add to
+	// the ext tables without manufacturing false disclosures (the dedication rule
+	// below), plus lockfiles whose suffix the .lock catch-all cannot reach. Matched
+	// by exact name so only the real manifest fires — a bare Custom.props or an
+	// arbitrary foo.exs stays silent.
+	"gradle.lockfile":          "gradle",
+	"bun.lockb":                "npm",       // binary lockfile, not text
+	".terraform.lock.hcl":      "terraform", // .hcl is mostly config, so name-only
+	"mix.exs":                  "elixir",    // .exs is any Elixir script
+	"Directory.Packages.props": "nuget",     // Central Package Management; .props is any MSBuild fragment
+	"pubspec.yaml":             "dart",
+	"Podfile":                  "cocoapods",
+	"Package.swift":            "swift",
+	// go.work is deliberately omitted: it is a workspace aggregator whose local
+	// `use` modules are each scanned on their own, so disclosing the workspace
+	// file as an unread gap would be a spurious note on an already-covered repo —
+	// the same dedication reasoning that keeps general extensions out of the tables.
+
+	// OPU-18 Tier 3: these already disclosed via the .lock catch-all as "unknown";
+	// naming them upgrades attribution to the specific tool. They are gaps, not
+	// parsed, so they are deliberately NOT in adapterHandledLocks.
+	"mix.lock":     "elixir",
+	"Podfile.lock": "cocoapods",
+	"pubspec.lock": "dart",
+	"flake.lock":   "nix",
+	"conan.lock":   "conan",
+	"deno.lock":    "deno",
 }
 
-// gapManifestByExt covers the NuGet project files, which carry the project's
-// name and so vary per project (Foo.csproj), matched by extension.
+// gapManifestByExt matches DEDICATED per-project file extensions — a suffix that
+// exists SOLELY to declare dependencies, so its every occurrence is a real
+// dependency-bearing manifest whose name varies per project (Foo.csproj,
+// mygem.gemspec). This is the guardrail (OPU-18): a general extension used for
+// many non-dependency purposes (.exs, .props, .targets, .hcl, .yaml, .toml,
+// .json) must NEVER be blanket-added here — it would manufacture false
+// disclosures on unrelated files. Such ecosystems' real manifests go in the
+// exact-name table above instead.
 var gapManifestByExt = map[string]string{
-	".csproj": "nuget",
-	".fsproj": "nuget",
-	".vbproj": "nuget",
+	".csproj":  "nuget",
+	".fsproj":  "nuget",
+	".vbproj":  "nuget",
+	".vcxproj": "nuget",     // C++ PackageReference (parallels .csproj)
+	".gemspec": "rubygems",  // spec.add_dependency (gem libraries; pairs with OPU-16)
+	".podspec": "cocoapods", // s.dependency
+	".cabal":   "hackage",   // build-depends (Haskell)
+	".nimble":  "nim",       // requires (Nim)
+	".sbt":     "sbt",       // libraryDependencies (Scala)
 }
 
 // gapCatchAllExts is the last-ditch "hail-mary" tier: a file suffix that almost

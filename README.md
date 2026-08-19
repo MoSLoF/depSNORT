@@ -450,11 +450,12 @@ Unpinned specifiers, datasource failures, unreadable subtrees, offline cache
 misses, failed workspace projects, partial install-surface extraction, and
 non-registry package sources are all disclosed. So is a **recognized manifest no
 adapter can resolve** — a bare `.csproj` with no `packages.lock.json`, a
-`pom.xml`, a `Pipfile` — which degrades coverage ("manifest present, dependencies
-unread") rather than reading as "nothing to scan". As a last-ditch net, any
-unrecognized `*.lock` file (an Elixir `mix.lock`, a CocoaPods `Podfile.lock`, a
-Dart `pubspec.lock`) is disclosed as an unknown-ecosystem gap rather than skipped
-in silence. A partial run is never silently promoted to clean. Precedence is:
+`pom.xml`, a `Pipfile`, a `.gemspec`/`.podspec`/`.vcxproj`/`.cabal`/`.sbt`, a
+`gradle.lockfile`, a `mix.exs`, a `.terraform.lock.hcl` — which degrades coverage
+("manifest present, dependencies unread") rather than reading as "nothing to
+scan". As a last-ditch net, any other unrecognized `*.lock` file is disclosed as
+an unknown-ecosystem gap rather than skipped in silence. A partial run is never
+silently promoted to clean. Precedence is:
 
 ```
 block > gate-eligible > incomplete > advisory
