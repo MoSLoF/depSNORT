@@ -34,18 +34,27 @@ func New() *Adapter { return &Adapter{} }
 // Name implements ecosystem.Adapter.
 func (*Adapter) Name() string { return "composer" }
 
-const composerLockName = "composer.lock"
+const (
+	composerLockName     = "composer.lock"
+	composerManifestName = "composer.json"
+)
 
-// Detect implements ecosystem.Adapter.
+// Detect implements ecosystem.Adapter. A composer.lock claims the project (a
+// resolved tree); failing that, a composer.json declaring non-platform
+// dependencies claims it as a manifest-only project — the same lock-or-manifest
+// handling npm and PyPI already have. Without this, a Composer library or any
+// project committed without a lock read as "nothing to scan" (OPU-11).
 func (*Adapter) Detect(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false
 	}
 	if info.IsDir() {
-		return fileExists(filepath.Join(path, composerLockName))
+		return fileExists(filepath.Join(path, composerLockName)) ||
+			manifestDeclaresDeps(filepath.Join(path, composerManifestName))
 	}
-	return filepath.Base(path) == composerLockName
+	base := filepath.Base(path)
+	return base == composerLockName || (base == composerManifestName && manifestDeclaresDeps(path))
 }
 
 func fileExists(p string) bool {
@@ -53,21 +62,38 @@ func fileExists(p string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// Resolve implements ecosystem.Adapter.
+// Resolve implements ecosystem.Adapter. composer.lock takes precedence (observed
+// versions beat presumed); with no lock, a composer.json is parsed manifest-only
+// and its declared deps ride to the expansion tier (D-44), exactly as a
+// lock-less package.json or pyproject.toml is handled.
 func (*Adapter) Resolve(path string) (*graph.Graph, error) {
-	file := path
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("composer: %w", err)
 	}
-	if info.IsDir() {
-		file = filepath.Join(path, composerLockName)
+	if !info.IsDir() {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("composer: reading %s: %w", filepath.Base(path), err)
+		}
+		if filepath.Base(path) == composerManifestName {
+			return parseComposerManifest(path, raw)
+		}
+		return parseComposerLock(path, raw)
 	}
-	raw, err := os.ReadFile(file)
+	if lock := filepath.Join(path, composerLockName); fileExists(lock) {
+		raw, err := os.ReadFile(lock)
+		if err != nil {
+			return nil, fmt.Errorf("composer: reading %s: %w", composerLockName, err)
+		}
+		return parseComposerLock(path, raw)
+	}
+	manifest := filepath.Join(path, composerManifestName)
+	raw, err := os.ReadFile(manifest)
 	if err != nil {
-		return nil, fmt.Errorf("composer: reading %s: %w", composerLockName, err)
+		return nil, fmt.Errorf("composer: reading %s: %w", composerManifestName, err)
 	}
-	return parseComposerLock(path, raw)
+	return parseComposerManifest(path, raw)
 }
 
 type composerLock struct {
@@ -170,6 +196,108 @@ func parseComposerLock(path string, raw []byte) (*graph.Graph, error) {
 
 	assignDepths(g, root.ID)
 	return g, nil
+}
+
+// composerJSONDeps is the subset of a composer.json read for manifest-only
+// resolution: the declared require blocks, names and constraints only.
+type composerJSONDeps struct {
+	Require    map[string]string `json:"require"`
+	RequireDev map[string]string `json:"require-dev"`
+}
+
+// manifestDeclaresDeps reports whether a composer.json at p declares at least one
+// non-platform dependency — the gate for claiming a lock-less project.
+func manifestDeclaresDeps(p string) bool {
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return false
+	}
+	var m composerJSONDeps
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	for _, reqs := range []map[string]string{m.Require, m.RequireDev} {
+		for name := range reqs {
+			if !isComposerPlatformPackage(name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parseComposerManifest builds a manifest-only graph from a composer.json with no
+// lockfile: the project root plus its declared (name + constraint) dependencies,
+// which the expansion tier presumes or asserts a version for (D-44). Platform
+// requirements (php, ext-*, …) are dropped — they name the runtime, not an
+// installable package. Mirrors npm/manifest.go and pypi/parsePyproject.
+func parseComposerManifest(path string, raw []byte) (*graph.Graph, error) {
+	var m composerJSONDeps
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("composer: parsing %s: %w", composerManifestName, err)
+	}
+
+	g := graph.New()
+	root := rootNode(g, path)
+
+	var declared []graph.DeclaredDep
+	var names []string
+	seen := map[string]bool{}
+	add := func(reqs map[string]string) {
+		for name, constraint := range reqs {
+			if isComposerPlatformPackage(name) {
+				continue
+			}
+			// Packagist names are case-insensitive; lowercase so a manifest's
+			// "Monolog/Monolog" and a dependency's "monolog/monolog" are one node
+			// (the D-15 leak class), matching WalkSource.Identify.
+			canon := lower(name)
+			if seen[canon] {
+				continue
+			}
+			seen[canon] = true
+			declared = append(declared, graph.DeclaredDep{Name: canon, Constraint: constraint})
+			names = append(names, canon)
+		}
+	}
+	add(m.Require)
+	add(m.RequireDev)
+	if len(declared) == 0 {
+		return nil, errNoComposerManifestDeps
+	}
+	sort.Slice(declared, func(i, j int) bool { return declared[i].Name < declared[j].Name })
+	sort.Strings(names)
+
+	if root.Attr == nil {
+		root.Attr = map[string]string{}
+	}
+	root.Attr["composer.source"] = composerManifestName
+	root.Attr[graph.AttrDeclaredDeps] = graph.EncodeDeclaredDeps(declared)
+	// Surfaced as a coverage fact so a manifest-only project degrades coverage
+	// (its versions are presumed, not observed) rather than reading as a clean,
+	// fully-resolved tree — the same disclosure npm/PyPI make.
+	root.Attr[graph.AttrUnresolved] = strings.Join(names, ",")
+	root.Attr[graph.AttrUnresolvedCount] = fmt.Sprintf("%d", len(names))
+	root.Attr[graph.AttrFlatResolution] = "composer"
+	return g, nil
+}
+
+var errNoComposerManifestDeps = fmt.Errorf("composer: %s declares no non-platform dependencies", composerManifestName)
+
+// isComposerPlatformPackage mirrors registry.isPlatformPackage: a require key
+// that names the runtime (php, hhvm, ext-*, lib-*, composer-*) or lacks a
+// vendor/name slash is a platform token, not an installable package.
+func isComposerPlatformPackage(name string) bool {
+	l := strings.ToLower(name)
+	switch {
+	case l == "php", l == "hhvm":
+		return true
+	case strings.HasPrefix(l, "ext-"), strings.HasPrefix(l, "lib-"), strings.HasPrefix(l, "composer-"):
+		return true
+	case !strings.Contains(l, "/"):
+		return true
+	}
+	return false
 }
 
 // classifyPkgSource maps a composer.lock entry's dist/source blocks onto an
@@ -518,7 +646,7 @@ func truncate(s string, n int) string {
 
 func rootNode(g *graph.Graph, path string) *graph.Node {
 	name := filepath.Base(strings.TrimSuffix(filepath.Clean(path), string(filepath.Separator)))
-	if name == "." || name == "" || name == composerLockName {
+	if name == "." || name == "" || name == composerLockName || name == composerManifestName {
 		name = filepath.Base(filepath.Dir(path))
 	}
 	if name == "." || name == "" {

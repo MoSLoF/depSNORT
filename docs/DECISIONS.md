@@ -1934,3 +1934,32 @@ to be claimed.
 The broader class this belongs to — a recognized manifest that yields zero
 readable deps surfacing as coverage-incomplete rather than silent — is a
 separate cross-cutting concern, not folded in here.
+
+## D-58 — OPU-11: Composer scans a lock-less composer.json manifest-only
+
+A `composer.json` with a full `require` block but no committed `composer.lock`
+read as "nothing to scan" at exit 0 — the same silent false-clean as OPU-10, one
+ecosystem over. Composer diverged from npm and PyPI, which both scan
+manifest-only: `Detect` claimed a directory only when `composer.lock` was
+present, so a Composer library or any lock-less project vanished from scanning
+with no coverage signal. wechatAlliance (laravel/framework, guzzle, …) was
+silently skipped for exactly this reason.
+
+The fix adds a `composer.json` manifest-only path parallel to the lock path,
+mirroring `npm/manifest.go` and `pypi/parsePyproject`: `Detect` now claims a
+directory with either a `composer.lock` OR a `composer.json` declaring at least
+one non-platform dependency; `Resolve` prefers the lock when present (observed
+versions beat presumed) and otherwise parses `require`/`require-dev` into
+declared deps that ride to the expansion tier for a presumed or asserted
+version. Platform requirements (`php`, `hhvm`, `ext-*`, `lib-*`, `composer-*`,
+and any slash-less token) are dropped — they name the runtime, not an
+installable package — reusing the same rule the walk's registry client already
+applies. A manifest-only project discloses its unresolved/declared state through
+the same coverage channel npm and PyPI use, so it degrades coverage rather than
+reading as a clean, fully-resolved tree.
+
+This closes the second of the two round-3 silent-false-cleans. The broader class
+the assessment named — NuGet's bare-`.csproj`-without-lock shape, and any
+recognized-manifest-yielding-zero-deps case surfacing as coverage-incomplete
+rather than silence — remains a separate cross-cutting concern, not folded in
+here.
