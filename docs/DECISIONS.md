@@ -1908,3 +1908,29 @@ that exists, the exonerated set is curated from evidence, and the cost is that a
 new legitimate near-neighbour must be observed before it is added. That cost is
 accepted: VC-006 is advisory and never gates, so a rare transient FP is noise,
 not a blocked build, and the curated list keeps the check honest and offline.
+
+## D-57 — OPU-10: pyproject array parsing is quote-aware (extras deps)
+
+A PEP 621 `pyproject.toml` whose `[project].dependencies` held any entry with an
+extras bracket — `requests[security]>=2.0`, `crewai[tools]>=0.100.1` — read as a
+project with NO dependencies, so the whole file was skipped as "nothing to scan"
+at exit 0. For a security gate that is a false negative wearing a green
+checkmark: a real dependency-bearing project silently passes.
+
+The PEP 508 layer was already correct (it strips extras downstream). The bug was
+upstream in `extractArray`, which bounded the TOML array by the FIRST `]` it
+saw. For an element like `"requests[security]>=2.0"` that first `]` is the extras
+marker inside the quoted string, so the array collapsed to empty. Extras are
+ubiquitous in Python (`uvicorn[standard]`, `celery[redis]`, `pydantic[email]`),
+so this hit a broad, common shape.
+
+The fix makes the array bound quote-aware: the closing `]` is the one at bracket
+depth 0 while not inside a quoted string (`topLevelCloseBracket`), so an extras
+`[`/`]` inside an element is content, not structure. The existing quoted-item
+split and the empty-pyproject "not a project" detection are unchanged, so a
+genuinely dependency-less build-backend-only pyproject still correctly declines
+to be claimed.
+
+The broader class this belongs to — a recognized manifest that yields zero
+readable deps surfacing as coverage-incomplete rather than silent — is a
+separate cross-cutting concern, not folded in here.

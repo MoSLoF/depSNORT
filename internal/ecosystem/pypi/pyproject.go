@@ -167,53 +167,87 @@ func extractArray(lines []string, section, key string) []string {
 	var buf strings.Builder
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		if strings.HasPrefix(line, "[") && line != section {
-			if collecting {
-				break // a new section ended the array
-			}
-			inSection = (line == section)
-			continue
-		}
-		if line == section {
-			inSection = true
-			continue
-		}
-		if !inSection {
-			continue
-		}
 		if !collecting {
-			if k, v, ok := cutKey(line, key); ok {
-				_ = k
-				open := strings.Index(v, "[")
-				if open < 0 {
-					continue
-				}
-				collecting = true
-				buf.WriteString(v[open+1:])
-				if strings.Contains(v[open+1:], "]") {
-					break
-				}
+			// Section tracking. A quoted array ELEMENT ("requests[security]") begins
+			// with a quote, never '[', so this only matches real section headers.
+			if strings.HasPrefix(line, "[") && line != section {
+				inSection = (line == section)
 				continue
 			}
+			if line == section {
+				inSection = true
+				continue
+			}
+			if !inSection {
+				continue
+			}
+			_, v, ok := cutKey(line, key)
+			if !ok {
+				continue
+			}
+			open := strings.Index(v, "[")
+			if open < 0 {
+				continue
+			}
+			collecting = true
+			buf.WriteString(v[open+1:])
 		} else {
-			buf.WriteString("\n")
-			buf.WriteString(raw)
-			if strings.Contains(raw, "]") {
+			// A new section header ends an unterminated array (malformed; a
+			// well-formed one closes with its ']' first, caught below).
+			if strings.HasPrefix(line, "[") {
 				break
 			}
+			buf.WriteString("\n")
+			buf.WriteString(raw)
+		}
+		// Close the array at the ']' that sits at bracket depth 0 OUTSIDE any
+		// quoted string — NOT at the first ']', which for an element like
+		// "requests[security]>=2.0" is the extras bracket inside the string. That
+		// naive first-']' bound collapsed the whole array to empty, so an
+		// extras-bearing pyproject read as "no dependencies" and the project was
+		// silently skipped (OPU-10).
+		if idx := topLevelCloseBracket(buf.String()); idx >= 0 {
+			// Items are quoted strings; extract them by quote boundaries rather than
+			// by comma, because a PEP 508 constraint contains commas (">=1,<2") that
+			// must not split one requirement into two.
+			return quotedItems(buf.String()[:idx])
 		}
 	}
 	if buf.Len() == 0 {
 		return nil
 	}
-	body := buf.String()
-	if i := strings.Index(body, "]"); i >= 0 {
-		body = body[:i]
+	return quotedItems(buf.String())
+}
+
+// topLevelCloseBracket returns the index of the ']' that closes an array whose
+// opening '[' has already been consumed: the first ']' seen at bracket depth 0
+// while not inside a quoted string. A ']' inside quotes (a PEP 508 extras marker
+// like "requests[security]") or nested one edit deep does not close the array.
+// Returns -1 when the array is not yet closed.
+func topLevelCloseBracket(s string) int {
+	depth := 0
+	var quote byte // 0 = outside a quote, else the opening quote character
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '[':
+			depth++
+		case ']':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
 	}
-	// Items are quoted strings; extract them by quote boundaries rather than by
-	// comma, because a PEP 508 constraint contains commas (">=1,<2") that must
-	// not split one requirement into two.
-	return quotedItems(body)
+	return -1
 }
 
 // extractTable returns key/value pairs under a section header until the next

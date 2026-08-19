@@ -87,6 +87,60 @@ version = "1.0"
 	}
 }
 
+// OPU-10: a PEP 621 dependency carrying an extras bracket ("pkg[extra]...") must
+// not break array parsing. The extras '[' / ']' are inside the quoted string and
+// must be treated as content, not as array structure. Before the fix the naive
+// first-']' bound collapsed the array to empty, so an extras-bearing project read
+// as "no dependencies" and was silently skipped.
+func TestParsePyprojectExtrasDependencies(t *testing.T) {
+	cases := []struct {
+		name string
+		toml string
+		want map[string]string // dep name -> constraint (extras already stripped)
+	}{
+		{
+			name: "single extras dep, single-line array",
+			toml: "[project]\nname = \"x\"\ndependencies = [\"requests[security]>=2.0\"]\n",
+			want: map[string]string{"requests": ">=2.0"},
+		},
+		{
+			name: "extras mixed with plain, multi-line array",
+			toml: "[project]\nname = \"x\"\ndependencies = [\n  \"flask>=2.0\",\n  \"uvicorn[standard]>=0.20\",\n  \"celery[redis,auth]>=5\",\n]\n",
+			want: map[string]string{"flask": ">=2.0", "uvicorn": ">=0.20", "celery": ">=5"},
+		},
+		{
+			// The exact PurpleCrew shape: an extras-only sole dependency.
+			name: "extras-only sole dependency",
+			toml: "[project]\nname = \"x\"\ndependencies = [\"crewai[tools]>=0.100.1,<1.0.0\"]\n",
+			want: map[string]string{"crewai": ">=0.100.1,<1.0.0"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			raw := []byte(c.toml)
+			if !pyprojectDeclaresDeps2(raw) {
+				t.Fatal("extras-bearing pyproject must be claimed as a project")
+			}
+			g, err := parsePyproject("/repo/x/pyproject.toml", raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+			for _, d := range g.Get(g.Roots[0]).DeclaredDepsOf() {
+				got[d.Name] = d.Constraint
+			}
+			if len(got) != len(c.want) {
+				t.Fatalf("declared deps = %v, want %v", got, c.want)
+			}
+			for name, want := range c.want {
+				if got[name] != want {
+					t.Errorf("%s constraint = %q, want %q", name, got[name], want)
+				}
+			}
+		})
+	}
+}
+
 // pyprojectDeclaresDeps2 is the byte-level variant for tests (the real one reads
 // a path).
 func pyprojectDeclaresDeps2(raw []byte) bool {
