@@ -33,7 +33,6 @@ var gapManifestByName = map[string]string{
 	"poetry.lock":      "pypi",
 	"uv.lock":          "pypi",
 	"Pipfile":          "pypi",
-	"Gemfile":          "rubygems",
 }
 
 // gapManifestByExt covers the NuGet project files, which carry the project's

@@ -28,18 +28,28 @@ func New() *Adapter { return &Adapter{} }
 // Name implements ecosystem.Adapter.
 func (*Adapter) Name() string { return "gem" }
 
-const gemfileLockName = "Gemfile.lock"
+const (
+	gemfileLockName = "Gemfile.lock"
+	gemfileName     = "Gemfile"
+)
 
-// Detect implements ecosystem.Adapter.
+// Detect implements ecosystem.Adapter. A Gemfile.lock (a resolved tree) claims
+// the project; failing that, a Gemfile declaring at least one gem claims it as a
+// manifest-only project — the same lock-or-manifest handling npm, PyPI, and
+// Composer already have (OPU-11). Without this, a gem library or any project
+// committed without a lock (the common convention, where Gemfile.lock is
+// git-ignored) read as "nothing to scan" (OPU-16).
 func (*Adapter) Detect(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false
 	}
 	if info.IsDir() {
-		return fileExists(filepath.Join(path, gemfileLockName))
+		return fileExists(filepath.Join(path, gemfileLockName)) ||
+			gemfileDeclaresGems(filepath.Join(path, gemfileName))
 	}
-	return filepath.Base(path) == gemfileLockName
+	base := filepath.Base(path)
+	return base == gemfileLockName || (base == gemfileName && gemfileDeclaresGems(path))
 }
 
 func fileExists(p string) bool {
@@ -47,21 +57,38 @@ func fileExists(p string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// Resolve implements ecosystem.Adapter.
+// Resolve implements ecosystem.Adapter. Gemfile.lock takes precedence (observed
+// versions beat presumed); with no lock, a Gemfile is parsed manifest-only and
+// its declared gems ride to the expansion tier (D-44), exactly as a lock-less
+// package.json, pyproject.toml, or composer.json is handled.
 func (*Adapter) Resolve(path string) (*graph.Graph, error) {
-	file := path
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("gem: %w", err)
 	}
-	if info.IsDir() {
-		file = filepath.Join(path, gemfileLockName)
+	if !info.IsDir() {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("gem: reading %s: %w", filepath.Base(path), err)
+		}
+		if filepath.Base(path) == gemfileName {
+			return parseGemfile(path, raw)
+		}
+		return parseGemfileLock(path, raw)
 	}
-	raw, err := os.ReadFile(file)
+	if lock := filepath.Join(path, gemfileLockName); fileExists(lock) {
+		raw, err := os.ReadFile(lock)
+		if err != nil {
+			return nil, fmt.Errorf("gem: reading %s: %w", gemfileLockName, err)
+		}
+		return parseGemfileLock(path, raw)
+	}
+	gemfile := filepath.Join(path, gemfileName)
+	raw, err := os.ReadFile(gemfile)
 	if err != nil {
-		return nil, fmt.Errorf("gem: reading %s: %w", gemfileLockName, err)
+		return nil, fmt.Errorf("gem: reading %s: %w", gemfileName, err)
 	}
-	return parseGemfileLock(path, raw)
+	return parseGemfile(path, raw)
 }
 
 type gemEntry struct {
@@ -237,6 +264,146 @@ func parseGemfileLock(path string, raw []byte) (*graph.Graph, error) {
 
 	assignDepths(g, root.ID)
 	return g, nil
+}
+
+// gemfileDeclaresGems reports whether a Gemfile at p declares at least one gem —
+// the gate for claiming a lock-less Ruby project.
+func gemfileDeclaresGems(p string) bool {
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return false
+	}
+	sc := bufio.NewScanner(strings.NewReader(string(raw)))
+	for sc.Scan() {
+		if name, _, ok := parseGemLine(sc.Text()); ok && name != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// parseGemfile builds a manifest-only graph from a Gemfile with no lockfile: the
+// project root plus its declared (name + constraint) gems, which the expansion
+// tier presumes or asserts a version for (D-44). The Gemfile is a Ruby DSL, not a
+// resolved list, so only `gem 'name'[, 'constraint'...]` declarations are read;
+// `source`, `ruby`, `group`, `gemspec`, and comments are skipped. Mirrors
+// composer/parseComposerManifest and pypi/parsePyproject.
+func parseGemfile(path string, raw []byte) (*graph.Graph, error) {
+	g := graph.New()
+	root := rootNode(g, path)
+
+	var declared []graph.DeclaredDep
+	var names []string
+	seen := map[string]bool{}
+
+	sc := bufio.NewScanner(strings.NewReader(string(raw)))
+	for sc.Scan() {
+		name, constraint, ok := parseGemLine(sc.Text())
+		if !ok || name == "" {
+			continue
+		}
+		// Gem names are case-sensitive and carry no scope (WalkSource.Identify
+		// uses them verbatim), so nothing is folded — the OPU-14 case-discipline
+		// lesson: fold only where the registry/OSV coordinate is case-insensitive.
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		declared = append(declared, graph.DeclaredDep{Name: name, Constraint: constraint})
+		names = append(names, name)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("gem: scanning %s: %w", gemfileName, err)
+	}
+	if len(declared) == 0 {
+		return nil, fmt.Errorf("gem: %s declares no gems", gemfileName)
+	}
+	sort.Slice(declared, func(i, j int) bool { return declared[i].Name < declared[j].Name })
+	sort.Strings(names)
+
+	if root.Attr == nil {
+		root.Attr = map[string]string{}
+	}
+	root.Attr["gem.source"] = gemfileName
+	root.Attr[graph.AttrDeclaredDeps] = graph.EncodeDeclaredDeps(declared)
+	// Surfaced as a coverage fact so a manifest-only project degrades coverage
+	// (its versions are presumed, not observed) rather than reading as a clean,
+	// fully-resolved tree — the same disclosure npm/PyPI/Composer make.
+	root.Attr[graph.AttrUnresolved] = strings.Join(names, ",")
+	root.Attr[graph.AttrUnresolvedCount] = fmt.Sprintf("%d", len(names))
+	root.Attr[graph.AttrFlatResolution] = "gem"
+	return g, nil
+}
+
+// parseGemLine reads one Gemfile line as a `gem` declaration. It returns the gem
+// name and a comma-joined version constraint (RubyGems AND semantics, which
+// SatisfiesRuby understands), or ok=false for any non-`gem` line (source, ruby,
+// group, gemspec, comments, blanks). Tolerant and line-based, like the Poetry
+// constraint reader: positional quoted arguments are the name and its version
+// constraints; the first `key:`/`:symbol` option (require:, git:, group:, …)
+// ends the positional run, so a git/path/github source is ignored and the gem is
+// still scanned by name.
+func parseGemLine(line string) (name, constraint string, ok bool) {
+	t := strings.TrimSpace(line)
+	if t == "" || strings.HasPrefix(t, "#") {
+		return "", "", false
+	}
+	// The keyword must be exactly `gem`, followed by whitespace or a quote — not
+	// `gemspec`, `gem_name`, or `git_source`.
+	if !strings.HasPrefix(t, "gem") {
+		return "", "", false
+	}
+	rest := t[len("gem"):]
+	if rest == "" {
+		return "", "", false
+	}
+	switch rest[0] {
+	case ' ', '\t', '\'', '"', '(':
+	default:
+		return "", "", false
+	}
+	rest = strings.TrimLeft(rest, " \t(")
+
+	var constraints []string
+	for _, seg := range strings.Split(rest, ",") {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		if seg[0] != '\'' && seg[0] != '"' {
+			// An option (require: false, git: '…', :symbol) — positional args end.
+			break
+		}
+		val, valOK := firstQuoted(seg)
+		if !valOK {
+			break
+		}
+		if name == "" {
+			name = val
+		} else {
+			constraints = append(constraints, val)
+		}
+	}
+	if name == "" {
+		return "", "", false
+	}
+	return name, strings.Join(constraints, ", "), true
+}
+
+// firstQuoted returns the contents of the first single- or double-quoted string
+// in s, ignoring anything after it (a trailing comment or option).
+func firstQuoted(s string) (string, bool) {
+	if s == "" {
+		return "", false
+	}
+	q := s[0]
+	if q != '\'' && q != '"' {
+		return "", false
+	}
+	if i := strings.IndexByte(s[1:], q); i >= 0 {
+		return s[1 : 1+i], true
+	}
+	return "", false
 }
 
 // classifySection maps a Gemfile.lock section onto an ecosystem-neutral

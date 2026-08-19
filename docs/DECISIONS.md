@@ -2109,3 +2109,48 @@ present, mirroring the directory resolution order. `packages.config` is removed
 from the `gap.go` recognized-manifest map: it is now claimed by the adapter's
 Detect and never reaches the gap path, so listing it there would be dead code
 that risks double-counting.
+
+## D-64 — OPU-16: RubyGems scans a lock-less Gemfile manifest-only
+
+A Ruby project committing a `Gemfile` but no `Gemfile.lock` — the common
+gem-library convention, where the lock is git-ignored — was DISCLOSED via D-59
+(the `Gemfile` was on the gap.go recognized-manifest list) but never scanned.
+RubyGems support was effectively `Gemfile.lock`-only. This is the same gap OPU-11
+closed for Composer (`composer.json` manifest-only), still open for gem: the
+adapter itself was sound (a project committing its lock scanned fully), only the
+manifest-only path was missing.
+
+The fix mirrors the npm/PyPI/Composer manifest-only handling. `Detect` now claims
+a directory (or file) whose `Gemfile` declares at least one gem, when no
+`Gemfile.lock` is present; the lock still takes precedence when both exist
+(observed versions beat presumed). `parseGemfile` reads the Ruby DSL line by
+line and records each `gem 'name'[, 'constraint'...]` as a declared dep on the
+root (`AttrDeclaredDeps`), which the expansion tier presumes or asserts a version
+for (D-44) via the RubyGems `WalkSource` already wired for the lock path. The
+root is marked flat (`AttrFlatResolution = "gem"`, `AttrUnresolved`) so a
+manifest-only project degrades coverage rather than reading as a fully-resolved
+clean tree — the same disclosure the other manifest-only ecosystems make.
+
+The Gemfile is a Ruby program, not a resolved list, so the parser is deliberately
+tolerant and line-based (the posture of the Poetry constraint reader):
+
+- Only a line whose first token is exactly `gem` (followed by whitespace, a
+  quote, or `(`) is a declaration — `source`, `ruby`, `group`, `gemspec`,
+  `git_source`, and `#` comments are skipped. Gems nested in a `group … do`
+  block are still read (they are still declared dependencies).
+- Positional quoted arguments are the name and its version constraints; the
+  first `key:`/`:symbol` option (`require:`, `git:`, `github:`, …) ends the
+  positional run. A gem pinned to a git/path/github source is thus scanned by
+  name with no constraint, rather than dropped.
+- Multiple version constraints (`gem 'puma', '>= 5.0', '< 6.0'`) are comma-joined
+  into RubyGems AND semantics, which `SatisfiesRuby` already understands.
+
+Gem names are case-sensitive and scope-free, so — unlike NuGet (D-62) — nothing
+is folded: `WalkSource.Identify` uses the name verbatim, and the parser records
+it verbatim. A `Gemfile` declaring no gems is an error the scan flow turns into
+incomplete coverage, never a silent clean pass, and such a directory is not
+claimed. `Gemfile` is removed from the gap.go recognized-manifest map: it is now
+claimed by the adapter and never reaches the gap path.
+
+`.gemspec` `add_dependency` extraction is a reasonable follow-up but out of scope
+here — the minimum closes the common Gemfile-only gap.
