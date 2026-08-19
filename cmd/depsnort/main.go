@@ -155,10 +155,10 @@ scan flags:
   -no-install-surface      skip static install-hook extraction (VC-002b..e)
   -no-recursive            scan only the given directory, not its subdirectories
                            (default is full-send: every project beneath the path,
-                           every ecosystem, every depth, dist/ build dirs included)
-  -include-build-dirs      also descend target/ and build/ (dist/ is always
-                           descended); off by default — built trees keep a
-                           generated copy of the root manifest there
+                           every ecosystem, every depth, build dirs included)
+  -no-build-dirs           do not descend build/ or target/ (dist/ still is); by
+                           default they ARE scanned, with their generated-artifact
+                           subdirs (target/classes, target/package, …) pruned
   -internal-scopes string  comma-separated internal scopes (VC-007), e.g. @ihbv,@acme
   -internal-names string   comma-separated internal package names (VC-007)
   -ioc string              path to an IOC ledger feed (JSON); enables VC-003 —
@@ -618,7 +618,7 @@ func cmdScan(args []string) int {
 	recursive := fs.Bool("recursive", true, "walk the path as a workspace root: discover and merge every project beneath it (default; full-send)")
 	shallow := fs.Bool("no-recursive", false, "scan only the given directory, not its subdirectories (still co-scans every ecosystem in it)")
 	fs.BoolVar(shallow, "shallow", false, "alias for -no-recursive")
-	includeBuildDirs := fs.Bool("include-build-dirs", false, "also descend target/ and build/ (dist/ is always descended); off by default because built trees keep a generated copy of the root manifest there")
+	noBuildDirs := fs.Bool("no-build-dirs", false, "do not descend build/ or target/ (dist/ is still descended); by default they are scanned, with their generated-artifact subdirs pruned")
 	internalScopes := fs.String("internal-scopes", "", "comma-separated internal scopes for dependency-confusion (e.g. @ihbv,@acme)")
 	internalNames := fs.String("internal-names", "", "comma-separated internal package names for dependency-confusion")
 	iocPath := fs.String("ioc", "", "path to an IOC ledger feed (JSON); enables VC-003")
@@ -667,7 +667,7 @@ func cmdScan(args []string) int {
 	recurse := *recursive && !*shallow && pathInfo.IsDir()
 	var projects []discovered
 	if recurse {
-		found, err := discoverProjects(path, adapters, *includeBuildDirs)
+		found, err := discoverProjects(path, adapters, *noBuildDirs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "depsnort: discovery under %s: %v\n", path, err)
 			return exitInternal
@@ -679,7 +679,7 @@ func cmdScan(args []string) int {
 		for _, p := range found {
 			claimed[filepath.Clean(p.Path)] = true
 		}
-		gaps := discoverManifestGaps(path, claimed, *includeBuildDirs)
+		gaps := discoverManifestGaps(path, claimed, *noBuildDirs)
 		if len(found) == 0 && len(gaps) == 0 {
 			// Nothing to scan is not an internal error and not a risk finding —
 			// a full-send sweep legitimately crosses repos with no supported
@@ -714,7 +714,7 @@ func cmdScan(args []string) int {
 
 		// Disclose the projects in subdirectories this shallow scan did not reach,
 		// so --no-recursive cannot pass green while a subtree project is omitted.
-		notes := discoveryCoverageGaps(path, projects, adapters, *includeBuildDirs)
+		notes := discoveryCoverageGaps(path, projects, adapters, *noBuildDirs)
 		if len(projects) == 0 && len(notes) == 0 {
 			// No supported manifest here and nothing below — genuinely nothing to
 			// scan, not an internal error. Exit clean.
