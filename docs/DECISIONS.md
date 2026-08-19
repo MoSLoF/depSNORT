@@ -1811,3 +1811,33 @@ source-unavailable rather than a fabricated location — honest under D-24, and
 the one place a yarn scan is weaker than a package-lock scan. The parser is
 fuzzed on the same terms as the other lockfile parsers (D-33): a hostile or
 truncated yarn.lock yields a partial, self-consistent graph, never a panic.
+
+## D-54 — requirements.txt `-r`/`-c` includes are followed, and contained
+
+A requirements.txt can defer its pins to other files: `-r base.txt`,
+`-c constraints.txt`, `-r requirements/prod.txt`. The parser skipped every such
+line silently. So a file that was a few visible pins plus `-r prod.txt` resolved
+CLEAN and COMPLETE over the visible few, while everything in prod.txt — the bulk
+of the tree, and any poisoned pin hidden there — went unseen AND undisclosed.
+That is the worst failure mode for this tool: partial visibility presented as a
+finished scan. The split-across-files layout (requirements/base.txt, prod.txt,
+dev.txt) is extremely common, so this was a routine miss, not a corner case.
+
+The fix follows the includes. Each `-r`/`-c` target (both dialects, and pip's
+glued `-rfile.txt` form) is resolved relative to the file that references it and
+merged into the same project — its pins become nodes, its own includes recurse,
+a cycle or a diamond is visited once. This is exactly the "dependencies buried
+in files not documented up front" the tool exists to surface.
+
+Following a path a checkout controls is itself an attack surface, so every
+include is read through securefs, contained to the scan root the operator
+pointed depsnort at (the whole-scan-root choice, so a monorepo's shared
+`../requirements/base.txt` resolves while `-r ../../etc/passwd`, an absolute
+path, or a symlink escape does not). An include that cannot be safely read — an
+escape, a remote URL, a missing/oversized/non-regular file, or one past the
+depth bound — is DISCLOSED through the same AttrUnresolved channel as an unpinned
+requirement, never read and never silently dropped (D-24). Followed → covered;
+unfollowable → disclosed; the one thing that can no longer happen is a
+referenced file going unread AND unmentioned. The scan-root bound rides on the
+PyPI adapter (set once from the top-level path); with none set, includes are
+disclosed rather than followed, so the parser stays safe by default.
