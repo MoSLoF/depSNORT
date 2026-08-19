@@ -1714,3 +1714,33 @@ anchor is the only way to give depth assignment somewhere to start. The
 pathological lock now ladders like a healthy one, and the source-collision skip
 carries over unchanged: a crate whose identity two lock entries share is an
 ambiguous dependency, never a root.
+
+## D-51 — VC-006 exempts the versioned-successor shape (a trailing digit)
+
+A live-fire scan of `npm/cli` raised VC-006 (typosquat) on `cli-table3` — the
+maintained, higher-adoption successor to the abandoned `cli-table`, which the
+corpus lists. `cli-table3` is `cli-table` plus an appended `3`: edit distance 1,
+identical under pure name-distance to a squat. It is the fourth VC-006 failure
+mode, and like the first three (scoped names, legitimate near-neighbours,
+distance-2 on short names) it is a false positive the check must suppress or it
+becomes the warning tax the check's own calibration note disclaims.
+
+The fix suppresses a candidate that is a corpus package plus ONLY a numeric
+version token — a run of trailing digits, optionally set off by one `-`, `_` or
+`.` separator (`cli-table3`, `through2`, `cli-table-9`). The relationship is a
+strict prefix: an appended token, never an interior edit. A transposition or
+substitution of the same predecessor (`cli-tabel`) is not a prefix-plus-digits
+and still fires, so the suppression buys precision without blinding the check.
+
+Scope was deliberately held to the digit shape. The assessment also suggested
+word suffixes (`-ng`, `-next`), and they are a real successor convention — but
+each is three or more edits from the predecessor, past this check's distance-2
+ceiling (`typosquatMaxDist`), so VC-006 never produces a finding on them to
+begin with. Implementing a suffix list would have been untested dead code that
+only bites if the ceiling is ever raised; the honest fix is the one reachable
+shape, and the code says why. The candidate-is-popular guard the assessment
+offered as the alternative is already present as the exact-corpus-match skip,
+and does not reach `cli-table3` precisely because the successor is not yet
+corpus-listed — which is why the shape-based rule, not a data addition, is the
+generalizing fix. Regression: `cli-table3`/`cli-table2`/`cli-table-9` stay
+silent while `cli-tabel` still fires, pinning the boundary in both directions.
