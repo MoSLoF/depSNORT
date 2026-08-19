@@ -1,6 +1,7 @@
 package nuget
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -318,6 +319,91 @@ func TestNuGetNameIsCanonicalForOSV(t *testing.T) {
 	}
 	if snh := g.Get("pkg:nuget/system.net.http@4.3.0"); snh == nil || snh.Name != "System.Net.Http" {
 		t.Errorf("System.Net.Http Name wrong: %+v", snh)
+	}
+}
+
+// OPU-15: a packages.config (legacy XML manifest) is now claimed and parsed,
+// not merely disclosed as an unresolvable gap. A leading UTF-8 BOM (common on
+// Windows-authored configs) must be tolerated, and every <package> becomes a
+// direct node with a canonical-case name for the case-sensitive OSV coordinate.
+func TestPackagesConfigParses(t *testing.T) {
+	a := New()
+	dir := "testdata/packages-config"
+	if !a.Detect(dir) {
+		t.Fatal("should Detect a directory containing packages.config")
+	}
+	if !a.Detect(filepath.Join(dir, "packages.config")) {
+		t.Fatal("should Detect a packages.config file directly")
+	}
+	g, err := a.Resolve(dir)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(g.Roots) != 1 {
+		t.Fatalf("roots = %d, want 1", len(g.Roots))
+	}
+	// root + Bogus + Bootstrap + Newtonsoft.Json + System.Net.Http = 5 nodes.
+	nodes := g.SortedNodes()
+	if len(nodes) != 5 {
+		for _, n := range nodes {
+			t.Logf("  node: %s (name=%s, depth=%d, direct=%v)", n.ID, n.Name, n.Depth, n.Direct)
+		}
+		t.Fatalf("nodes = %d, want 5 (root + 4 packages)", len(nodes))
+	}
+	// Names must be canonical-case (the OPU-14 lesson applies to this parser too):
+	// the OSV coordinate is built from n.Name and OSV's NuGet ecosystem is
+	// case-sensitive. Identity/PURL still folds case.
+	nj := g.Get("pkg:nuget/newtonsoft.json@12.0.3")
+	if nj == nil {
+		t.Fatal("Newtonsoft.Json node missing (BOM not stripped?)")
+	}
+	if nj.Name != "Newtonsoft.Json" {
+		t.Errorf("node Name = %q, want canonical Newtonsoft.Json", nj.Name)
+	}
+	if !nj.Direct || nj.Depth != 1 {
+		t.Errorf("Newtonsoft.Json: direct=%v depth=%d, want direct depth 1", nj.Direct, nj.Depth)
+	}
+	if snh := g.Get("pkg:nuget/system.net.http@4.3.0"); snh == nil || snh.Name != "System.Net.Http" {
+		t.Errorf("System.Net.Http node wrong: %+v", snh)
+	}
+}
+
+// OPU-15: a packages.config takes a back seat to a resolved lock — when both are
+// present the lock (a full resolved tree) wins, exactly as the dir path does.
+func TestPackagesConfigLockPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	// A packages.config alongside a packages.lock.json: the lock must win.
+	cfg := "<packages><package id=\"OnlyInConfig\" version=\"1.0.0\" /></packages>"
+	if err := os.WriteFile(filepath.Join(dir, "packages.config"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock := `{"version":1,"dependencies":{"net6.0":{"OnlyInLock":{"type":"Direct","resolved":"2.0.0"}}}}`
+	if err := os.WriteFile(filepath.Join(dir, "packages.lock.json"), []byte(lock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := New().Resolve(dir)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if g.Get("pkg:nuget/onlyinlock@2.0.0") == nil {
+		t.Error("lock package missing — lock should take precedence")
+	}
+	if g.Get("pkg:nuget/onlyinconfig@1.0.0") != nil {
+		t.Error("config package present — the lock should have won, config not read")
+	}
+}
+
+// OPU-15: malformed XML must degrade honestly — an error the scan flow surfaces
+// as incomplete coverage (D-59), never a crash or a silent clean pass.
+func TestPackagesConfigMalformedIsError(t *testing.T) {
+	// Truncated mid-element.
+	if _, err := parsePackagesConfig("proj", []byte(`<packages><package id="X" version="1.0.0"`)); err == nil {
+		t.Error("truncated packages.config must return an error, not a clean parse")
+	}
+	// Well-formed XML but no <package> entries → no packages to scan is an error,
+	// so the caller degrades coverage rather than reporting a clean pass.
+	if _, err := parsePackagesConfig("proj", []byte(`<packages></packages>`)); err == nil {
+		t.Error("empty packages.config must return an error (nothing resolved)")
 	}
 }
 
