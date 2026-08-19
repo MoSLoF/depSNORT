@@ -79,6 +79,8 @@ func ecosystemName(eco string) string {
 		return "Packagist"
 	case "nuget":
 		return "NuGet"
+	case "gomod":
+		return "Go"
 	default:
 		return eco
 	}

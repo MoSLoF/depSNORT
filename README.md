@@ -86,16 +86,22 @@ before dependency code gets a chance to run.
 
 ## Current coverage
 
-Six ecosystems share the same graph, check, verdict, and output model:
+Seven ecosystems share the same graph, check, verdict, and output model:
 
-| Ecosystem | Lockfile(s) | PURL type | Install-time surface |
+| Ecosystem | Lockfile(s) / manifest | PURL type | Install-time surface |
 |-----------|-------------|-----------|----------------------|
-| **npm** | `package-lock.json` (v1–v3) | `pkg:npm/` | `preinstall`/`postinstall` and related lifecycle scripts |
-| **PyPI** | `requirements.txt`, `Pipfile.lock` | `pkg:pypi/` | `setup.py`, PEP 517 build backends, `.pth` files |
+| **npm** | `package-lock.json` (v1–v3), or `package.json` | `pkg:npm/` | `preinstall`/`postinstall` and related lifecycle scripts |
+| **PyPI** | `requirements.txt`, `Pipfile.lock`, `pyproject.toml`, `setup.py` | `pkg:pypi/` | `setup.py`, PEP 517 build backends, `.pth` files |
 | **RubyGems** | `Gemfile.lock` | `pkg:gem/` | `extconf.rb` / native-extension install paths |
 | **Cargo** | `Cargo.lock` | `pkg:cargo/` | `build.rs` and compile-time code paths |
 | **Composer** | `composer.lock` | `pkg:composer/` | scripts, plugin packages, plugin entrypoints |
 | **NuGet** | `packages.lock.json` | `pkg:nuget/` | install/init scripts and package build assets |
+| **Go** | `go.mod` | `pkg:golang/` | not yet extracted — Go has resolution, expansion, OSV advisories, and the temporal axis, but no install-surface analysis yet |
+
+A lockfile gives a fully-resolved tree; a bare manifest (an unpinned
+`requirements.txt`, a `pyproject.toml`, a lockless `package.json`, `go.mod`)
+declares dependencies without pinning every version, and transitive expansion
+resolves the rest — see [Transitive expansion](#transitive-expansion) below.
 
 The built-in pack currently covers:
 
@@ -259,7 +265,8 @@ by layer — so a single `requirements.txt` line is scanned to the depth an
 attacker actually hides at. A declared dependency is a name and a *constraint*,
 not a version, so the walk presumes one (the highest published version
 satisfying the accumulated constraints) and labels it: every node carries
-`version_truth` ∈ {`observed`, `presumed`, `contested`}. Presumed nodes are
+`version_truth` ∈ {`observed`, `asserted`, `presumed`, `contested`}. Presumed
+(and asserted) nodes are
 reported but **never gate** — a block on a version nobody installed is a false
 positive with a build failure attached. With `-depsdev` (opt-in, reaches an
 external service) the walk first consults deps.dev for a REAL resolved version
@@ -290,7 +297,7 @@ as loudly as one from last week.
 **Publisher lineage.** A package-level maintainer list answers "who *can* publish
 this today?" — it reads identically before and after a stolen token pushes a
 release. VC-011 needs the other question: who published version N versus N+1. Two
-of the six registries state it (npm's `_npmUser`, crates.io's `published_by`),
+of the seven registries state it (npm's `_npmUser`, crates.io's `published_by`),
 both inside documents the temporal axis already fetches and caches. Where a
 registry exposes nothing, depSNORT records the absence as coverage state and the
 check does not fire — "we cannot see who published the earlier versions" cannot
@@ -386,7 +393,7 @@ on-disk cache -> live OSV -> bundled malicious-package snapshot -> typed gap
 The bundled snapshot exists so a first scan in a sandbox or air-gapped runner
 still has meaningful malicious-package coverage rather than an empty cache and a
 silent gap. It holds **only `MAL-*` records** — the most recent malicious
-coordinates per ecosystem, across all six — because that is the one question
+coordinates per ecosystem, across all seven — because that is the one question
 this tier exists to answer offline. A hit is real coverage (a known-malicious
 package does not stop being malicious because the data is a few weeks old), and
 its age and use are disclosed in output, never mistaken for a live check:
@@ -599,8 +606,10 @@ cmd/depsnort/                 CLI + exit-code contract
 internal/finding/             severity / axis / gate class / risk state
 internal/purl/                canonical package-url identity
 internal/graph/               declared + install-time graph model, coverage, provenance
-internal/ecosystem/           ecosystem adapters
-internal/datasource/          OSV, registry metadata, publisher lineage, IOC, cache
+internal/ecosystem/           ecosystem adapters (incl. gomod) + conformance suite
+internal/expand/              Nth-layer transitive walk + version-truth engine
+internal/datasource/          OSV, registry metadata, deps.dev, go-proxy, IOC, cache
+internal/pep440/ nugetver/    ecosystem-specific version models (ranges + ordering)
 internal/installsurface/      static install-time analysis
 internal/profile/             capability profiles and the deterministic drift engine
 internal/baseline/            known-good baseline file format
@@ -646,12 +655,16 @@ differentiation is the intersection of:
 - ✅ static install-surface extraction and VC-002 attack paths;
 - ✅ operator IOC ledger;
 - ✅ JSON, SARIF, DOT, Cypher, and PDF emitters;
-- ✅ six ecosystem adapters;
+- ✅ seven ecosystem adapters;
 - ✅ recursive workspace scanning and blast-radius graphing;
 - ✅ dependency-source provenance as explicit coverage state (VC-009);
 - ✅ capability profiles, persistent known-good baselines, and version-to-version
   capability drift (VC-010);
-- ✅ version-level publisher lineage where registries expose it (VC-011).
+- ✅ version-level publisher lineage where registries expose it (VC-011);
+- ✅ transitive expansion past the manifest across all seven ecosystems, with a
+  graded version-truth axis (observed / asserted / presumed / contested) that
+  never lets a presumed version gate;
+- ✅ an optional deps.dev asserted tier and a cross-ecosystem conformance suite.
 
 **Current hardening:**
 
@@ -668,7 +681,9 @@ differentiation is the intersection of:
   -level drift for other ecosystems needs artifact retrieval);
 - ⬜ PR-native dependency delta: summarize only newly introduced dependencies,
   versions, capabilities, and gate changes in pull requests;
-- ⬜ Maven/Gradle and Go module adapters; pnpm, Yarn Berry, Poetry, and uv locks;
+- ⬜ Maven/Gradle adapters; pnpm, Yarn Berry, Poetry, and uv lockfile dialects
+  (Go modules are implemented; these lockfiles currently fall back to a sibling
+  manifest where one exists);
 - ⬜ policy-as-code for thresholds, allowlists, and approved publishers, over
   fixed safety invariants;
 - ⬜ enforcement integrations: feed verdicts into artifact-manager, admission, or
@@ -677,7 +692,8 @@ differentiation is the intersection of:
   integrity axis;
 - ⬜ published precision/recall benchmarks against a public malicious-package
   corpus;
-- ⬜ deps.dev manifest resolution and third-party rule-pack loading.
+- ⬜ third-party rule-pack loading (deps.dev resolved-graph consumption is
+  implemented as the opt-in asserted tier).
 
 The long-term goal is not "more alerts." It is better stateful correlation:
 
@@ -732,7 +748,7 @@ gofmt -l .               # should print nothing
 go test -race ./...
 ```
 
-**Fuzzing.** The repository maintains native Go fuzz targets across the six
+**Fuzzing.** The repository maintains native Go fuzz targets across the seven
 lockfile parsers, the PURL identity layer, semver, the install-surface analyzers,
 the edit-distance optimization, the sdist archive reader, and path containment.
 They are not decoration — fuzzing found and fixed two real identity bugs in the
@@ -743,7 +759,7 @@ Every seed corpus — including the crashers fuzzing already found — runs as a
 ordinary regression test on `go test`. CI additionally spends a bounded budget
 actively fuzzing the targets that consume untrusted input directly or guard an
 invariant a silent regression would hide: the containment primitive, PURL, the
-edit-distance differential, and the six lockfile parsers.
+edit-distance differential, and the seven lockfile parsers.
 
 ```
 go test ./internal/securefs -run=XXX -fuzz=FuzzReadFileContainment -fuzztime=60s
