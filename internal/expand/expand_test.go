@@ -465,3 +465,114 @@ func TestSeedsFromManifestDeclaredDeps(t *testing.T) {
 		t.Errorf("discovered = %d, want >= 2 (fastapi + starlette)", res.Discovered)
 	}
 }
+
+// stubResolver is a Resolver over a fixed table of resolved graphs, keyed
+// "ecosystem|name|version". It stands in for deps.dev so a test can exercise the
+// asserted tier without a network.
+type stubResolver struct {
+	graphs map[string]expand.ResolvedGraph
+	calls  []string // every coordinate the walk actually asked about
+}
+
+func (*stubResolver) Name() string { return "deps.dev-stub" }
+
+func (s *stubResolver) Resolve(_ context.Context, eco, name, version string) (expand.ResolvedGraph, bool, error) {
+	s.calls = append(s.calls, eco+"|"+name+"|"+version)
+	rg, ok := s.graphs[eco+"|"+name+"|"+version]
+	return rg, ok, nil
+}
+
+// TestAssertedTierFiresOnRegistryDirectDeps pins OPU-06: with a Resolver set, a
+// manifest-only LOCAL project (path origin — not itself registry-queryable) must
+// still reach the asserted tier, because the resolver is handed the project's
+// registry-queryable DIRECT dependency, not the un-queryable root. Before the
+// fix the resolver was aimed at the root, returned immediately, and every
+// transitive node fell through to `presumed` — the tier never fired.
+func TestAssertedTierFiresOnRegistryDirectDeps(t *testing.T) {
+	d := &fakePyPI{
+		table: map[string][]expand.Declaration{
+			// requests declares urllib3; the presume path WOULD walk this, but the
+			// resolver closes the subtree first, so these must come back asserted.
+			"pypi|requests|2.31.0": {{Name: "urllib3", Constraint: ">=1.21"}},
+		},
+		versions: map[string][]string{
+			"requests": {"2.31.0"},
+			"urllib3":  {"2.0.0", "2.2.0"},
+			"certifi":  {"2024.2.2"},
+		},
+	}
+	// deps.dev's answer for requests@2.31.0: a concrete subtree (urllib3, certifi).
+	resolver := &stubResolver{graphs: map[string]expand.ResolvedGraph{
+		"pypi|requests|2.31.0": {
+			Nodes: []expand.ResolvedRef{
+				{Ecosystem: "pypi", Name: "requests", Version: "2.31.0"}, // index 0: the queried dep
+				{Ecosystem: "pypi", Name: "urllib3", Version: "2.2.0"},
+				{Ecosystem: "pypi", Name: "certifi", Version: "2024.2.2"},
+			},
+			Edges: []expand.ResolvedEdge{{From: 0, To: 1}, {From: 0, To: 2}},
+		},
+	}}
+
+	g := graph.New()
+	// The operator's own local project: a PATH-origin root, exactly what a real
+	// scan hands the walk. It is not registry-queryable, so aiming a resolver at
+	// it (the OPU-06 bug) can never resolve anything.
+	root := g.AddNode(&graph.Node{
+		ID: "pkg:pypi/myapp@0.0.0", Kind: graph.KindPackage, Ecosystem: "pypi",
+		Name: "myapp", Version: "0.0.0",
+		Attr: map[string]string{
+			graph.AttrDeclaredDeps: graph.EncodeDeclaredDeps([]graph.DeclaredDep{
+				{Name: "requests", Constraint: "==2.31.0"},
+			}),
+		},
+	})
+	root.SetSource(graph.SourcePath, "")
+	g.MarkRoot(root.ID)
+
+	res, err := expand.NewWalker(d).WithVersionIndex(d).
+		ExpandRoot(context.Background(), g, root, expand.Options{Resolver: resolver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range g.SortedNodes() {
+		t.Logf("d%d %-30s truth=%s by=%s", n.Depth, n.ID, n.VersionTruth(), n.Attr[expand.AttrAssertedBy])
+	}
+
+	// The resolver must have been asked about the DIRECT DEP, never the root.
+	for _, c := range resolver.calls {
+		if strings.Contains(c, "myapp") {
+			t.Errorf("resolver was handed the un-queryable project root: %q", c)
+		}
+	}
+
+	if res.Asserted < 2 {
+		t.Fatalf("asserted = %d, want >= 2 (urllib3 + certifi); the tier did not fire", res.Asserted)
+	}
+
+	// The resolved children carry the asserted truth tier and attribution.
+	for _, id := range []string{"pkg:pypi/urllib3@2.2.0", "pkg:pypi/certifi@2024.2.2"} {
+		n := g.Get(id)
+		if n == nil {
+			t.Fatalf("asserted child %s missing", id)
+		}
+		if n.VersionTruth() != graph.TruthAsserted {
+			t.Errorf("%s truth = %q, want asserted", id, n.VersionTruth())
+		}
+		if n.Attr[expand.AttrAssertedBy] != "deps.dev-stub" {
+			t.Errorf("%s asserted_by = %q, want deps.dev-stub", id, n.Attr[expand.AttrAssertedBy])
+		}
+		// root(0) -> requests(1) -> child: the asserted child ladders to depth 2,
+		// not depth 0. A depth-0 transitive node reads as a root (the OPU-04 class
+		// of bug, one tier down), so pin it.
+		if n.Depth != 2 {
+			t.Errorf("%s depth = %d, want 2", id, n.Depth)
+		}
+	}
+
+	// The presume walk must NOT have re-derived urllib3 from the constraint: the
+	// resolver said 2.2.0, and a presumed second copy at a different version would
+	// mean the subtree was not closed. urllib3 exists once, asserted.
+	if presumed := g.Get("pkg:pypi/urllib3@2.0.0"); presumed != nil {
+		t.Error("urllib3 was re-presumed beneath an asserted subtree; the subtree was not closed")
+	}
+}

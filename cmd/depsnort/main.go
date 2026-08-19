@@ -493,20 +493,14 @@ func reconstructPyPIDepth(g *graph.Graph, client *registry.PyPIDepsClient, roots
 func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Declarer, resolver expand.Resolver, depth int) emit.DataSourceCoverage {
 	cov := emit.DataSourceCoverage{Name: "expand"}
 	walker := expand.NewWalker(sources...)
-	opts := expand.Options{MaxDepth: depth}
+	// The resolver is handed to the walk itself: it asserts each root's
+	// registry-queryable DIRECT dependencies once they have a coordinate, not the
+	// un-queryable local project root (OPU-06). A resolved dependency's subtree is
+	// merged as asserted and closed, so a presumed guess never overwrites it.
+	opts := expand.Options{MaxDepth: depth, Resolver: resolver}
 
 	var discovered, presumed, contested, unread, asserted int
 	for _, root := range roots {
-		// Asserted tier first (D-44): where deps.dev has a real resolution, its
-		// concrete versions are merged and the presume walk then treats those
-		// subtrees as closed, so a guess never overwrites a resolver's answer.
-		if resolver != nil {
-			ar, err := walker.AssertRoot(context.Background(), g, root, resolver)
-			if err != nil && cov.Error == "" {
-				cov.Error = err.Error()
-			}
-			asserted += ar.Asserted
-		}
 		res, err := walker.ExpandRoot(context.Background(), g, root, opts)
 		if err != nil && cov.Error == "" {
 			cov.Error = err.Error()
@@ -515,6 +509,7 @@ func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Decl
 		presumed += res.Presumed
 		contested += res.Contested
 		unread += res.Unread
+		asserted += res.Asserted
 	}
 	// Queried counts what we set out to learn; Gaps is the honest shortfall —
 	// a coordinate whose metadata never came back is a layer we could not read,
