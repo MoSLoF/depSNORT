@@ -22,6 +22,7 @@ package pypi
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +33,7 @@ import (
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/pep508"
 	"ihbv.io/depsnort/internal/purl"
+	"ihbv.io/depsnort/internal/securefs"
 )
 
 // Adapter implements ecosystem.Adapter for PyPI.
@@ -39,6 +41,12 @@ type Adapter struct {
 	// Sdist fetches source distributions for install-surface analysis.
 	// Nil means install-surface extraction is skipped (offline, or not configured).
 	Sdist *SdistFetcher
+	// ScanRoot is the top-level path depsnort was pointed at. It bounds where a
+	// requirements.txt `-r`/`-c` include may be followed (D-54): an include is
+	// read only if it resolves to a regular file inside this root, so a hostile
+	// checkout cannot make the scanner read `-r ../../etc/passwd`. Empty means the
+	// including file's own directory is used as the bound.
+	ScanRoot string
 }
 
 // New returns a PyPI adapter without sdist fetching.
@@ -122,7 +130,7 @@ func (*Adapter) Detect(path string) bool {
 }
 
 // Resolve implements ecosystem.Adapter.
-func (*Adapter) Resolve(path string) (*graph.Graph, error) {
+func (a *Adapter) Resolve(path string) (*graph.Graph, error) {
 	file, kind := inputPath(path)
 	if file == "" {
 		return nil, fmt.Errorf("pypi: no %s or %s found at %q", requirementsName, pipfileLockName, path)
@@ -139,8 +147,25 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 	case "setuppy":
 		return parseSetupPy(path, raw)
 	default:
-		return parseRequirements(path, raw)
+		return parseRequirements(path, raw, file, a.containmentRoot(path, file))
 	}
+}
+
+// containmentRoot returns the directory that bounds `-r`/`-c` include following
+// for a requirements file. It is the top-level scan root when one was set (so a
+// monorepo's shared `../requirements/base.txt` is reachable), otherwise the
+// requirements file's own directory. Either way securefs enforces that an
+// include escaping it — via `..`, an absolute path, or a symlink — is refused
+// and disclosed rather than read (D-54).
+func (a *Adapter) containmentRoot(path, file string) string {
+	root := a.ScanRoot
+	if root == "" {
+		root = path
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		root = filepath.Dir(file)
+	}
+	return root
 }
 
 // rootNode creates the synthetic project root for a Python project, named after
@@ -188,129 +213,65 @@ func unparseableToken(line string) string {
 	return "<unparseable: " + t + ">"
 }
 
-// parseRequirements reads a fully pinned requirements file. Only `==` pins are
-// treated as resolved; a loose specifier (>=, ~=, unpinned) is NOT resolved,
-// because guessing which version a range would install is exactly the resolver
+// maxIncludeDepth bounds how deep a chain of `-r`/`-c` includes is followed. A
+// requirements file may pull in another (base.txt -> prod.txt -> ...); the bound
+// stops a maliciously deep or accidentally cyclic chain, and any include past it
+// is disclosed as an unfollowed gap rather than silently dropped.
+const maxIncludeDepth = 32
+
+// reqEntry is one pinned requirement, with its pip-compile `via` parents.
+type reqEntry struct {
+	name    string
+	version string
+	vias    []string
+	marker  string
+}
+
+// reqAccum gathers what a requirements file — and every file it includes —
+// declares, so a `-r`/`-c` chain resolves into one project rather than the top
+// file's visible lines alone (D-54). Following the includes is the whole point:
+// a requirements.txt that is a few visible pins plus `-r prod.txt` must not
+// report clean on the visible few while prod.txt's pins (and any poisoned one)
+// go unseen and undisclosed.
+type reqAccum struct {
+	entries        []reqEntry
+	unpinned       []string
+	declared       []graph.DeclaredDep
+	markerExcluded []string
+	// unfollowed lists include directives that could NOT be read — a remote URL,
+	// a path escaping the scan root, a missing or oversized file, or one past the
+	// depth bound. Each is disclosed as a coverage gap so an unreadable include is
+	// never confused with an absent one.
+	unfollowed    []string
+	hasProvenance bool
+}
+
+// parseRequirements reads a fully pinned requirements file, following its
+// `-r`/`-c` includes within the containment root. Only `==` pins are treated as
+// resolved; a loose specifier (>=, ~=, unpinned) is NOT resolved, because
+// guessing which version a range would install is exactly the resolver
 // reimplementation D-01 rules out. Unpinned lines are counted and reported.
-func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
+func parseRequirements(path string, raw []byte, filePath, containRoot string) (*graph.Graph, error) {
 	g := graph.New()
 	root := rootNode(g, path)
 
-	type entry struct {
-		name    string
-		version string
-		vias    []string
-		marker  string
+	acc := &reqAccum{}
+	var reader *securefs.Reader
+	if containRoot != "" {
+		reader, _ = securefs.NewReader(containRoot) // nil on a bad root: includes then disclose
 	}
-	var entries []entry
-	var unpinned []string
-	var declared []graph.DeclaredDep
-	var markerExcluded []string
-	// hasProvenance is true the moment any line contributes a `# via` parent.
-	// A file with zero provenance (plain `pip freeze` output) resolves every
-	// entry as a direct root dependency by construction, not by fact — the
-	// same "format cannot express structure" situation Pipfile.lock records
-	// via AttrFlatResolution.
-	hasProvenance := false
+	// Scan by the concrete FILE path, not the (possibly directory) path used to
+	// name the root: `-r`/`-c` targets resolve relative to the file that
+	// references them, so fromDir must be the requirements file's own directory.
+	scanRequirementsFile(acc, reader, filePath, raw, map[string]bool{}, 0)
 
-	// Strip a leading UTF-8 BOM: `pip freeze > requirements.txt` under Windows
-	// PowerShell 5.1 (and any Notepad save) emits one, and strings.TrimSpace
-	// does not remove U+FEFF — it is category Cf, not White_Space — so the
-	// first dependency in the file would otherwise fail to parse.
-	sc := bufio.NewScanner(strings.NewReader(strings.TrimPrefix(string(raw), "\uFEFF")))
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
-	var cur *entry
-	inVia := false
-	for sc.Scan() {
-		line := sc.Text()
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-
-		// pip-compile provenance comments:
-		//   # via
-		//   #   -r requirements.in
-		//   #   some-parent
-		if strings.HasPrefix(trimmed, "#") {
-			comment := strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
-			switch {
-			case comment == "via":
-				inVia = true
-			case strings.HasPrefix(comment, "via "):
-				if cur != nil {
-					if v := viaTarget(strings.TrimPrefix(comment, "via ")); v != "" {
-						cur.vias = append(cur.vias, v)
-						hasProvenance = true
-					}
-				}
-				inVia = false
-			case inVia && cur != nil:
-				if v := viaTarget(comment); v != "" {
-					cur.vias = append(cur.vias, v)
-					hasProvenance = true
-				}
-			}
-			continue
-		}
-		inVia = false
-
-		// Skip pip flags and includes.
-		if strings.HasPrefix(trimmed, "-") {
-			continue
-		}
-		// Strip inline hashes / continuations and trailing comments.
-		body := trimmed
-		if i := strings.Index(body, " --hash"); i >= 0 {
-			body = body[:i]
-		}
-		body = strings.TrimSuffix(strings.TrimSpace(body), "\\")
-		if i := strings.Index(body, " #"); i >= 0 {
-			body = body[:i]
-		}
-		body = strings.TrimSpace(body)
-		if body == "" {
-			continue
-		}
-
-		name, version, pinned, marker := pep508.Split(body)
-		_, specifier, _ := pep508.SplitSpecifier(body)
-		if name == "" {
-			// pep508.Split could not read this line as a requirement at all — a
-			// bare URL or local path, a name violating PEP 508's grammar, a
-			// stray fragment. That is a coverage gap, not an absent dependency,
-			// so it is DISCLOSED rather than silently dropped (D-24). Folding it
-			// into `unpinned` reuses the existing AttrUnresolved channel, so it
-			// degrades coverage exactly like any other unresolved requirement.
-			unpinned = append(unpinned, unparseableToken(body))
-			continue
-		}
-		if !pinned {
-			if marker != "" && pep508.ExcludesLinux(marker) {
-				markerExcluded = append(markerExcluded, name)
-			} else {
-				unpinned = append(unpinned, name)
-				// Keep the constraint (Split discards a range; SplitSpecifier
-				// keeps it) so transitive expansion can presume a version rather
-				// than leaving the dependency merely disclosed as unresolved.
-				declared = append(declared, graph.DeclaredDep{Name: purl.NormalizePyPI(name), Constraint: specifier})
-			}
-			continue
-		}
-		entries = append(entries, entry{name: name, version: version, marker: marker})
-		cur = &entries[len(entries)-1]
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("pypi: scanning %s: %w", requirementsName, err)
-	}
-	if len(entries) == 0 && len(unpinned) == 0 {
+	if len(acc.entries) == 0 && len(acc.unpinned) == 0 && len(acc.unfollowed) == 0 {
 		return nil, fmt.Errorf("pypi: %s contained no requirements", requirementsName)
 	}
 
 	// Nodes.
 	byName := map[string]string{} // normalized name -> node ID
-	for _, e := range entries {
+	for _, e := range acc.entries {
 		id := purl.NewPyPI(e.name, e.version).String()
 		attr := map[string]string{"pypi.source": requirementsName}
 		if e.marker != "" {
@@ -325,7 +286,7 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 
 	// Edges from `# via` provenance; anything sourced from a -r/-c include or an
 	// unknown parent hangs off the root as a direct dependency.
-	for _, e := range entries {
+	for _, e := range acc.entries {
 		id := byName[purl.NormalizePyPI(e.name)]
 		linked := false
 		for _, v := range e.vias {
@@ -352,29 +313,32 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 	if root.Attr == nil {
 		root.Attr = map[string]string{}
 	}
-	if len(unpinned) > 0 {
-		sort.Strings(unpinned)
-		// Surfaced as a graph fact so degraded coverage is visible rather than
-		// silently reported as a clean, fully-resolved tree.
-		root.Attr[graph.AttrUnresolved] = strings.Join(unpinned, ",")
-		root.Attr[graph.AttrUnresolvedCount] = fmt.Sprintf("%d", len(unpinned))
+	// Unpinned requirements and unfollowed includes are both coverage gaps: an
+	// unpinned line has no resolved version, an unfollowed include has an unread
+	// set of them. Both degrade coverage through the same channel so the scan
+	// cannot read as a clean, complete tree while a referenced file went unread.
+	disclose := append(append([]string{}, acc.unpinned...), acc.unfollowed...)
+	if len(disclose) > 0 {
+		sort.Strings(disclose)
+		root.Attr[graph.AttrUnresolved] = strings.Join(disclose, ",")
+		root.Attr[graph.AttrUnresolvedCount] = fmt.Sprintf("%d", len(disclose))
 	}
 	// Record the unpinned deps WITH their constraints so transitive expansion can
 	// presume a version for each (the local root has no registry coordinate, so
 	// the walk cannot fetch these from a registry — they must ride on the node).
 	// Kept separate from AttrUnresolved, which stays the coverage disclosure.
-	if len(declared) > 0 {
-		sort.Slice(declared, func(i, j int) bool { return declared[i].Name < declared[j].Name })
-		root.Attr[graph.AttrDeclaredDeps] = graph.EncodeDeclaredDeps(declared)
+	if len(acc.declared) > 0 {
+		sort.Slice(acc.declared, func(i, j int) bool { return acc.declared[i].Name < acc.declared[j].Name })
+		root.Attr[graph.AttrDeclaredDeps] = graph.EncodeDeclaredDeps(acc.declared)
 	}
-	if len(markerExcluded) > 0 {
-		sort.Strings(markerExcluded)
+	if len(acc.markerExcluded) > 0 {
+		sort.Strings(acc.markerExcluded)
 		// Not folded into AttrUnresolved: these are deliberately excluded from
 		// the coverage gate because their marker proves they never install on
 		// this platform. The exclusion itself is still disclosed, not silent.
-		root.Attr["pypi.marker_excluded"] = strings.Join(markerExcluded, ",")
+		root.Attr["pypi.marker_excluded"] = strings.Join(acc.markerExcluded, ",")
 	}
-	if !hasProvenance && len(entries) > 0 {
+	if !acc.hasProvenance && len(acc.entries) > 0 {
 		// No line in the file contributed a `# via` parent at all — the same
 		// "format records no inter-package relationships" situation
 		// Pipfile.lock is in, just for a plain `pip freeze` requirements.txt
@@ -384,6 +348,232 @@ func parseRequirements(path string, raw []byte) (*graph.Graph, error) {
 
 	assignDepths(g, root.ID)
 	return g, nil
+}
+
+// scanRequirementsFile scans one requirements file into acc, recursing into each
+// `-r`/`-c` include it references. reader (nil when no containment root resolved)
+// bounds and vets every include read; visited (keyed by canonical path) breaks
+// cycles; depth bounds the chain.
+func scanRequirementsFile(acc *reqAccum, reader *securefs.Reader, filePath string, raw []byte, visited map[string]bool, depth int) {
+	if key := canonicalPath(filePath); key != "" {
+		if visited[key] {
+			return // already scanned this file — a cycle, or a diamond include
+		}
+		visited[key] = true
+	}
+	fromDir := filepath.Dir(filePath)
+
+	// Strip a leading UTF-8 BOM: `pip freeze > requirements.txt` under Windows
+	// PowerShell 5.1 (and any Notepad save) emits one, and strings.TrimSpace
+	// does not remove U+FEFF — it is category Cf, not White_Space — so the
+	// first dependency in the file would otherwise fail to parse.
+	sc := bufio.NewScanner(strings.NewReader(strings.TrimPrefix(string(raw), "\uFEFF")))
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	curIdx := -1 // index into acc.entries of the entry a `# via` line attaches to
+	inVia := false
+	for sc.Scan() {
+		trimmed := strings.TrimSpace(sc.Text())
+		if trimmed == "" {
+			continue
+		}
+
+		// pip-compile provenance comments:
+		//   # via
+		//   #   -r requirements.in
+		//   #   some-parent
+		if strings.HasPrefix(trimmed, "#") {
+			comment := strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
+			switch {
+			case comment == "via":
+				inVia = true
+			case strings.HasPrefix(comment, "via "):
+				if curIdx >= 0 {
+					if v := viaTarget(strings.TrimPrefix(comment, "via ")); v != "" {
+						acc.entries[curIdx].vias = append(acc.entries[curIdx].vias, v)
+						acc.hasProvenance = true
+					}
+				}
+				inVia = false
+			case inVia && curIdx >= 0:
+				if v := viaTarget(comment); v != "" {
+					acc.entries[curIdx].vias = append(acc.entries[curIdx].vias, v)
+					acc.hasProvenance = true
+				}
+			}
+			continue
+		}
+		inVia = false
+
+		// An `-r`/`-c` include: follow it (the pinned versions a project split into
+		// a separate file live here, and an attacker could hide a poisoned pin in
+		// one). Everything the include declares is merged into the same project.
+		if target, ok := includeTarget(trimmed); ok {
+			followInclude(acc, reader, fromDir, target, visited, depth)
+			continue
+		}
+		// Any other pip flag (--hash, -e, --index-url, …) is not a requirement.
+		if strings.HasPrefix(trimmed, "-") {
+			continue
+		}
+
+		// Strip inline hashes / continuations and trailing comments.
+		body := trimmed
+		if i := strings.Index(body, " --hash"); i >= 0 {
+			body = body[:i]
+		}
+		body = strings.TrimSuffix(strings.TrimSpace(body), "\\")
+		if i := strings.Index(body, " #"); i >= 0 {
+			body = body[:i]
+		}
+		body = strings.TrimSpace(body)
+		if body == "" {
+			continue
+		}
+
+		name, version, pinned, marker := pep508.Split(body)
+		_, specifier, _ := pep508.SplitSpecifier(body)
+		if name == "" {
+			// pep508.Split could not read this line as a requirement at all — a
+			// bare URL or local path, a name violating PEP 508's grammar, a
+			// stray fragment. That is a coverage gap, not an absent dependency,
+			// so it is DISCLOSED rather than silently dropped (D-24).
+			acc.unpinned = append(acc.unpinned, unparseableToken(body))
+			continue
+		}
+		if !pinned {
+			if marker != "" && pep508.ExcludesLinux(marker) {
+				acc.markerExcluded = append(acc.markerExcluded, name)
+			} else {
+				acc.unpinned = append(acc.unpinned, name)
+				// Keep the constraint (Split discards a range; SplitSpecifier
+				// keeps it) so transitive expansion can presume a version rather
+				// than leaving the dependency merely disclosed as unresolved.
+				acc.declared = append(acc.declared, graph.DeclaredDep{Name: purl.NormalizePyPI(name), Constraint: specifier})
+			}
+			continue
+		}
+		acc.entries = append(acc.entries, reqEntry{name: name, version: version, marker: marker})
+		curIdx = len(acc.entries) - 1
+	}
+	// A scan error (an over-long line hits the 4 MB buffer cap) bounds this file
+	// but not the whole project — the lines already read stand, and the truncation
+	// is disclosed like any unread include.
+	if err := sc.Err(); err != nil {
+		acc.unfollowed = append(acc.unfollowed, includeToken(filepath.Base(filePath), "unreadable: "+err.Error()))
+	}
+}
+
+// followInclude resolves and reads one `-r`/`-c` target, recursing into it. An
+// include that cannot be safely read — a remote URL, an escape of the scan root,
+// a missing/oversized/non-regular file, or one past the depth bound — is
+// disclosed as a coverage gap rather than read or silently dropped.
+func followInclude(acc *reqAccum, reader *securefs.Reader, fromDir, target string, visited map[string]bool, depth int) {
+	if low := strings.ToLower(target); strings.HasPrefix(low, "http://") || strings.HasPrefix(low, "https://") {
+		acc.unfollowed = append(acc.unfollowed, includeToken(target, "remote URL"))
+		return
+	}
+	if depth+1 > maxIncludeDepth {
+		acc.unfollowed = append(acc.unfollowed, includeToken(target, "include depth exceeded"))
+		return
+	}
+	if reader == nil {
+		acc.unfollowed = append(acc.unfollowed, includeToken(target, "no containment root"))
+		return
+	}
+	p := target
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(fromDir, target)
+	}
+	data, err := reader.ReadFile(p)
+	if err != nil {
+		reason := "unreadable"
+		switch {
+		case errors.Is(err, securefs.ErrOutsideRoot):
+			reason = "outside scan root"
+		case errors.Is(err, os.ErrNotExist):
+			reason = "missing"
+		case errors.Is(err, securefs.ErrTooLarge):
+			reason = "too large"
+		case errors.Is(err, securefs.ErrNotRegular):
+			reason = "not a regular file"
+		}
+		acc.unfollowed = append(acc.unfollowed, includeToken(target, reason))
+		return
+	}
+	scanRequirementsFile(acc, reader, p, data, visited, depth+1)
+}
+
+// includeTarget reports whether a line is a `-r`/`-c` (or `--requirement`/
+// `--constraint`) include and returns its target path. pip accepts the argument
+// separated by a space, an `=`, or — for the short forms — glued directly
+// (`-rfile.txt`). A trailing inline comment is stripped.
+func includeTarget(line string) (string, bool) {
+	s := strings.TrimSpace(line)
+	for _, pre := range []string{"--requirement", "--constraint"} {
+		if !strings.HasPrefix(s, pre) {
+			continue
+		}
+		rest := s[len(pre):]
+		if rest == "" || (rest[0] != ' ' && rest[0] != '\t' && rest[0] != '=') {
+			continue // "--requirements" (a different token) must not match
+		}
+		if arg := cleanIncludeArg(rest[1:]); arg != "" {
+			return arg, true
+		}
+	}
+	for _, pre := range []string{"-r", "-c"} {
+		if !strings.HasPrefix(s, pre) {
+			continue
+		}
+		rest := s[len(pre):]
+		if rest == "" {
+			continue // a bare "-r" with no argument is malformed; skip
+		}
+		if rest[0] == ' ' || rest[0] == '\t' || rest[0] == '=' {
+			rest = rest[1:]
+		}
+		// else: glued form `-rfile.txt`; rest is already the argument.
+		if arg := cleanIncludeArg(rest); arg != "" {
+			return arg, true
+		}
+	}
+	return "", false
+}
+
+// cleanIncludeArg trims an include target of surrounding space, quotes, and a
+// trailing " #" comment.
+func cleanIncludeArg(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, " #"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	return strings.Trim(s, `"'`)
+}
+
+// includeToken renders an unfollowed include as one comma-free, length-bounded
+// disclosure token for graph.AttrUnresolved (the same constraints
+// unparseableToken documents).
+func includeToken(target, reason string) string {
+	t := strings.ReplaceAll(strings.TrimSpace(target), ",", " ")
+	if r := []rune(t); len(r) > 50 {
+		t = string(r[:50]) + "…"
+	}
+	return "<unfollowed-include: " + t + " (" + reason + ")>"
+}
+
+// canonicalPath resolves a file path to its symlink-free absolute form for cycle
+// detection, falling back to the cleaned absolute path when it cannot be
+// resolved (a not-yet-read top file), and to the input when even that fails.
+func canonicalPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	if canon, err := filepath.EvalSymlinks(abs); err == nil {
+		return canon
+	}
+	return filepath.Clean(abs)
 }
 
 // viaTarget extracts a parent package name from a pip-compile `via` line,

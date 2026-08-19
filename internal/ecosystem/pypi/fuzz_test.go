@@ -33,7 +33,10 @@ func FuzzParseRequirements(f *testing.F) {
 	f.Add([]byte(""))
 
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		g, err := parseRequirements("requirements.txt", raw)
+		// Empty containRoot: the fuzzer supplies only the top file's bytes, so no
+		// include is followed — the fuzz target exercises the line parser, and the
+		// include-following path is covered by TestRequirementsFollowsIncludes.
+		g, err := parseRequirements("requirements.txt", raw, "requirements.txt", "")
 		if err != nil {
 			return
 		}

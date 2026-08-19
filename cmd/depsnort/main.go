@@ -202,12 +202,18 @@ func checkRegistry() *check.Registry {
 }
 
 // adapterRegistry builds the ecosystem adapter registry with the given scan
-// configuration. This is the single wiring point for adapters.
-func adapterRegistry(offline bool) *ecosystem.Registry {
+// configuration. This is the single wiring point for adapters. An optional
+// scanRoot bounds where a requirements.txt `-r`/`-c` include may be followed
+// (D-54): the PyPI adapter reads an include only if it stays inside this root.
+func adapterRegistry(offline bool, scanRoot ...string) *ecosystem.Registry {
 	pypiCache := datasource.NewCache(defaultCacheDir("pypi-sdist"), 7*24*time.Hour)
+	pypiAdapter := pypi.NewWithSdist(pypiCache, offline)
+	if len(scanRoot) > 0 {
+		pypiAdapter.ScanRoot = scanRoot[0]
+	}
 	return ecosystem.NewRegistry(
 		npm.New(),
-		pypi.NewWithSdist(pypiCache, offline),
+		pypiAdapter,
 		rubygems.New(),
 		cargo.New(),
 		composer.New(),
@@ -630,7 +636,7 @@ func cmdScan(args []string) int {
 		return exitUsage
 	}
 
-	adapters := adapterRegistry(*offline)
+	adapters := adapterRegistry(*offline, path)
 	checks := checkRegistry()
 
 	// Build the list of projects to scan. A single path is one project; with
