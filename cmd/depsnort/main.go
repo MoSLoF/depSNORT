@@ -658,7 +658,15 @@ func cmdScan(args []string) int {
 			fmt.Fprintf(os.Stderr, "depsnort: discovery under %s: %v\n", path, err)
 			return exitInternal
 		}
-		if len(found) == 0 {
+		// Directories carrying a recognized manifest no adapter could resolve (a
+		// bare .csproj, a pom.xml, a Pipfile) are disclosed as incomplete coverage
+		// rather than skipped in silence (D-59).
+		claimed := make(map[string]bool, len(found))
+		for _, p := range found {
+			claimed[filepath.Clean(p.Path)] = true
+		}
+		gaps := discoverManifestGaps(path, claimed)
+		if len(found) == 0 && len(gaps) == 0 {
 			// Nothing to scan is not an internal error and not a risk finding —
 			// a recursive sweep legitimately crosses repos with no supported
 			// ecosystem (Go, C, a docs tree). Exit clean with a loud stderr
@@ -666,18 +674,32 @@ func cmdScan(args []string) int {
 			fmt.Fprintf(os.Stderr, "depsnort: no supported projects found under %q (nothing to scan)\n", path)
 			return exitClean
 		}
-		projects = found
-		fmt.Fprintf(os.Stderr, "depsnort: discovered %d project(s) under %s\n", len(projects), path)
+		projects = append(found, gaps...)
+		fmt.Fprintf(os.Stderr, "depsnort: discovered %d project(s) under %s", len(found), path)
+		if len(gaps) > 0 {
+			fmt.Fprintf(os.Stderr, " (+%d with a recognized but unresolved manifest, disclosed as incomplete coverage)", len(gaps))
+		}
+		fmt.Fprintln(os.Stderr)
 	} else {
 		adapter, err := adapters.Detect(path)
 		if err != nil {
-			// No supported manifest at this path is "nothing to scan", not an
-			// internal error — exit clean rather than failing a caller that
-			// points at a target with no supported ecosystem.
-			fmt.Fprintf(os.Stderr, "depsnort: %v (nothing to scan)\n", err)
-			return exitClean
+			// A recognized manifest no adapter can resolve (a bare .csproj, a
+			// pom.xml) is a real dependency-bearing project. Disclose it as
+			// incomplete coverage rather than the silent "nothing to scan" pass
+			// that is a green checkmark meaning "did not look" (D-59).
+			if gaps := recognizedGapManifests(path); len(gaps) > 0 {
+				fmt.Fprintf(os.Stderr, "depsnort: a recognized manifest at %s could not be resolved by any adapter; reporting as incomplete coverage, not a clean pass\n", path)
+				projects = []discovered{{Path: path, Adapter: gapAdapter{gaps}}}
+			} else {
+				// No supported manifest at this path is "nothing to scan", not an
+				// internal error — exit clean rather than failing a caller that
+				// points at a target with no supported ecosystem.
+				fmt.Fprintf(os.Stderr, "depsnort: %v (nothing to scan)\n", err)
+				return exitClean
+			}
+		} else {
+			projects = []discovered{{Path: path, Adapter: adapter}}
 		}
-		projects = []discovered{{Path: path, Adapter: adapter}}
 	}
 
 	pass := resolveProjects(projects, !*noInstallSurface)

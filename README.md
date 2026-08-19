@@ -448,8 +448,11 @@ A scanner must not confuse *nothing found* with *nothing inspected*.
 
 Unpinned specifiers, datasource failures, unreadable subtrees, offline cache
 misses, failed workspace projects, partial install-surface extraction, and
-non-registry package sources are all disclosed. A partial run is never silently
-promoted to clean. Precedence is:
+non-registry package sources are all disclosed. So is a **recognized manifest no
+adapter can resolve** — a bare `.csproj` with no `packages.lock.json`, a
+`pom.xml`, a `Pipfile` — which degrades coverage ("manifest present, dependencies
+unread") rather than reading as "nothing to scan". A partial run is never
+silently promoted to clean. Precedence is:
 
 ```
 block > gate-eligible > incomplete > advisory
