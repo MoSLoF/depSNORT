@@ -2021,3 +2021,31 @@ than exiting silent. A genuine single-project directory with no siblings and no
 subdir projects stays quiet, and `-recursive`'s own discovery/node counts are
 unchanged. The rule holds: depSNORT never exits green while a dependency-bearing
 artifact in scope was silently skipped.
+
+## D-61 — OPU-13: non-canonical requirements siblings are scanned, not just the canonical one
+
+Within a directory the PyPI adapter claims, only the canonical `requirements.txt`
+(plus `Pipfile.lock` / `pyproject.toml` / `setup.py`) was read. Sibling files with
+non-canonical names — `requirements-dev.txt`, `test-requirements.txt`,
+`dev-requirements.txt` — were never read unless the root file explicitly
+`-r`-included them. Split requirements is a dominant Python convention, and
+dev/test/CI dependencies are a real install-time surface; leaving them unread is
+the false-clean class again, and pinning a poisoned dev dependency in
+`requirements-dev.txt` was a way past the scanner.
+
+D-54 already follows `-r`/`-c` includes; D-61 extends coverage to the flat
+siblings a project did not chain. A requirements file is recognized by the
+convention itself — a `.txt` whose name contains "requirements" (so
+`constraints.txt`, which constrains rather than installs, is deliberately
+excluded). Detection now claims a directory (or a directly-pointed file) on any
+such name, not just the canonical one, so a project shipping only
+`requirements-dev.txt` is no longer "nothing to scan". Resolution reads every
+same-directory sibling into the SAME project root, carrying the include walk's
+`visited` set so a sibling already pulled in via `-r` is never read twice, every
+read contained by the same securefs reader, and an unreadable sibling disclosed
+like an unfollowed include rather than dropped (D-24). A lone `requirements.txt`
+with no siblings stays exactly as before — no disclosure, no extra nodes.
+
+Chosen the fuller option (read the siblings) over mere disclosure: turning an
+unread dependency surface into actual coverage is the tool's purpose, and the
+same containment and dedupe the `-r` path already earned make it safe.

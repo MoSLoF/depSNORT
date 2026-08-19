@@ -86,6 +86,15 @@ func inputPath(path string) (file, kind string) {
 		if p := filepath.Join(path, requirementsName); fileExists(p) {
 			return p, "requirements"
 		}
+		// A non-canonical requirements file (requirements-dev.txt,
+		// test-requirements.txt, requirements/*.txt handled downstream) with no
+		// canonical requirements.txt still marks a Python project — split
+		// requirements is a dominant convention, and dev/test/CI deps are a real
+		// install-time surface (OPU-13). The first such file (sorted) anchors the
+		// project; parseRequirements reads the rest as siblings.
+		if p := firstRequirementsSibling(path); p != "" {
+			return p, "requirements"
+		}
 		// pyproject.toml is the lowest-priority PyPI input: it is a manifest, not
 		// a lockfile, so its deps are declared (name + constraint) and expansion
 		// presumes their versions. Only treated as a project root when it
@@ -101,19 +110,22 @@ func inputPath(path string) (file, kind string) {
 		}
 		return "", ""
 	}
-	switch filepath.Base(path) {
-	case pipfileLockName:
+	switch base := filepath.Base(path); {
+	case base == pipfileLockName:
 		return path, "pipfile"
-	case requirementsName:
-		return path, "requirements"
-	case pyprojectName:
+	case base == pyprojectName:
 		if pyprojectDeclaresDeps(path) {
 			return path, "pyproject"
 		}
-	case setupPyName:
+	case base == setupPyName:
 		if setuppyDeclaresDeps(path) {
 			return path, "setuppy"
 		}
+	case isRequirementsFile(base):
+		// requirements.txt AND its non-canonical siblings (requirements-dev.txt,
+		// test-requirements.txt, …) are recognized when pointed at directly, so a
+		// dev/test requirements file is no longer "nothing to scan" (OPU-13).
+		return path, "requirements"
 	}
 	return "", ""
 }
@@ -121,6 +133,37 @@ func inputPath(path string) (file, kind string) {
 func fileExists(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && !info.IsDir()
+}
+
+// isRequirementsFile reports whether a filename is a pip requirements file by
+// the split-requirements convention: a .txt whose name contains "requirements"
+// (requirements.txt, requirements-dev.txt, test-requirements.txt,
+// dev-requirements.txt, requirements_test.txt, …). A constraints.txt does not
+// match — it constrains versions, it does not declare installed packages.
+func isRequirementsFile(name string) bool {
+	l := strings.ToLower(name)
+	return strings.HasSuffix(l, ".txt") && strings.Contains(l, "requirements")
+}
+
+// firstRequirementsSibling returns the alphabetically first requirements file in
+// dir, or "" if none — the anchor for a Python project that ships split
+// requirements without a canonical requirements.txt.
+func firstRequirementsSibling(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && isRequirementsFile(e.Name()) {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	return filepath.Join(dir, names[0])
 }
 
 // Detect implements ecosystem.Adapter.
@@ -263,7 +306,16 @@ func parseRequirements(path string, raw []byte, filePath, containRoot string) (*
 	// Scan by the concrete FILE path, not the (possibly directory) path used to
 	// name the root: `-r`/`-c` targets resolve relative to the file that
 	// references them, so fromDir must be the requirements file's own directory.
-	scanRequirementsFile(acc, reader, filePath, raw, map[string]bool{}, 0)
+	visited := map[string]bool{}
+	scanRequirementsFile(acc, reader, filePath, raw, visited, 0)
+
+	// Non-canonical requirements siblings (requirements-dev.txt,
+	// test-requirements.txt, …) in the same directory are a real install-time
+	// surface that only an explicit `-r` reached before (OPU-13). Read them into
+	// the same project root. `visited` carries over, so a sibling already pulled
+	// in via `-r` is not read twice, and a securefs reader keeps every read
+	// contained.
+	scanSiblingRequirements(acc, reader, filepath.Dir(filePath), visited)
 
 	if len(acc.entries) == 0 && len(acc.unpinned) == 0 && len(acc.unfollowed) == 0 {
 		return nil, fmt.Errorf("pypi: %s contained no requirements", requirementsName)
@@ -487,21 +539,61 @@ func followInclude(acc *reqAccum, reader *securefs.Reader, fromDir, target strin
 	}
 	data, err := reader.ReadFile(p)
 	if err != nil {
-		reason := "unreadable"
-		switch {
-		case errors.Is(err, securefs.ErrOutsideRoot):
-			reason = "outside scan root"
-		case errors.Is(err, os.ErrNotExist):
-			reason = "missing"
-		case errors.Is(err, securefs.ErrTooLarge):
-			reason = "too large"
-		case errors.Is(err, securefs.ErrNotRegular):
-			reason = "not a regular file"
-		}
-		acc.unfollowed = append(acc.unfollowed, includeToken(target, reason))
+		acc.unfollowed = append(acc.unfollowed, includeToken(target, includeReason(err)))
 		return
 	}
 	scanRequirementsFile(acc, reader, p, data, visited, depth+1)
+}
+
+// includeReason maps a contained-read failure to a short disclosure reason.
+func includeReason(err error) string {
+	switch {
+	case errors.Is(err, securefs.ErrOutsideRoot):
+		return "outside scan root"
+	case errors.Is(err, os.ErrNotExist):
+		return "missing"
+	case errors.Is(err, securefs.ErrTooLarge):
+		return "too large"
+	case errors.Is(err, securefs.ErrNotRegular):
+		return "not a regular file"
+	}
+	return "unreadable"
+}
+
+// scanSiblingRequirements reads every non-canonical requirements file in dir
+// (requirements-dev.txt, test-requirements.txt, …) into the same accumulator, so
+// a split-requirements project's dev/test/CI dependency surface is covered
+// rather than left to an explicit `-r` (OPU-13). visited carries the primary
+// file and anything already pulled in via `-r`, so nothing is read twice; every
+// read is contained by the securefs reader, and one that cannot be read is
+// disclosed like an unfollowed include, never silently dropped (D-24).
+func scanSiblingRequirements(acc *reqAccum, reader *securefs.Reader, dir string, visited map[string]bool) {
+	if reader == nil {
+		return // no containment root: cannot safely read siblings
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && isRequirementsFile(e.Name()) {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names) // determinism (D-13)
+	for _, name := range names {
+		p := filepath.Join(dir, name)
+		if visited[canonicalPath(p)] {
+			continue // the primary file, or a sibling already read via -r
+		}
+		data, err := reader.ReadFile(p)
+		if err != nil {
+			acc.unfollowed = append(acc.unfollowed, includeToken(name, includeReason(err)))
+			continue
+		}
+		scanRequirementsFile(acc, reader, p, data, visited, 0)
+	}
 }
 
 // includeTarget reports whether a line is a `-r`/`-c` (or `--requirement`/
