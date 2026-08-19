@@ -147,7 +147,13 @@ func parsePackagesLock(path string, raw []byte) (*graph.Graph, error) {
 				"nuget.type":   entry.Type,
 			}
 			n := g.AddNode(&graph.Node{
-				ID: id, Ecosystem: "nuget", Name: lowerName, Version: entry.Resolved,
+				// Name is the lockfile's CANONICAL case. NuGet package ids are
+				// case-insensitive for resolution/dedup (keyed on lowerName above,
+				// and the PURL folds too), but OSV's NuGet ecosystem is
+				// case-SENSITIVE on the name — the OSV coordinate is built straight
+				// from n.Name, so lowercasing it here silently missed every advisory
+				// and a vulnerable NuGet project scanned green (OPU-14).
+				ID: id, Ecosystem: "nuget", Name: name, Version: entry.Resolved,
 				Direct: isDirect,
 				Attr:   attr,
 			})

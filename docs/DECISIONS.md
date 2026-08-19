@@ -2049,3 +2049,28 @@ with no siblings stays exactly as before — no disclosure, no extra nodes.
 Chosen the fuller option (read the siblings) over mere disclosure: turning an
 unread dependency surface into actual coverage is the tool's purpose, and the
 same containment and dedupe the `-r` path already earned make it safe.
+
+## D-62 — OPU-14: NuGet node names stay canonical case for the OSV coordinate
+
+A `packages.lock.json` with genuinely vulnerable packages resolved and scanned
+but reported ZERO CVEs. The NuGet parser set each node's Name to the LOWERCASED
+package id, and the OSV coordinate is built straight from the node's Name
+(`Coord{Name: n.Name}`, both in the main scan and expansion). OSV's NuGet
+ecosystem is case-SENSITIVE on the name, so `newtonsoft.json` missed the
+advisory `Newtonsoft.Json` carries — every NuGet advisory lookup silently missed,
+and a vulnerable .NET project scanned green. A silently disabled core check for a
+whole ecosystem is the worst kind of false-negative: no error, no gap, just a
+clean report.
+
+NuGet package ids are case-insensitive for RESOLUTION, so identity and dedup
+still fold case — but that folding was wrongly applied to the OSV-facing name
+too. Nothing depended on `n.Name` being lowercased: dedup keys on a separate
+lowered map, the PURL id lowercases independently (`purl.NewNuGet`), and edge
+resolution uses its own lowered maps. The fix sets `n.Name` to the lockfile's
+canonical case; identity, dedup, and edges are unchanged.
+
+The rule this establishes: fold case for NuGet identity/dedup, never for the
+OSV/registry coordinate. It applies to every future NuGet input (the
+packages.config and Paket work in this same round observe it). npm is
+lowercase-canonical and PyPI normalizes, so both are unaffected; Cargo, Go, gem,
+and Composer preserve case already.
