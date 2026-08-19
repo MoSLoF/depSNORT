@@ -1878,3 +1878,33 @@ is `workspace:`/`portal:`/`link:` (a local self-description, not a resolved
 registry package — the real root comes from package.json). Representing
 workspace MEMBERS as their own nodes is deliberately left out; when it is done
 they should resolve to the root, not emit a `use.local` node.
+
+## D-56 — OPU-09: the edit-distance-1 FP class stays in the curated allowlist
+
+kibana's full tree (visible once yarn.lock parsed) surfaced three VC-006 false
+positives on legitimate, distinct packages one edit from a popular corpus name:
+`emoticon` vs `emotion`, `enquirer` vs `inquirer`, `utila` vs `util`. These are
+not successor packages (OPU-05) — they are the inherent collision rate of
+edit-distance-1 against a popularity corpus: two real, unrelated names that
+happen to sit one edit apart.
+
+The fix adds the three to `legitimateNpm`, the check's existing evidence-driven
+exoneration set — the same mechanism that already carries the OTHER side of each
+of these collisions (`motion`/emotion, `inquire`/inquirer, `utils`/util). Each
+entry is an observed false positive on a real scan, exactly the bar that list
+documents.
+
+The assessment suggested a stronger signal: weigh the candidate's own registry
+popularity/age, so an established package is not reported as squatting an
+unrelated name. That is a real improvement, and it was deliberately NOT taken
+here, because it changes what VC-006 IS. The check is purely structural by
+design — embedded corpus plus edit distance, no network — which is what keeps it
+deterministic and air-gap-capable (D-09). Per-candidate reputation is registry
+data behind a network call; baking it into VC-006 would make an offline scan
+non-deterministic and give a low-value advisory check a network failure mode.
+The right home for a reputation signal is a separate opt-in enrichment, the way
+the deps.dev asserted tier (D-52) is opt-in — not a change to this check. Until
+that exists, the exonerated set is curated from evidence, and the cost is that a
+new legitimate near-neighbour must be observed before it is added. That cost is
+accepted: VC-006 is advisory and never gates, so a rare transient FP is noise,
+not a blocked build, and the curated list keeps the check honest and offline.

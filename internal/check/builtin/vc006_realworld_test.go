@@ -7,9 +7,10 @@ import (
 	"ihbv.io/depsnort/internal/graph"
 )
 
-// realWorldFalsePositives is the complete VC-006 output from a scan of a real
-// 58-repo workspace. Every single one is a legitimate, widely-used package —
-// a 100% false-positive rate, which is what a warning tax looks like.
+// realWorldFalsePositives is VC-006's output on real trees — the original
+// 58-repo workspace plus the three kibana surfaced later (OPU-09). Every one is
+// a legitimate, widely-used package: a 100% false-positive rate, which is what a
+// warning tax looks like.
 //
 // They fall into three failure modes, and the fix must close all three:
 //
@@ -33,6 +34,10 @@ var realWorldFalsePositives = []struct{ name, ecosystem string }{
 	{"color", "npm"}, {"colord", "npm"}, {"commondir", "npm"}, {"crypt", "npm"},
 	{"motion", "npm"}, {"preact", "npm"}, {"react-zdog", "npm"}, {"through", "npm"},
 	{"tslint", "npm"},
+	// OPU-09: legitimate distinct packages one edit from a popular corpus name,
+	// surfaced once kibana's full tree became visible. emoticon vs emotion,
+	// enquirer vs inquirer, utila vs util.
+	{"emoticon", "npm"}, {"enquirer", "npm"}, {"utila", "npm"},
 	{"mkdoc", "pypi"}, {"scapy", "pypi"}, {"unicorn", "pypi"},
 }
 
@@ -51,6 +56,31 @@ func TestVC006NoFalsePositivesOnRealWorkspace(t *testing.T) {
 			t.Errorf("false positive: %s — %s", f.NodeID, f.Evidence)
 		}
 		t.Fatalf("VC-006 produced %d false positives on known-good packages", len(findings))
+	}
+}
+
+// OPU-09: exonerating emoticon/enquirer/utila must not blind the check to an
+// actual squat of the SAME popular targets. A mechanical mutation (doubled
+// letter, transposition) of emotion/inquirer/util is not in the legitimate set
+// and must still fire.
+func TestVC006OPU09ExonerationDoesNotBlindSquats(t *testing.T) {
+	squats := []string{
+		"emotionn", // doubled letter of "emotion"
+		"inqurier", // transposition of "inquirer"
+	}
+	for _, name := range squats {
+		g := graph.New()
+		id := "pkg:npm/" + name + "@1.0.0"
+		g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "npm", Name: name, Version: "1.0.0"})
+		var hit bool
+		for _, f := range (Typosquat{}).Run(&check.Context{Graph: g}) {
+			if f.NodeID == id {
+				hit = true
+			}
+		}
+		if !hit {
+			t.Errorf("squat %q of a popular target should still fire", name)
+		}
 	}
 }
 
