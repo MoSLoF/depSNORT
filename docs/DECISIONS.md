@@ -1569,3 +1569,39 @@ setup.py. The pattern across both rounds held — the machinery was sound, and
 every gap was a real-world INPUT SHAPE that fixtures had not exercised. Two
 rounds of real repositories found five such shapes; a fixture suite would have
 found none of them.
+
+## D-47 — trial by fire, round three: exit codes and the npm manifest
+
+Eleven repositories, the widest net yet, spanning Cargo, npm, PyPI (requirements,
+pyproject, setup.py, poetry.lock, uv.lock), Go, and a Gradle/QNX project. Eight
+resolved cleanly on the earlier fixes — including the setup.py projects from
+round two and the poetry.lock/uv.lock projects, which fell through to their
+pyproject/requirements siblings. Two defects surfaced, both fixed.
+
+**"No supported projects" was returning exit 70 (internal error).** A recursive
+sweep that crossed a Go-only, C/RTOS, or otherwise manifest-less repo failed with
+the internal-error code — which would break a CI gate run across many repos, none
+of them actually broken. Nothing to scan is neither a risk finding nor an
+internal error: it now exits CLEAN (0) with a loud stderr note, on both the
+recursive and single-target paths. A path that does not EXIST is kept distinct —
+that is a usage error (64), the operator's bad argument, not an empty-but-valid
+tree. The earlier trials had reported exit 0 here only because the measurement
+piped through `head`; the bug was long-standing, and the round-three harness
+captured the real code.
+
+**An npm package.json without a lockfile resolved to nothing.** A committed npm
+app missing its package-lock.json is a manifest, not a resolved tree — the same
+shape the PyPI pyproject fix (D-45) handled, one ecosystem over. The npm adapter
+now falls back to package.json when no lock is present, emitting its runtime and
+optional dependencies (dev excluded, aliases unwrapped) as declared deps for
+expansion to presume. A real repo went from "no supported projects" to a 180-node
+tree resolved six layers deep.
+
+Three rounds, twelve repositories that landed something, and every single
+finding was an INPUT SHAPE the fixtures never had: unpinned requirements,
+pyproject, setup.py, npm aliases, Cargo's alphabetical lock, a manifest-less
+tree's exit code, a lockless package.json. The machinery was right from the
+start; the trials were about contact with how projects are actually committed.
+What remains uncovered is disclosed, not silently wrong: Go and Gradle have no
+adapter and now say "nothing to scan" cleanly, and poetry.lock/uv.lock defer to
+their manifest siblings.

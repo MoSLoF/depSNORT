@@ -58,6 +58,7 @@ import (
 var version = "dev"
 
 const (
+	exitClean    = 0
 	exitUsage    = 64
 	exitInternal = 70
 )
@@ -634,6 +635,15 @@ func cmdScan(args []string) int {
 	checks := checkRegistry()
 
 	// Build the list of projects to scan. A single path is one project; with
+	// A path that does not exist is a USAGE error (a bad argument), distinct from
+	// a path that exists but carries no supported manifest (nothing to scan,
+	// exit clean). Separating them keeps a CI sweep's empty-but-valid repos from
+	// looking like the operator's typo.
+	if _, statErr := os.Stat(path); statErr != nil {
+		fmt.Fprintf(os.Stderr, "depsnort: %v\n", statErr)
+		return exitUsage
+	}
+
 	// -recursive the path is a workspace root and every project beneath it is
 	// discovered and merged into one graph.
 	var projects []discovered
@@ -644,16 +654,23 @@ func cmdScan(args []string) int {
 			return exitInternal
 		}
 		if len(found) == 0 {
-			fmt.Fprintf(os.Stderr, "depsnort: no supported projects found under %q\n", path)
-			return exitInternal
+			// Nothing to scan is not an internal error and not a risk finding —
+			// a recursive sweep legitimately crosses repos with no supported
+			// ecosystem (Go, C, a docs tree). Exit clean with a loud stderr
+			// note, so a CI gate over many repos is not failed by an empty one.
+			fmt.Fprintf(os.Stderr, "depsnort: no supported projects found under %q (nothing to scan)\n", path)
+			return exitClean
 		}
 		projects = found
 		fmt.Fprintf(os.Stderr, "depsnort: discovered %d project(s) under %s\n", len(projects), path)
 	} else {
 		adapter, err := adapters.Detect(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "depsnort: %v\n", err)
-			return exitInternal
+			// No supported manifest at this path is "nothing to scan", not an
+			// internal error — exit clean rather than failing a caller that
+			// points at a target with no supported ecosystem.
+			fmt.Fprintf(os.Stderr, "depsnort: %v (nothing to scan)\n", err)
+			return exitClean
 		}
 		projects = []discovered{{Path: path, Adapter: adapter}}
 	}
