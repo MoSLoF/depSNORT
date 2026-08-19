@@ -95,7 +95,7 @@ Seven ecosystems share the same graph, check, verdict, and output model:
 | **RubyGems** | `Gemfile.lock`, or `Gemfile` | `pkg:gem/` | `extconf.rb` / native-extension install paths |
 | **Cargo** | `Cargo.lock` | `pkg:cargo/` | `build.rs` and compile-time code paths |
 | **Composer** | `composer.lock`, or `composer.json` | `pkg:composer/` | scripts, plugin packages, plugin entrypoints |
-| **NuGet** | `packages.lock.json`, or `packages.config` | `pkg:nuget/` | install/init scripts and package build assets |
+| **NuGet** | `packages.lock.json`, `packages.config`, or `paket.lock` | `pkg:nuget/` | install/init scripts and package build assets |
 | **Go** | `go.mod` | `pkg:golang/` | not yet extracted — Go has resolution, expansion, OSV advisories, and the temporal axis, but no install-surface analysis yet |
 
 A lockfile gives a fully-resolved tree; a bare manifest (an unpinned
@@ -451,8 +451,10 @@ misses, failed workspace projects, partial install-surface extraction, and
 non-registry package sources are all disclosed. So is a **recognized manifest no
 adapter can resolve** — a bare `.csproj` with no `packages.lock.json`, a
 `pom.xml`, a `Pipfile` — which degrades coverage ("manifest present, dependencies
-unread") rather than reading as "nothing to scan". A partial run is never
-silently promoted to clean. Precedence is:
+unread") rather than reading as "nothing to scan". As a last-ditch net, any
+unrecognized `*.lock` file (an Elixir `mix.lock`, a CocoaPods `Podfile.lock`, a
+Dart `pubspec.lock`) is disclosed as an unknown-ecosystem gap rather than skipped
+in silence. A partial run is never silently promoted to clean. Precedence is:
 
 ```
 block > gate-eligible > incomplete > advisory

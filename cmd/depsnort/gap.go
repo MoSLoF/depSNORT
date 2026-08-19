@@ -33,6 +33,9 @@ var gapManifestByName = map[string]string{
 	"poetry.lock":      "pypi",
 	"uv.lock":          "pypi",
 	"Pipfile":          "pypi",
+	// Paket's manifest. Its resolved paket.lock IS parsed (the nuget adapter
+	// claims it), so only the lock-less dependencies manifest reaches here (OPU-17).
+	"paket.dependencies": "nuget",
 }
 
 // gapManifestByExt covers the NuGet project files, which carry the project's
@@ -41,6 +44,36 @@ var gapManifestByExt = map[string]string{
 	".csproj": "nuget",
 	".fsproj": "nuget",
 	".vbproj": "nuget",
+}
+
+// gapCatchAllExts is the last-ditch "hail-mary" tier: a file suffix that almost
+// always names a dependency lockfile, for ecosystems depsnort has no specific
+// recognizer for at all (Elixir mix.lock, CocoaPods Podfile.lock, Dart
+// pubspec.lock, Nix flake.lock, …). It fires only AFTER the name and ext tables
+// miss, so a lock a real adapter parses (Cargo.lock, composer.lock, yarn.lock,
+// Gemfile.lock, paket.lock) never reaches it — those dirs are claimed. The
+// ecosystem is reported as "unknown" because that is the honest truth: we know a
+// lockfile is here, not which tool wrote it. Over-disclosure is deliberately
+// safe here — a catch-all match only degrades coverage (a note, gated under the
+// opt-in -fail-on-incomplete), never a false block — while the failure it closes
+// is the dangerous one: a real dependency surface skipped in total silence.
+var gapCatchAllExts = map[string]string{
+	".lock": "unknown",
+}
+
+// adapterHandledLocks are lockfiles a real adapter's Detect claims (so the
+// directory is scanned, never a gap). They end in ".lock", so without this the
+// catch-all above would mislabel a handled Cargo.lock / yarn.lock as an unknown
+// gap. In the live flow a claimed directory never reaches classifyGapManifest,
+// but keeping the pure classifier honest guards the contract "true == depsnort
+// does not read this" against any future caller.
+var adapterHandledLocks = map[string]bool{
+	"Cargo.lock":    true, // cargo
+	"composer.lock": true, // composer
+	"yarn.lock":     true, // npm
+	"Gemfile.lock":  true, // gem
+	"Pipfile.lock":  true, // pypi
+	"paket.lock":    true, // nuget (OPU-17)
 }
 
 // maxGapProjects bounds how many unread-manifest directories a recursive sweep
@@ -90,7 +123,14 @@ func classifyGapManifest(name string) (string, bool) {
 	if eco, ok := gapManifestByName[name]; ok {
 		return eco, true
 	}
-	if eco, ok := gapManifestByExt[strings.ToLower(filepath.Ext(name))]; ok {
+	ext := strings.ToLower(filepath.Ext(name))
+	if eco, ok := gapManifestByExt[ext]; ok {
+		return eco, true
+	}
+	// Hail-mary: an unrecognized lockfile suffix, disclosed as an unknown-ecosystem
+	// gap rather than skipped in silence (OPU-17 cross-cutting). Locks a real
+	// adapter reads are excluded so a handled Cargo.lock is never mislabeled.
+	if eco, ok := gapCatchAllExts[ext]; ok && !adapterHandledLocks[name] {
 		return eco, true
 	}
 	return "", false

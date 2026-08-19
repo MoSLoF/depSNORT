@@ -11,6 +11,7 @@
 package nuget
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
@@ -36,12 +37,14 @@ func (*Adapter) Name() string { return "nuget" }
 const (
 	packagesLockName   = "packages.lock.json"
 	packagesConfigName = "packages.config"
+	paketLockName      = "paket.lock"
 )
 
 // Detect implements ecosystem.Adapter. A packages.lock.json (a resolved tree)
 // claims the directory; failing that, a packages.config (the legacy .NET
-// Framework XML manifest, still common) claims it too — it was previously only
-// disclosed as an unresolvable gap, never parsed (OPU-15).
+// Framework XML manifest, OPU-15) or a paket.lock (the Paket dependency
+// manager's resolved lockfile, OPU-17) claims it too. Both were previously only
+// disclosed as unresolvable gaps — paket.lock not even that — never parsed.
 func (*Adapter) Detect(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -49,10 +52,11 @@ func (*Adapter) Detect(path string) bool {
 	}
 	if info.IsDir() {
 		return fileExists(filepath.Join(path, packagesLockName)) ||
-			fileExists(filepath.Join(path, packagesConfigName))
+			fileExists(filepath.Join(path, packagesConfigName)) ||
+			fileExists(filepath.Join(path, paketLockName))
 	}
 	base := filepath.Base(path)
-	return base == packagesLockName || base == packagesConfigName
+	return base == packagesLockName || base == packagesConfigName || base == paketLockName
 }
 
 func fileExists(p string) bool {
@@ -60,9 +64,10 @@ func fileExists(p string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// Resolve implements ecosystem.Adapter. packages.lock.json (a resolved tree)
-// takes precedence; otherwise a packages.config is parsed into its declared
-// package set.
+// Resolve implements ecosystem.Adapter. A resolved lockfile is preferred:
+// packages.lock.json first, then paket.lock (both record exact versions);
+// otherwise a packages.config is parsed into its declared package set. A
+// directly-pointed file is dispatched by basename.
 func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -73,10 +78,14 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 		if err != nil {
 			return nil, fmt.Errorf("nuget: reading %s: %w", filepath.Base(path), err)
 		}
-		if filepath.Base(path) == packagesConfigName {
+		switch filepath.Base(path) {
+		case packagesConfigName:
 			return parsePackagesConfig(path, raw)
+		case paketLockName:
+			return parsePaketLock(path, raw)
+		default:
+			return parsePackagesLock(path, raw)
 		}
-		return parsePackagesLock(path, raw)
 	}
 	if lock := filepath.Join(path, packagesLockName); fileExists(lock) {
 		raw, err := os.ReadFile(lock)
@@ -84,6 +93,13 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 			return nil, fmt.Errorf("nuget: reading %s: %w", packagesLockName, err)
 		}
 		return parsePackagesLock(path, raw)
+	}
+	if paket := filepath.Join(path, paketLockName); fileExists(paket) {
+		raw, err := os.ReadFile(paket)
+		if err != nil {
+			return nil, fmt.Errorf("nuget: reading %s: %w", paketLockName, err)
+		}
+		return parsePaketLock(path, raw)
 	}
 	config := filepath.Join(path, packagesConfigName)
 	raw, err := os.ReadFile(config)
@@ -326,9 +342,175 @@ func parsePackagesConfig(path string, raw []byte) (*graph.Graph, error) {
 	return g, nil
 }
 
+// parsePaketLock parses a Paket paket.lock — the resolved lockfile of the Paket
+// .NET dependency manager. Paket packages ARE NuGet packages (same registry,
+// same pkg:nuget/ coordinate, same case-sensitive OSV ecosystem), so they become
+// ordinary nuget nodes. Only NUGET-group entries are read; GITHUB/GIT/HTTP
+// sections point at non-NuGet sources and are skipped. A Paket project was
+// previously SILENTLY skipped — not even disclosed — with no signal at all
+// (OPU-17).
+//
+// Format (groups optional; the default group is unnamed):
+//
+//	NUGET
+//	  remote: https://api.nuget.org/v3/index.json
+//	    Newtonsoft.Json (12.0.3)
+//	      System.Runtime (>= 4.3)
+//	    System.Net.Http (4.3.0)
+//
+//	GROUP Build
+//	NUGET
+//	  remote: https://api.nuget.org/v3/index.json
+//	    FAKE (5.0.0)
+func parsePaketLock(path string, raw []byte) (*graph.Graph, error) {
+	g := graph.New()
+	root := rootNode(g, path)
+
+	type paketPkg struct {
+		name, version string
+		deps          []string
+	}
+	var (
+		pkgs    []paketPkg
+		section string
+		curPkg  *paketPkg
+	)
+
+	sc := bufio.NewScanner(strings.NewReader(string(raw)))
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		// Section/group headers are unindented.
+		if line[0] != ' ' && line[0] != '\t' {
+			trimmed := strings.TrimSpace(line)
+			if rest, ok := strings.CutPrefix(trimmed, "GROUP"); ok && (rest == "" || rest[0] == ' ' || rest[0] == '\t') {
+				// A new group resets the section; its packages are still NuGet.
+				section = ""
+			} else {
+				section = strings.ToUpper(strings.Fields(trimmed)[0])
+			}
+			curPkg = nil
+			continue
+		}
+		if section != "NUGET" {
+			continue
+		}
+		indent := countIndent(line)
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case indent <= 2:
+			// remote: / framework restrictions / options — preamble, not a package.
+			curPkg = nil
+		case indent <= 4:
+			name, version := parsePaketSpec(trimmed)
+			if name != "" && version != "" {
+				pkgs = append(pkgs, paketPkg{name: name, version: version})
+				curPkg = &pkgs[len(pkgs)-1]
+			} else {
+				curPkg = nil
+			}
+		default: // indent >= 6: a dependency of the current package
+			if curPkg != nil {
+				if dep, _ := parsePaketSpec(trimmed); dep != "" {
+					curPkg.deps = append(curPkg.deps, dep)
+				}
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("nuget: scanning %s: %w", paketLockName, err)
+	}
+
+	// Build nodes (canonical case — the OSV coordinate is case-sensitive, D-62),
+	// deduped by PURL id so the same package pinned in several groups is one node.
+	byLowerName := map[string]string{} // lower(name) -> node ID (for edge lookup)
+	seen := map[string]bool{}
+	for _, p := range pkgs {
+		id := purl.NewNuGet(p.name, p.version).String()
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		n := g.AddNode(&graph.Node{
+			ID: id, Ecosystem: "nuget", Name: p.name, Version: p.version,
+			Attr: map[string]string{"nuget.source": paketLockName},
+		})
+		n.SetSource(graph.SourceRegistry, "")
+		byLowerName[strings.ToLower(p.name)] = id
+	}
+	if g.Len() == 1 {
+		return nil, fmt.Errorf("nuget: %s contained no NUGET packages", paketLockName)
+	}
+
+	// Inter-package edges (NuGet ids are case-insensitive, so fold for lookup).
+	for _, p := range pkgs {
+		fromID, ok := byLowerName[strings.ToLower(p.name)]
+		if !ok {
+			continue
+		}
+		for _, dep := range p.deps {
+			toID, ok := byLowerName[strings.ToLower(dep)]
+			if !ok || toID == fromID {
+				continue
+			}
+			g.AddEdge(fromID, toID, graph.EdgeDependsOn)
+		}
+	}
+
+	// Any package with no inbound edge from another package hangs off root.
+	hasInbound := map[string]bool{}
+	for _, e := range g.SortedEdges() {
+		if e.From != root.ID && e.Type == graph.EdgeDependsOn {
+			hasInbound[e.To] = true
+		}
+	}
+	for _, id := range byLowerName {
+		if !hasInbound[id] {
+			g.AddEdge(root.ID, id, graph.EdgeDependsOn)
+			if n := g.Get(id); n != nil {
+				n.Direct = true
+			}
+		}
+	}
+
+	assignDepths(g, root.ID)
+	return g, nil
+}
+
+// parsePaketSpec splits a paket.lock entry "Name (version) - restriction: ..."
+// into name and the version between the first parentheses. A dependency line
+// "Name (>= 4.3)" yields the name and a constraint (ignored by the caller).
+func parsePaketSpec(s string) (name, version string) {
+	open := strings.IndexByte(s, '(')
+	if open < 0 {
+		return strings.TrimSpace(s), ""
+	}
+	name = strings.TrimSpace(s[:open])
+	rest := s[open+1:]
+	if end := strings.IndexByte(rest, ')'); end >= 0 {
+		version = strings.TrimSpace(rest[:end])
+	}
+	return name, version
+}
+
+// countIndent counts leading spaces (paket.lock indents with spaces).
+func countIndent(line string) int {
+	n := 0
+	for _, ch := range line {
+		if ch == ' ' {
+			n++
+		} else {
+			break
+		}
+	}
+	return n
+}
+
 func rootNode(g *graph.Graph, path string) *graph.Node {
 	name := filepath.Base(strings.TrimSuffix(filepath.Clean(path), string(filepath.Separator)))
-	if name == "." || name == "" || name == packagesLockName || name == packagesConfigName {
+	if name == "." || name == "" || name == packagesLockName || name == packagesConfigName || name == paketLockName {
 		name = filepath.Base(filepath.Dir(path))
 	}
 	if name == "." || name == "" {
