@@ -85,6 +85,20 @@ func resolveYarn(lockPath string) (*graph.Graph, error) {
 func parseYarnLock(lockRaw, manifestRaw []byte, dir string) (*graph.Graph, error) {
 	entries := scanYarnLock(lockRaw)
 
+	// Drop non-package blocks so they never materialize as nodes: Berry's
+	// `__metadata:` header, and a workspace/portal/link SELF-entry (the project
+	// or a workspace member describing itself, e.g. "app@workspace:."). The real
+	// root is built from package.json by yarnAttachRoot; a workspace self-entry
+	// would otherwise become a phantom `0.0.0-use.local` duplicate of it, and
+	// `__metadata` a phantom package named "__metadata" (OPU-07).
+	pkgs := entries[:0]
+	for _, e := range entries {
+		if !isNonPackageYarnEntry(e) {
+			pkgs = append(pkgs, e)
+		}
+	}
+	entries = pkgs
+
 	g := graph.New()
 
 	// descNode maps a normalized "name@range" descriptor to its resolved node ID,
@@ -98,7 +112,12 @@ func parseYarnLock(lockRaw, manifestRaw []byte, dir string) (*graph.Graph, error
 		if e.version == "" || len(e.descriptors) == 0 {
 			continue
 		}
-		name := yarnDescriptorName(e.descriptors[0])
+		// The node's SECURITY IDENTITY is the real package, unwrapping a yarn
+		// alias (alias@npm:REALNAME@range) to REALNAME — otherwise the node is
+		// named for the local alias, OSV/registry/typosquat are queried by the
+		// alias, and a malicious impostor published under the bare alias name is
+		// matched against the innocent aliased package (OPU-08).
+		name := yarnResolvedName(e.descriptors[0])
 		if name == "" {
 			continue
 		}
@@ -109,12 +128,27 @@ func parseYarnLock(lockRaw, manifestRaw []byte, dir string) (*graph.Graph, error
 				n.Attr = map[string]string{"npm.resolved": e.resolved}
 				n.SetSource(classifyResolved(e.resolved))
 			}
+			// Keep the local alias as a label so a report can still show the name
+			// the manifest used, without it ever being the security identity.
+			if alias := yarnDescriptorName(e.descriptors[0]); alias != "" && alias != name {
+				if n.Attr == nil {
+					n.Attr = map[string]string{}
+				}
+				n.Attr["npm.alias"] = alias
+			}
 			byName[name] = append(byName[name], id)
 		}
+		// Index the node under every descriptor that resolves to it — the alias
+		// descriptor (so a dependant that references the alias links) AND, for an
+		// alias, the real name@range (so a reference by the true coordinate links).
 		for _, d := range e.descriptors {
 			dn, dr := splitYarnDescriptor(d)
-			if dn != "" {
-				descNode[dn+"@"+stripNpmProto(dr)] = id
+			if dn == "" {
+				continue
+			}
+			descNode[dn+"@"+stripNpmProto(dr)] = id
+			if inner, innerRange := aliasTarget(dr); inner != "" {
+				descNode[inner+"@"+innerRange] = id
 			}
 		}
 	}
@@ -124,7 +158,7 @@ func parseYarnLock(lockRaw, manifestRaw []byte, dir string) (*graph.Graph, error
 		if e.version == "" || len(e.descriptors) == 0 {
 			continue
 		}
-		fromID := purl.NewNpm(yarnDescriptorName(e.descriptors[0]), e.version).
+		fromID := purl.NewNpm(yarnResolvedName(e.descriptors[0]), e.version).
 			WithSource(classifyResolved(e.resolved)).String()
 		for _, dn := range sortedStrKeys(e.deps) {
 			if to, ok := resolveYarnDep(descNode, byName, dn, e.deps[dn]); ok {
@@ -356,10 +390,61 @@ func splitYarnDescriptor(desc string) (name, rng string) {
 	return body[:i], body[i+1:]
 }
 
-// yarnDescriptorName is splitYarnDescriptor's name half.
+// yarnDescriptorName is splitYarnDescriptor's name half — the LOCAL name a
+// descriptor uses, which for an alias is the alias, not the real package.
 func yarnDescriptorName(desc string) string {
 	n, _ := splitYarnDescriptor(desc)
 	return n
+}
+
+// yarnResolvedName is the descriptor's true package name for security identity:
+// it unwraps a yarn alias ("alias@npm:REALNAME@range") to REALNAME, while a
+// plain range ("foo@npm:^1", "@babel/core@npm:^7") keeps its own name. This is
+// the name OSV, the registry, and typosquat must see — the alias would match a
+// different package that merely shares the local name (OPU-08).
+func yarnResolvedName(desc string) string {
+	name, rng := splitYarnDescriptor(desc)
+	if inner, _ := aliasTarget(rng); inner != "" {
+		return inner
+	}
+	return name
+}
+
+// aliasTarget reports the real package a yarn `npm:` alias range points at.
+// A range is an alias only when, after dropping the "npm:" protocol, it still
+// splits into BOTH an inner name and an inner range ("@elastic/elasticsearch@8.19.1"
+// -> "@elastic/elasticsearch", "8.19.1"). A bare range ("^1.2.3") has no inner
+// name and is not an alias.
+func aliasTarget(rng string) (name, innerRange string) {
+	if !strings.HasPrefix(rng, "npm:") {
+		return "", ""
+	}
+	inner, ir := splitYarnDescriptor(stripNpmProto(rng))
+	if inner != "" && ir != "" {
+		return inner, ir
+	}
+	return "", ""
+}
+
+// isNonPackageYarnEntry reports whether a scanned block is not a resolved
+// registry package that should become a node: Berry's `__metadata` header, or a
+// workspace/portal/link SELF-entry (the project or a workspace member describing
+// its own local location). The real root comes from package.json; these would
+// otherwise be phantom nodes (OPU-07).
+func isNonPackageYarnEntry(e yarnEntry) bool {
+	if len(e.descriptors) == 0 {
+		return true
+	}
+	name, rng := splitYarnDescriptor(e.descriptors[0])
+	if name == "__metadata" {
+		return true
+	}
+	for _, proto := range []string{"workspace:", "portal:", "link:"} {
+		if strings.HasPrefix(rng, proto) {
+			return true
+		}
+	}
+	return false
 }
 
 // stripNpmProto drops berry's "npm:" range protocol so a berry descriptor

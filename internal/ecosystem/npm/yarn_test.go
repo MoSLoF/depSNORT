@@ -172,3 +172,130 @@ func hasEdge(g *graph.Graph, from, to string) bool {
 	}
 	return false
 }
+
+// OPU-08: a yarn ALIAS entry — the local name `elasticsearch-8.x` bound to the
+// real package `@elastic/elasticsearch@8.19.1` — must take its security identity
+// from the REAL package, not the alias. Otherwise OSV is queried by the alias
+// and matches a malicious impostor published under that bare name, blocking the
+// innocent aliased package (a false critical block, both dialects).
+func TestParseYarnAliasResolvesToRealPackage(t *testing.T) {
+	// v1 form of the kibana entry.
+	lock := `"elasticsearch-8.x@npm:@elastic/elasticsearch@8.19.1":
+  version "8.19.1"
+  resolved "https://registry.yarnpkg.com/@elastic/elasticsearch/-/elasticsearch-8.19.1.tgz#abc"
+  dependencies:
+    "@elastic/transport" "^8.9.6"
+
+"@elastic/transport@^8.9.6":
+  version "8.9.6"
+  resolved "https://registry.yarnpkg.com/@elastic/transport/-/transport-8.9.6.tgz#def"
+`
+	manifest := `{"name":"app","version":"1.0.0","dependencies":{"elasticsearch-8.x":"npm:@elastic/elasticsearch@8.19.1"}}`
+	g, err := parseYarnLock([]byte(lock), []byte(manifest), "/tmp/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range g.SortedNodes() {
+		t.Logf("d%d %-40s alias=%s", n.Depth, n.ID, n.Attr["npm.alias"])
+	}
+
+	realID := purl.NewNpm("@elastic/elasticsearch", "8.19.1").String()
+	if real := g.Get(realID); real == nil {
+		t.Errorf("aliased node must resolve to the real package %s", realID)
+	} else if real.Name != "@elastic/elasticsearch" {
+		t.Errorf("node name = %q, want @elastic/elasticsearch", real.Name)
+	}
+	// The alias name must NOT be a node identity (that is what OSV would query).
+	if g.Get(purl.NewNpm("elasticsearch-8.x", "8.19.1").String()) != nil {
+		t.Error("the alias name elasticsearch-8.x must never be a node identity")
+	}
+	// The manifest's aliased direct dep still links to the corrected node.
+	if real := g.Get(realID); real == nil || !real.Direct {
+		t.Errorf("aliased direct dependency should be marked Direct: %+v", real)
+	}
+	// The alias survives only as a display label.
+	if real := g.Get(realID); real != nil && real.Attr["npm.alias"] != "elasticsearch-8.x" {
+		t.Errorf("alias label = %q, want elasticsearch-8.x", real.Attr["npm.alias"])
+	}
+	// The edge through the alias still lands: @elastic/elasticsearch -> @elastic/transport.
+	if !hasEdge(g, realID, purl.NewNpm("@elastic/transport", "8.9.6").String()) {
+		t.Error("edge from the aliased package to its dependency was lost")
+	}
+}
+
+// A plain `npm:` range (bare range, no embedded package name) must NOT be
+// treated as an alias — its own name stands.
+func TestParseYarnPlainNpmRangeIsNotAnAlias(t *testing.T) {
+	lock := `"foo@npm:^1.2.3":
+  version "1.5.0"
+  resolved "https://registry.yarnpkg.com/foo/-/foo-1.5.0.tgz#a"
+
+"@babel/core@npm:^7.0.0":
+  version "7.23.6"
+  resolved "https://registry.yarnpkg.com/@babel/core/-/core-7.23.6.tgz#b"
+`
+	g, err := parseYarnLock([]byte(lock), nil, "/tmp/p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Get(purl.NewNpm("foo", "1.5.0").String()) == nil {
+		t.Error("plain npm: range foo@npm:^1.2.3 should yield node foo, not be misparsed")
+	}
+	if g.Get(purl.NewNpm("@babel/core", "7.23.6").String()) == nil {
+		t.Error("scoped plain range @babel/core@npm:^7.0.0 should yield node @babel/core")
+	}
+}
+
+// OPU-07: a Berry lockfile's non-package blocks (__metadata header, workspace
+// self-entry) must not become phantom nodes; only real packages and the
+// package.json root remain.
+func TestParseYarnBerrySkipsPhantomEntries(t *testing.T) {
+	lock := `__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"app@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "app@workspace:."
+  dependencies:
+    lodash: "npm:^4.17.0"
+  languageName: unknown
+  linkType: soft
+
+"lodash@npm:^4.17.0":
+  version: 4.17.21
+  resolution: "lodash@npm:4.17.21"
+  checksum: 10c0/abc
+  languageName: node
+  linkType: hard
+`
+	manifest := `{"name":"app","version":"1.0.0","dependencies":{"lodash":"^4.17.0"}}`
+	g, err := parseYarnLock([]byte(lock), []byte(manifest), "/tmp/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range g.SortedNodes() {
+		t.Logf("node %s", n.ID)
+	}
+	if g.Get("pkg:npm/__metadata@8") != nil || g.Get("pkg:npm/__metadata@6") != nil {
+		t.Error("__metadata must not become a node")
+	}
+	if g.Get(purl.NewNpm("app", "0.0.0-use.local").String()) != nil {
+		t.Error("a workspace self-entry must not become a phantom use.local node")
+	}
+	// Exactly the real root and lodash.
+	want := map[string]bool{
+		purl.NewNpm("app", "1.0.0").String():      true, // root from package.json
+		purl.NewNpm("lodash", "4.17.21").String(): true,
+	}
+	got := 0
+	for _, n := range g.SortedNodes() {
+		if !want[n.ID] {
+			t.Errorf("unexpected node %s", n.ID)
+		}
+		got++
+	}
+	if got != len(want) {
+		t.Errorf("node count = %d, want %d", got, len(want))
+	}
+}
