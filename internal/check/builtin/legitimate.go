@@ -4,9 +4,19 @@ package builtin
 // typosquat distance of a popular package and must never be flagged.
 //
 // This list is EVIDENCE-DRIVEN, not speculative. Every entry below was an actual
-// false positive observed in a scan of a real 58-repo workspace. Adding a name
-// here is a claim that the package is genuinely well-known — so entries should
-// come from observed false positives, not from guessing.
+// false positive observed in a real scan — the original 58-repo workspace, and
+// later kibana's full tree once yarn.lock support made it visible (OPU-09).
+// Adding a name here is a claim that the package is genuinely well-known — so
+// entries come from observed false positives, not from guessing.
+//
+// Why a curated list rather than a popularity/age signal: distinguishing an
+// established package from a squat by reputation needs per-candidate registry
+// data (download counts, publish age), i.e. a network call. VC-006 is
+// deliberately static — embedded corpus plus edit distance, no network — so it
+// stays deterministic and air-gap-capable (D-09). A reputation gate is a real
+// improvement but belongs as a separate opt-in enrichment (like -depsdev for the
+// asserted tier), never baked into this check; until then the exonerated set is
+// curated from evidence.
 //
 // The distinction from the popular corpus matters: `popularNpm` is the set of
 // names a squat would IMITATE (the targets), while this is the set of names that
@@ -19,7 +29,7 @@ var legitimateNpm = map[string]struct{}{
 	// vs "colors"
 	"color": {}, "colord": {},
 	// vs "emotion"
-	"motion": {},
+	"motion": {}, "emoticon": {},
 	// vs "bcrypt"
 	"crypt": {},
 	// vs "through2"
@@ -29,7 +39,7 @@ var legitimateNpm = map[string]struct{}{
 	// vs "commander"
 	"commondir": {}, "commands": {},
 	// vs "util"
-	"utils": {},
+	"utils": {}, "utila": {},
 	// vs "consola"
 	"console": {},
 	// vs "prisma"
@@ -37,7 +47,7 @@ var legitimateNpm = map[string]struct{}{
 	// vs "passport"
 	"password": {},
 	// vs "inquirer"
-	"inquire": {},
+	"inquire": {}, "enquirer": {},
 	// vs "semver"
 	"server": {},
 	// vs "ts-node"
