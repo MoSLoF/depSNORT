@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"ihbv.io/depsnort/internal/ecosystem"
 	"ihbv.io/depsnort/internal/graph"
 )
 
@@ -181,6 +182,89 @@ func (a gapAdapter) Resolve(path string) (*graph.Graph, error) {
 	})
 	// A scan target is a local checkout; mark it path-origin so provenance
 	// coverage does not additionally charge this synthetic root as unverifiable.
+	root.SetSource(graph.SourcePath, "")
+	g.MarkRoot(root.ID)
+	return g, nil
+}
+
+// discoveryCoverageGaps returns disclosure tokens for dependency surfaces a run
+// leaves unscanned but does not otherwise mention (OPU-12): a same-directory
+// polyglot root whose non-winning ecosystems are dropped by the one-adapter-
+// per-dir rule (both modes), and — for a DEFAULT (non-recursive) scan — projects
+// in subdirectories that only `-recursive` would reach. Both are the false-clean
+// class at the discovery layer: a real dependency surface, in scope, silently
+// skipped. `scanned` is the set of real projects this run WILL scan.
+func discoveryCoverageGaps(root string, scanned []discovered, reg *ecosystem.Registry, recursive bool) []string {
+	scannedDirs := map[string]bool{}
+	var tokens []string
+
+	// Same-directory dropped ecosystems (both modes): a directory claimed for one
+	// ecosystem may hold manifests for others, which the one-per-dir rule skips.
+	for _, p := range scanned {
+		scannedDirs[filepath.Clean(p.Path)] = true
+		claimants := reg.DetectAll(p.Path)
+		if len(claimants) <= 1 {
+			continue
+		}
+		winner := p.Adapter.Name()
+		for _, a := range claimants {
+			if a.Name() == winner {
+				continue
+			}
+			tokens = append(tokens, "<unscanned-ecosystem: "+a.Name()+" manifest in "+dirLabel(root, p.Path)+" (one ecosystem per directory)>")
+		}
+	}
+
+	// Subdirectory projects a default scan never reached; -recursive would.
+	if !recursive {
+		found, _ := discoverProjects(root, reg)
+		for _, f := range found {
+			if scannedDirs[filepath.Clean(f.Path)] {
+				continue
+			}
+			tokens = append(tokens, "<additional-project: "+f.Adapter.Name()+" in "+dirLabel(root, f.Path)+" — re-run with -recursive>")
+		}
+	}
+
+	sort.Strings(tokens)
+	return tokens
+}
+
+// dirLabel renders a project directory relative to the scan root for a readable,
+// comma-free disclosure token (AttrUnresolved is comma-joined, re-split with no
+// escaping).
+func dirLabel(root, path string) string {
+	if rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path)); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		rel = strings.ReplaceAll(rel, ",", " ")
+		if rel == "." {
+			return "the scanned directory"
+		}
+		return "./" + rel
+	}
+	return strings.ReplaceAll(filepath.Base(path), ",", " ")
+}
+
+// noteAdapter discloses discovery-layer coverage notes (present-but-unscanned
+// projects and dropped same-dir ecosystems, OPU-12) through the same synthetic-
+// root channel gapAdapter uses, so they degrade coverage and gate under
+// -fail-on-incomplete instead of passing in silence.
+type noteAdapter struct {
+	tokens []string
+}
+
+func (noteAdapter) Name() string       { return "unscanned" }
+func (noteAdapter) Detect(string) bool { return false }
+
+func (a noteAdapter) Resolve(path string) (*graph.Graph, error) {
+	g := graph.New()
+	root := g.AddNode(&graph.Node{
+		ID: "coverage-note:" + gapProjectName(path), Ecosystem: "unknown",
+		Name: gapProjectName(path), Version: "0.0.0", Depth: 0,
+		Attr: map[string]string{
+			graph.AttrUnresolved:      strings.Join(a.tokens, ","),
+			graph.AttrUnresolvedCount: strconv.Itoa(len(a.tokens)),
+		},
+	})
 	root.SetSource(graph.SourcePath, "")
 	g.MarkRoot(root.ID)
 	return g, nil

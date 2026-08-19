@@ -680,25 +680,41 @@ func cmdScan(args []string) int {
 			fmt.Fprintf(os.Stderr, " (+%d with a recognized but unresolved manifest, disclosed as incomplete coverage)", len(gaps))
 		}
 		fmt.Fprintln(os.Stderr)
+		// Even a recursive sweep drops all-but-one ecosystem in a same-directory
+		// polyglot root (one adapter per directory); disclose the dropped ones
+		// rather than let them pass unmentioned (OPU-12).
+		if notes := discoveryCoverageGaps(path, found, adapters, true); len(notes) > 0 {
+			projects = append(projects, discovered{Path: path, Adapter: noteAdapter{notes}})
+			fmt.Fprintf(os.Stderr, "depsnort: %d same-directory ecosystem manifest(s) dropped by the one-per-directory rule; disclosed as incomplete coverage\n", len(notes))
+		}
 	} else {
-		adapter, err := adapters.Detect(path)
-		if err != nil {
+		adapter, derr := adapters.Detect(path)
+		if derr == nil {
+			projects = []discovered{{Path: path, Adapter: adapter}}
+		} else if gaps := recognizedGapManifests(path); len(gaps) > 0 {
 			// A recognized manifest no adapter can resolve (a bare .csproj, a
 			// pom.xml) is a real dependency-bearing project. Disclose it as
 			// incomplete coverage rather than the silent "nothing to scan" pass
 			// that is a green checkmark meaning "did not look" (D-59).
-			if gaps := recognizedGapManifests(path); len(gaps) > 0 {
-				fmt.Fprintf(os.Stderr, "depsnort: a recognized manifest at %s could not be resolved by any adapter; reporting as incomplete coverage, not a clean pass\n", path)
-				projects = []discovered{{Path: path, Adapter: gapAdapter{gaps}}}
-			} else {
-				// No supported manifest at this path is "nothing to scan", not an
-				// internal error — exit clean rather than failing a caller that
-				// points at a target with no supported ecosystem.
-				fmt.Fprintf(os.Stderr, "depsnort: %v (nothing to scan)\n", err)
-				return exitClean
-			}
-		} else {
-			projects = []discovered{{Path: path, Adapter: adapter}}
+			fmt.Fprintf(os.Stderr, "depsnort: a recognized manifest at %s could not be resolved by any adapter; reporting as incomplete coverage, not a clean pass\n", path)
+			projects = []discovered{{Path: path, Adapter: gapAdapter{gaps}}}
+		}
+
+		// A default scan is single-project and single-ecosystem. Disclose the
+		// dependency surfaces it leaves unscanned — other ecosystems in the same
+		// directory, and projects in subdirectories -recursive would reach — so a
+		// multi-manifest repo cannot pass green while a project or ecosystem is
+		// silently omitted (OPU-12).
+		notes := discoveryCoverageGaps(path, projects, adapters, false)
+		if len(projects) == 0 && len(notes) == 0 {
+			// No supported manifest here and nothing below — genuinely nothing to
+			// scan, not an internal error. Exit clean.
+			fmt.Fprintf(os.Stderr, "depsnort: %v (nothing to scan)\n", derr)
+			return exitClean
+		}
+		if len(notes) > 0 {
+			projects = append(projects, discovered{Path: path, Adapter: noteAdapter{notes}})
+			fmt.Fprintf(os.Stderr, "depsnort: %d dependency surface(s) present but not scanned (other ecosystems in this directory, and/or subdirectory projects -recursive would reach); disclosed as incomplete coverage — see report\n", len(notes))
 		}
 	}
 

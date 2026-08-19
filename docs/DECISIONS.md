@@ -1996,3 +1996,28 @@ Gradle build, an ecosystem no adapter exists for yet — now degrades coverage
 honestly instead of vanishing. Turning a manifest the tool cannot read into a
 disclosed gap rather than a silent pass is the founding posture of the whole
 project, applied at the one layer where every ecosystem passes through.
+
+## D-60 — OPU-12: multi-manifest under-coverage is disclosed, not silent
+
+A default `scan <repo>` is single-project and single-ecosystem: it offers the
+one path to the adapters once. Two dependency surfaces therefore go unscanned
+with no signal — projects in subdirectories (only `-recursive` reaches them),
+and, in a same-directory polyglot root, every ecosystem but the one the
+precedence order picks (the one-adapter-per-directory invariant, which
+`-recursive` does NOT rescue). A monorepo or polyglot root then scans green on
+one ecosystem while the rest of its dependency surface is invisible AND
+unmentioned — the false-clean class D-59 addressed, one layer earlier.
+
+Neither the default scope nor the one-per-directory invariant is changed; both
+are defensible. What changes is disclosure. `discoveryCoverageGaps` computes, for
+a run, the dependency surfaces it leaves unscanned: same-directory ecosystems
+dropped by the one-per-dir rule (via `Registry.DetectAll`, in both modes), and —
+for a default scan — the claimable subdirectory projects a bounded reuse of the
+`-recursive` walk finds. Any it finds are emitted through the same synthetic-root
+coverage channel D-59 uses, so they degrade coverage, print `NOT an all-clear`,
+and gate under `-fail-on-incomplete`. A `nothing-to-scan` root that nonetheless
+has subdirectory projects now discloses them (and points at `-recursive`) rather
+than exiting silent. A genuine single-project directory with no siblings and no
+subdir projects stays quiet, and `-recursive`'s own discovery/node counts are
+unchanged. The rule holds: depSNORT never exits green while a dependency-bearing
+artifact in scope was silently skipped.
