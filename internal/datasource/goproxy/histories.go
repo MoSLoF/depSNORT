@@ -47,8 +47,13 @@ func (c *Client) Histories(ctx context.Context, names []string) (map[string]*dat
 		}
 		h := &datasource.ReleaseHistory{Package: name, Ecosystem: "gomod"}
 
+		// Each version's .info is fetched concurrently, but a fetch mutates no
+		// shared Client state — every goroutine writes only its own results slot
+		// (the coordfetch pattern). Stats accounting and cache writes are folded
+		// in serially after the wait, so the -race detector sees no shared write.
 		type res struct {
 			version string
+			fr      fetchResult
 			t       time.Time
 			ok      bool
 		}
@@ -61,13 +66,15 @@ func (c *Client) Histories(ctx context.Context, names []string) (map[string]*dat
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				t, ok := c.info(ctx, name, v)
-				results[i] = res{version: v, t: t, ok: ok}
+				fr := c.fetch(ctx, escapeModule(name)+"/@v/"+escapeVersion(v)+".info", "info|"+name+"@"+v)
+				t, ok := parseInfoTime(fr)
+				results[i] = res{version: v, fr: fr, t: t, ok: ok}
 			}(i, v)
 		}
 		wg.Wait()
 
 		for _, r := range results {
+			c.record(r.fr)
 			if r.ok {
 				h.Releases = append(h.Releases, datasource.Release{Version: r.version, Published: r.t})
 			}
@@ -78,17 +85,18 @@ func (c *Client) Histories(ctx context.Context, names []string) (map[string]*dat
 	return out, firstErr
 }
 
-// info fetches a version's publish time from @v/{version}.info.
-func (c *Client) info(ctx context.Context, module, version string) (time.Time, bool) {
-	raw, ok, err := c.get(ctx, escapeModule(module)+"/@v/"+escapeVersion(version)+".info", "info|"+module+"@"+version)
-	if err != nil || !ok {
+// parseInfoTime extracts the publish time from an @v/{version}.info fetch. It is
+// pure — it reads only the fetch's own bytes — so it is safe to call from the
+// concurrent goroutines in Histories.
+func parseInfoTime(fr fetchResult) (time.Time, bool) {
+	if fr.err != nil || !fr.ok {
 		return time.Time{}, false
 	}
 	var doc struct {
 		Version string `json:"Version"`
 		Time    string `json:"Time"`
 	}
-	if json.Unmarshal(raw, &doc) != nil || doc.Time == "" {
+	if json.Unmarshal(fr.raw, &doc) != nil || doc.Time == "" {
 		return time.Time{}, false
 	}
 	t, err := time.Parse(time.RFC3339, doc.Time)

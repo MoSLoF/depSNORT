@@ -70,47 +70,96 @@ func (c *Client) ModFile(ctx context.Context, module, version string) ([]byte, b
 	return c.get(ctx, escapeModule(module)+"/@v/"+escapeVersion(version)+".mod", "mod|"+module+"@"+version)
 }
 
-func (c *Client) get(ctx context.Context, urlPath, cacheKey string) ([]byte, bool, error) {
-	c.Stats.Queried++
-	if raw, fresh, ok := c.Cache.GetRaw("goproxy|" + cacheKey); ok && (fresh || c.Offline) {
-		c.Stats.FromCache++
-		return raw, true, nil
+// outcome tags how a single fetch resolved, so Stats accounting can be applied
+// serially by the caller instead of mutated from inside a fetch (see fetch).
+type outcome int
+
+const (
+	outReqErr    outcome = iota // request could not even be built — no category, Queried only
+	outFromCache                // served from a fresh (or offline) cache entry
+	outFromNet                  // fetched over the network; raw should be cached
+	outNotFound                 // proxy has no record (404/410)
+	outGap                      // lookup failed (offline miss, transport, bad status, read)
+)
+
+// fetchResult carries everything record needs to fold one fetch into Stats and
+// the cache. It is a pure value — fetch mutates no shared Client state, so many
+// fetchResults can be produced concurrently and recorded afterward.
+type fetchResult struct {
+	raw []byte
+	ok  bool
+	out outcome
+	err error
+	key string    // cache key to write on outFromNet
+	now time.Time // fetch time to stamp the cache entry
+}
+
+// fetch performs the cache lookup and, on a miss, one HTTP GET. It reads the
+// on-disk cache and the network but mutates NO shared Client state (neither
+// Stats nor an in-memory cache), so it is safe to call from concurrent
+// goroutines; the caller folds the result into Stats via record under its own
+// serialization (Histories records after wg.Wait; get records inline).
+func (c *Client) fetch(ctx context.Context, urlPath, cacheKey string) fetchResult {
+	fullKey := "goproxy|" + cacheKey
+	if raw, fresh, ok := c.Cache.GetRaw(fullKey); ok && (fresh || c.Offline) {
+		return fetchResult{raw: raw, ok: true, out: outFromCache}
 	}
 	if c.Offline {
-		c.Stats.Gaps++
-		return nil, false, nil
+		return fetchResult{out: outGap}
 	}
 	u := "https://proxy.golang.org/" + urlPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, false, err
+		return fetchResult{out: outReqErr, err: err}
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		c.Stats.Gaps++
-		return nil, false, fmt.Errorf("go-proxy: %s: %w", urlPath, err)
+		return fetchResult{out: outGap, err: fmt.Errorf("go-proxy: %s: %w", urlPath, err)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		c.Stats.NotFound++
-		return nil, false, nil
+		return fetchResult{out: outNotFound}
 	}
 	if resp.StatusCode != http.StatusOK {
-		c.Stats.Gaps++
-		return nil, false, fmt.Errorf("go-proxy: %s: status %d", urlPath, resp.StatusCode)
+		return fetchResult{out: outGap, err: fmt.Errorf("go-proxy: %s: status %d", urlPath, resp.StatusCode)}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
-		c.Stats.Gaps++
-		return nil, false, err
+		return fetchResult{out: outGap, err: err}
 	}
-	c.Stats.FromNet++
 	now := c.Now
 	if now == nil {
 		now = time.Now
 	}
-	_ = c.Cache.PutRaw("goproxy|"+cacheKey, raw, now())
-	return raw, true, nil
+	return fetchResult{raw: raw, ok: true, out: outFromNet, key: fullKey, now: now()}
+}
+
+// record folds one fetch outcome into Stats and, for a network hit, writes the
+// raw document to the cache. It is NOT safe for concurrent use — callers
+// serialize it (get is single-goroutine; Histories records after wg.Wait).
+func (c *Client) record(r fetchResult) {
+	c.Stats.Queried++
+	switch r.out {
+	case outFromCache:
+		c.Stats.FromCache++
+	case outFromNet:
+		c.Stats.FromNet++
+		_ = c.Cache.PutRaw(r.key, r.raw, r.now)
+	case outNotFound:
+		c.Stats.NotFound++
+	case outGap:
+		c.Stats.Gaps++
+	case outReqErr:
+		// request never issued: Queried counted, no category
+	}
+}
+
+// get is the serial convenience wrapper: fetch then record. Concurrent callers
+// (Histories) use fetch/record directly so the recording stays single-threaded.
+func (c *Client) get(ctx context.Context, urlPath, cacheKey string) ([]byte, bool, error) {
+	r := c.fetch(ctx, urlPath, cacheKey)
+	c.record(r)
+	return r.raw, r.ok, r.err
 }
 
 // escapeModule applies the Go module proxy's case-encoding: an uppercase letter
