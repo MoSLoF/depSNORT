@@ -27,11 +27,12 @@ import (
 type pypiFake struct {
 	requires map[string][]string // "name@version" -> requires_dist lines
 	versions map[string][]string // name -> published versions
-	calls    int
 }
 
 func (f *pypiFake) Do(req *http.Request) (*http.Response, error) {
-	f.calls++
+	// A concurrent fetch loop (coordfetch) calls this from several goroutines,
+	// so the fake keeps NO mutable state — an unsynchronized counter here is a
+	// data race the -race build catches.
 	// Path shapes: /pypi/<name>/json  or  /pypi/<name>/<version>/json
 	parts := strings.Split(strings.Trim(req.URL.Path, "/"), "/")
 	body, status := `{"message":"Not Found"}`, 404
