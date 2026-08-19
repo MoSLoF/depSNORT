@@ -407,6 +407,98 @@ func TestPackagesConfigMalformedIsError(t *testing.T) {
 	}
 }
 
+// OPU-17: a Paket paket.lock (previously skipped in total silence) is parsed
+// into NuGet nodes. NUGET-group packages across all groups become canonical-case
+// nuget nodes; GITHUB/GIT sections are skipped; a package listed both as a
+// resolved entry and as another package's dependency is one node.
+func TestPaketLockParses(t *testing.T) {
+	a := New()
+	dir := "testdata/paket"
+	if !a.Detect(dir) {
+		t.Fatal("should Detect a directory containing paket.lock")
+	}
+	if !a.Detect(filepath.Join(dir, "paket.lock")) {
+		t.Fatal("should Detect a paket.lock file directly")
+	}
+	g, err := a.Resolve(dir)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	// root + FSharp.Core + Newtonsoft.Json + System.Net.Http + System.Runtime
+	// + FAKE (from GROUP Build) = 6 nodes. System.Runtime appears as both a
+	// resolved package and a dependency → one node. GITHUB source is skipped.
+	nodes := g.SortedNodes()
+	if len(nodes) != 6 {
+		for _, n := range nodes {
+			t.Logf("  node: %s (name=%s)", n.ID, n.Name)
+		}
+		t.Fatalf("nodes = %d, want 6", len(nodes))
+	}
+	// Canonical case for the case-sensitive OSV coordinate (D-62), lowercase PURL.
+	nj := g.Get("pkg:nuget/newtonsoft.json@12.0.3")
+	if nj == nil || nj.Name != "Newtonsoft.Json" {
+		t.Errorf("Newtonsoft.Json node wrong: %+v", nj)
+	}
+	if snh := g.Get("pkg:nuget/system.net.http@4.3.0"); snh == nil || snh.Name != "System.Net.Http" {
+		t.Errorf("System.Net.Http node wrong: %+v", snh)
+	}
+	// FAKE from GROUP Build must be present.
+	if g.Get("pkg:nuget/fake@5.20.4") == nil {
+		t.Error("FAKE (GROUP Build) missing — grouped NUGET sections must be read")
+	}
+	// A dependency edge from a package to System.Runtime must exist.
+	sr := g.Get("pkg:nuget/system.runtime@4.3.1")
+	if sr == nil {
+		t.Fatal("System.Runtime node missing")
+	}
+	var edgeToSR bool
+	for _, e := range g.SortedEdges() {
+		if e.To == sr.ID && e.From == nj.ID {
+			edgeToSR = true
+		}
+	}
+	if !edgeToSR {
+		t.Error("expected edge Newtonsoft.Json -> System.Runtime")
+	}
+}
+
+// OPU-17: a paket.lock with no NUGET packages (only GITHUB/GIT sources, or
+// empty) degrades honestly — an error the scan turns into incomplete coverage,
+// not a crash or a silent clean pass.
+func TestPaketLockNoNuGetIsError(t *testing.T) {
+	only := "GITHUB\n  remote: fsharp/FAKE\n    src/x.fs (abc)\n"
+	if _, err := parsePaketLock("proj", []byte(only)); err == nil {
+		t.Error("a paket.lock with no NUGET packages must return an error")
+	}
+	if _, err := parsePaketLock("proj", []byte("")); err == nil {
+		t.Error("an empty paket.lock must return an error")
+	}
+}
+
+// packages.lock.json still wins over a paket.lock in the same directory — a
+// resolved MSBuild lock is the standard, checked first.
+func TestPaketLockPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "paket.lock"),
+		[]byte("NUGET\n  remote: https://api.nuget.org/v3/index.json\n    OnlyInPaket (1.0.0)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock := `{"version":1,"dependencies":{"net6.0":{"OnlyInMsbuild":{"type":"Direct","resolved":"2.0.0"}}}}`
+	if err := os.WriteFile(filepath.Join(dir, "packages.lock.json"), []byte(lock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := New().Resolve(dir)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if g.Get("pkg:nuget/onlyinmsbuild@2.0.0") == nil {
+		t.Error("packages.lock.json package missing — it should take precedence")
+	}
+	if g.Get("pkg:nuget/onlyinpaket@1.0.0") != nil {
+		t.Error("paket.lock package present — packages.lock.json should have won")
+	}
+}
+
 // Dedup still folds case: the same package listed in mixed case across TFMs is
 // one node, not two.
 func TestNuGetMixedCaseDedup(t *testing.T) {

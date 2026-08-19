@@ -2154,3 +2154,50 @@ claimed by the adapter and never reaches the gap path.
 
 `.gemspec` `add_dependency` extraction is a reasonable follow-up but out of scope
 here — the minimum closes the common Gemfile-only gap.
+
+## D-65 — OPU-17: Paket is parsed, and an unrecognized lockfile is disclosed
+
+A Paket-managed .NET project (`paket.lock` + `paket.dependencies`) read as a
+SILENT "nothing to scan" — worse than a `packages.config` or `Gemfile`, which at
+least reached the D-59 gap list. Paket was on no map and detected by no adapter,
+so a real dependency surface was invisible with no signal at all. This closes it
+two ways: a specific parser, and a general safety net.
+
+**Parse paket.lock.** Paket packages ARE NuGet packages — same registry, same
+`pkg:nuget/` coordinate, same case-sensitive OSV ecosystem — so `paket.lock` is
+parsed by the nuget adapter into ordinary nuget nodes with real resolved
+versions (enabling OSV CVE detection), rather than a new ecosystem. Only
+`NUGET`-group entries become nodes; `GITHUB`/`GIT`/`HTTP` sections point at
+non-NuGet sources and are skipped. Grouped sections (`GROUP Build` → its own
+`NUGET` block) are read. Names are kept canonical-case for the OSV coordinate
+(the D-62 rule; folded only for id/dedup/edges), a package listed both as a
+resolved entry and another package's dependency is one node, and inter-package
+edges are built from the indented dependency lines. A `paket.lock` with no NUGET
+packages is an error the scan turns into incomplete coverage, never a silent
+clean pass. `packages.lock.json` (the standard MSBuild lock) still takes
+precedence when both are present. `paket.dependencies` (the lock-less manifest)
+is added to the gap.go map (→ nuget) so a Paket project committed without its
+lock is still disclosed.
+
+**Hail-mary catch-all for any unrecognized lockfile.** Beyond Paket, the
+disclosure layer now has a last-ditch tier: a file whose suffix is `.lock` and
+which no name/ext table or adapter recognizes is disclosed as an
+`unknown`-ecosystem gap rather than skipped in silence. This catches the long
+tail depsnort has no specific recognizer for — Elixir `mix.lock`, CocoaPods
+`Podfile.lock`, Dart `pubspec.lock`, Nix `flake.lock` — turning each from a
+false-clean exit 0 into an honest incomplete-coverage note. Two properties keep
+it safe:
+
+- **It never fires on a lock a real adapter reads.** `Cargo.lock`,
+  `composer.lock`, `yarn.lock`, `Gemfile.lock`, `Pipfile.lock`, and `paket.lock`
+  all end in `.lock`; an explicit denylist excludes them so a handled lock is
+  never mislabeled `unknown`. (In the live flow their directories are claimed and
+  never reach the classifier anyway; the denylist keeps the pure function's
+  contract honest for any future caller.)
+- **Over-disclosure is the safe direction.** A catch-all match only degrades
+  coverage — a note gated under the opt-in `-fail-on-incomplete` — never a false
+  block. The failure it closes is the dangerous one: a real dependency surface,
+  in scope, skipped in total silence. This is the founding principle stated
+  generally: a lockfile depsnort cannot read becomes a disclosed gap, not a green
+  checkmark meaning "did not look." The catch-all is deliberately narrow (`.lock`
+  only) and trivially extended (e.g. `.lockfile`) as new formats surface.

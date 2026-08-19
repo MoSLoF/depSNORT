@@ -11,13 +11,20 @@ import (
 
 func TestClassifyGapManifest(t *testing.T) {
 	gaps := map[string]string{
-		"Titanis.csproj": "nuget",
-		"app.fsproj":     "nuget",
-		"pom.xml":        "maven",
-		"build.gradle":   "gradle",
-		"pnpm-lock.yaml": "pnpm",
-		"poetry.lock":    "pypi",
-		"Pipfile":        "pypi",
+		"Titanis.csproj":     "nuget",
+		"app.fsproj":         "nuget",
+		"pom.xml":            "maven",
+		"build.gradle":       "gradle",
+		"pnpm-lock.yaml":     "pnpm",
+		"poetry.lock":        "pypi",
+		"Pipfile":            "pypi",
+		"paket.dependencies": "nuget",
+		// Hail-mary catch-all: unrecognized lockfiles for ecosystems with no
+		// specific recognizer are disclosed as unknown, not skipped in silence.
+		"mix.lock":     "unknown", // Elixir
+		"Podfile.lock": "unknown", // CocoaPods
+		"pubspec.lock": "unknown", // Dart
+		"flake.lock":   "unknown", // Nix
 	}
 	for name, wantEco := range gaps {
 		if eco, ok := classifyGapManifest(name); !ok || eco != wantEco {
@@ -26,7 +33,13 @@ func TestClassifyGapManifest(t *testing.T) {
 	}
 	// Supported manifests must NOT be gap manifests: a dir carrying one is claimed
 	// by a real adapter, and a dep-less one is legitimately empty, not a gap.
-	for _, name := range []string{"package.json", "requirements.txt", "pyproject.toml", "composer.json", "go.mod", "Cargo.lock", "packages.lock.json", "packages.config", "Gemfile", "README.md"} {
+	for _, name := range []string{
+		"package.json", "requirements.txt", "pyproject.toml", "composer.json", "go.mod",
+		"packages.lock.json", "packages.config", "Gemfile", "README.md",
+		// Adapter-handled .lock files must be excluded from the hail-mary catch-all —
+		// their directories are claimed and scanned, not disclosed as unknown gaps.
+		"Cargo.lock", "composer.lock", "yarn.lock", "Gemfile.lock", "Pipfile.lock", "paket.lock",
+	} {
 		if _, ok := classifyGapManifest(name); ok {
 			t.Errorf("classifyGapManifest(%q) should be false (supported or non-manifest)", name)
 		}
@@ -49,6 +62,26 @@ func TestRecognizedGapManifestsInDir(t *testing.T) {
 	writeGapFile(t, filepath.Join(clean, "package.json"), `{"name":"x"}`)
 	if g := recognizedGapManifests(clean); len(g) != 0 {
 		t.Errorf("a supported manifest must not be a gap: %+v", g)
+	}
+}
+
+// OPU-17 hail-mary: a directory whose only dependency artifact is a lockfile for
+// an ecosystem depsnort has no recognizer for (here Elixir's mix.lock) is
+// disclosed as an unknown-ecosystem gap through the discovery loop, not skipped
+// in silence.
+func TestRecognizedGapManifestsCatchAllLock(t *testing.T) {
+	dir := t.TempDir()
+	writeGapFile(t, filepath.Join(dir, "mix.lock"), `%{"jason": {:hex, :jason, "1.4.0"}}`)
+	got := recognizedGapManifests(dir)
+	if len(got) != 1 || got[0].File != "mix.lock" || got[0].Ecosystem != "unknown" {
+		t.Fatalf("recognizedGapManifests = %+v, want one mix.lock (unknown)", got)
+	}
+	// A directory whose lockfile IS handled by a real adapter must not be disclosed
+	// as an unknown gap — the catch-all excludes it.
+	claimed := t.TempDir()
+	writeGapFile(t, filepath.Join(claimed, "Cargo.lock"), "")
+	if g := recognizedGapManifests(claimed); len(g) != 0 {
+		t.Errorf("an adapter-handled lock must not be a catch-all gap: %+v", g)
 	}
 }
 
