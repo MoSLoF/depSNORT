@@ -1542,3 +1542,30 @@ The lesson the log should keep: the feature worked cleanly on lockfile'd trees �
 the case that is easy to test with fixtures — and failed on the manifest-only
 case that a real repository actually presents. Fixtures proved the machinery;
 the trial proved the product.
+
+## D-46 — trial by fire, round two: setup.py, the last manifest gap
+
+A second set of four repositories, run before the PR. Three of the four
+immediately discovered their trees on the round-one fixes — the new pyproject and
+unpinned-requirements handling working on fresh code (57, 37, and 90 presumed
+packages). The fourth, Reticulum, still reported "no supported projects found":
+it declares its dependencies only in setup.py.
+
+setup.py is arbitrary Python and D-04 forbids running it, but the common case is
+static — a literal list, or a list variable referenced by install_requires —
+and Reticulum is exactly that (`requirements = ['cryptography>=3.4.7',
+'pyserial>=3.5']`, then `install_requires=requirements`). The adapter now reads
+those two shapes statically: an inline `install_requires=[...]` literal, and an
+`install_requires=<name>` that points at one or more `<name> = [...]`
+assignments (union across a pure/full conditional). A setup.py that builds its
+list dynamically — reads a file, calls parse_requirements — yields nothing and is
+NOT claimed as a project, because asserting a dependency set the code does not
+statically declare would be worse than missing it. Reticulum went from zero to a
+resolved six-node tree.
+
+That closes the manifest gap the two trials mapped out: requirements.txt (pinned
+and unpinned), Pipfile.lock, pyproject.toml (PEP 621 and Poetry), and now
+setup.py. The pattern across both rounds held — the machinery was sound, and
+every gap was a real-world INPUT SHAPE that fixtures had not exercised. Two
+rounds of real repositories found five such shapes; a fixture suite would have
+found none of them.

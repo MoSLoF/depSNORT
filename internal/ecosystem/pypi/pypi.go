@@ -60,6 +60,7 @@ const (
 	requirementsName = "requirements.txt"
 	pipfileLockName  = "Pipfile.lock"
 	pyprojectName    = "pyproject.toml"
+	setupPyName      = "setup.py"
 )
 
 // inputPath resolves a directory or file to a supported lockfile path and its
@@ -84,6 +85,12 @@ func inputPath(path string) (file, kind string) {
 		if p := filepath.Join(path, pyprojectName); fileExists(p) && pyprojectDeclaresDeps(p) {
 			return p, "pyproject"
 		}
+		// setup.py is the last resort: statically parseable only for the common
+		// literal/variable forms (D-04 forbids running it), gated so a setup.py
+		// whose deps are computed dynamically is not claimed as a project.
+		if p := filepath.Join(path, setupPyName); fileExists(p) && setuppyDeclaresDeps(p) {
+			return p, "setuppy"
+		}
 		return "", ""
 	}
 	switch filepath.Base(path) {
@@ -94,6 +101,10 @@ func inputPath(path string) (file, kind string) {
 	case pyprojectName:
 		if pyprojectDeclaresDeps(path) {
 			return path, "pyproject"
+		}
+	case setupPyName:
+		if setuppyDeclaresDeps(path) {
+			return path, "setuppy"
 		}
 	}
 	return "", ""
@@ -125,6 +136,8 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 		return parsePipfileLock(path, raw)
 	case "pyproject":
 		return parsePyproject(path, raw)
+	case "setuppy":
+		return parseSetupPy(path, raw)
 	default:
 		return parseRequirements(path, raw)
 	}
@@ -137,7 +150,7 @@ func rootNode(g *graph.Graph, path string) *graph.Node {
 	if name == "." || name == "" || name == requirementsName || name == pipfileLockName {
 		name = "python-project"
 	}
-	if strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".lock") || name == pyprojectName {
+	if strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".lock") || name == pyprojectName || name == setupPyName {
 		name = filepath.Base(filepath.Dir(path))
 	}
 	id := purl.NewPyPI(name, "0.0.0").String()
