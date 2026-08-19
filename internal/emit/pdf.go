@@ -461,7 +461,10 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 			// coordinate for an observed one (D-44).
 			ver := r.version
 			switch r.truth {
-			case graph.TruthPresumed, graph.TruthAsserted:
+			case graph.TruthAsserted:
+				ver = "+" + ver
+				anyPresumed = true
+			case graph.TruthPresumed:
 				ver = "~" + ver
 				anyPresumed = true
 			case graph.TruthContested:
@@ -480,10 +483,11 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 		if anyPresumed {
 			d.gap(3)
 			d.wrapped(
-				"A version marked \"~\" was PRESUMED by transitive expansion, not read "+
-					"from a lockfile — the highest (or, for NuGet, lowest) published "+
-					"version satisfying the declared range. A \"?\" marks a CONTESTED "+
-					"version the declared ranges could not agree on. Findings on presumed "+
+				"A version marked \"+\" was ASSERTED by an external resolver (deps.dev) — "+
+					"a real resolution, not this build's lockfile. A \"~\" was PRESUMED "+
+					"by expansion: the highest (or, for NuGet, lowest) published version "+
+					"satisfying the declared range. A \"?\" marks a CONTESTED version the "+
+					"declared ranges could not agree on. Findings on asserted and presumed "+
 					"packages are advisory and never gate: the package is real, but this "+
 					"exact version may not be in your build.",
 				fontRegular, 8.5, colFaint, 8, 11)

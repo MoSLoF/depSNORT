@@ -30,6 +30,7 @@ import (
 	"ihbv.io/depsnort/internal/check"
 	"ihbv.io/depsnort/internal/check/builtin"
 	"ihbv.io/depsnort/internal/datasource"
+	"ihbv.io/depsnort/internal/datasource/depsdev"
 	"ihbv.io/depsnort/internal/datasource/ioc"
 	"ihbv.io/depsnort/internal/datasource/npmreg"
 	"ihbv.io/depsnort/internal/datasource/osv"
@@ -142,6 +143,9 @@ scan flags:
                            versions it presumes are labelled and never gate
   -expand-depth int        stop expansion after N layers (0 = full depth); set 1
                            to step through the tree one layer at a time
+  -depsdev                 consult deps.dev for REAL resolved versions before
+                           presuming (asserted tier); opt-in — reaches an
+                           external service, and asserted versions still never gate
   -no-expand               alias for -expand=false: only what the files state
   -no-install-surface      skip static install-hook extraction (VC-002b..e)
   -recursive               treat the path as a workspace root: discover every
@@ -481,13 +485,23 @@ func reconstructPyPIDepth(g *graph.Graph, client *registry.PyPIDepsClient, roots
 // root's frontier and unread counts into one data-source entry, so a walk that
 // was bounded by the network — rather than by the tree or by the cap — degrades
 // coverage exactly as the reconstruction stage does.
-func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Declarer, depth int) emit.DataSourceCoverage {
+func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Declarer, resolver expand.Resolver, depth int) emit.DataSourceCoverage {
 	cov := emit.DataSourceCoverage{Name: "expand"}
 	walker := expand.NewWalker(sources...)
 	opts := expand.Options{MaxDepth: depth}
 
-	var discovered, presumed, contested, unread int
+	var discovered, presumed, contested, unread, asserted int
 	for _, root := range roots {
+		// Asserted tier first (D-44): where deps.dev has a real resolution, its
+		// concrete versions are merged and the presume walk then treats those
+		// subtrees as closed, so a guess never overwrites a resolver's answer.
+		if resolver != nil {
+			ar, err := walker.AssertRoot(context.Background(), g, root, resolver)
+			if err != nil && cov.Error == "" {
+				cov.Error = err.Error()
+			}
+			asserted += ar.Asserted
+		}
 		res, err := walker.ExpandRoot(context.Background(), g, root, opts)
 		if err != nil && cov.Error == "" {
 			cov.Error = err.Error()
@@ -500,12 +514,12 @@ func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Decl
 	// Queried counts what we set out to learn; Gaps is the honest shortfall —
 	// a coordinate whose metadata never came back is a layer we could not read,
 	// which degrades coverage rather than passing as a complete walk (D-24).
-	cov.Stats.Queried = discovered
 	cov.Stats.Gaps = unread
-	if discovered > 0 {
-		fmt.Fprintf(os.Stderr, "depsnort: expansion discovered %d transitive package(s) past the manifest (%d presumed, %d contested, %d unread)\n",
-			discovered, presumed, contested, unread)
+	if discovered > 0 || asserted > 0 {
+		fmt.Fprintf(os.Stderr, "depsnort: expansion discovered %d transitive package(s) past the manifest (%d asserted, %d presumed, %d contested, %d unread)\n",
+			discovered+asserted, asserted, presumed, contested, unread)
 	}
+	cov.Stats.Queried = discovered + asserted
 	return cov
 }
 
@@ -587,6 +601,7 @@ func cmdScan(args []string) int {
 	expandTree := fs.Bool("expand", true, "discover transitive layers past what the lockfile recorded; presumed versions are labelled and never gate")
 	noExpand := fs.Bool("no-expand", false, "alias for -expand=false")
 	expandDepth := fs.Int("expand-depth", 0, "stop expansion after N layers (0 = full depth); 1 steps one layer at a time")
+	depsDev := fs.Bool("depsdev", false, "consult deps.dev for real resolved versions before presuming (the asserted tier); opt-in, reaches an external service")
 	noInstallSurface := fs.Bool("no-install-surface", false, "skip static install-hook extraction")
 	recursive := fs.Bool("recursive", false, "treat the path as a workspace root: discover and merge every project beneath it")
 	internalScopes := fs.String("internal-scopes", "", "comma-separated internal scopes for dependency-confusion (e.g. @ihbv,@acme)")
@@ -812,7 +827,11 @@ func cmdScan(args []string) int {
 				&rubygems.WalkSource{Deps: gemDeps, Index: gemIdx},
 				&composer.WalkSource{Deps: composerDeps, Index: composerIdx},
 			}
-			expCov := expandTransitive(g, rootNodes, sources, *expandDepth)
+			var resolver expand.Resolver
+			if *depsDev {
+				resolver = depsdev.New(datasource.NewCache(filepath.Join(*regCacheDir, "depsdev"), 24*time.Hour), *offline)
+			}
+			expCov := expandTransitive(g, rootNodes, sources, resolver, *expandDepth)
 			if expCov.Stats.Gaps > 0 {
 				dataSourceGaps = append(dataSourceGaps, expCov.Name)
 			}

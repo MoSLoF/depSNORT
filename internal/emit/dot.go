@@ -86,7 +86,9 @@ func dotLabel(n *graph.Node) string {
 		// tentatively, so the graph never implies a discovered layer is as
 		// certain as an observed one (D-44).
 		switch n.VersionTruth() {
-		case graph.TruthPresumed, graph.TruthAsserted:
+		case graph.TruthAsserted:
+			label += `\n(asserted)`
+		case graph.TruthPresumed:
 			label += `\n(presumed)`
 		case graph.TruthContested:
 			label += `\n(contested)`

@@ -285,11 +285,18 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 	expanded := map[string]bool{}
 	var frontier []*graph.Node
 	for _, n := range g.SortedNodes() {
-		if inSubtree[n.ID] && n.Kind == graph.KindPackage && n.Version != "" && registryQueryable(n) {
-			frontier = append(frontier, n)
-			if n.Attr[graph.AttrVersionTruth] == "" && n.ID != root.ID {
-				setAttr(n, graph.AttrVersionTruth, graph.TruthObserved)
-			}
+		if !inSubtree[n.ID] || n.Kind != graph.KindPackage || n.Version == "" || !registryQueryable(n) {
+			continue
+		}
+		// An asserted node's whole subtree came from a resolver that actually
+		// ran (AssertRoot). It is a closed frontier — presuming beneath it would
+		// re-derive, with a weaker claim, what the resolver already stated.
+		if n.VersionTruth() == graph.TruthAsserted {
+			continue
+		}
+		frontier = append(frontier, n)
+		if n.Attr[graph.AttrVersionTruth] == "" && n.ID != root.ID {
+			setAttr(n, graph.AttrVersionTruth, graph.TruthObserved)
 		}
 	}
 

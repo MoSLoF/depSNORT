@@ -261,9 +261,13 @@ not a version, so the walk presumes one (the highest published version
 satisfying the accumulated constraints) and labels it: every node carries
 `version_truth` ∈ {`observed`, `presumed`, `contested`}. Presumed nodes are
 reported but **never gate** — a block on a version nobody installed is a false
-positive with a build failure attached. `-no-expand` restores the
-manifest-only posture; `-expand-depth=N` steps through the tree one layer at a
-time. Expansion covers all six ecosystems: PyPI (PEP 440), npm (semver ranges),
+positive with a build failure attached. With `-depsdev` (opt-in, reaches an
+external service) the walk first consults deps.dev for a REAL resolved version
+of each dependency — the *asserted* tier, `version_truth = asserted` — and only
+presumes what deps.dev cannot resolve; asserted versions are stronger than a
+guess but still never gate, since they are not this build's lockfile.
+`-no-expand` restores the manifest-only posture; `-expand-depth=N` steps
+through the tree one layer at a time. Expansion covers all six ecosystems: PyPI (PEP 440), npm (semver ranges),
 Cargo (crates.io, where a bare requirement means caret), NuGet (interval
 ranges like `[1.0,2.0)`, a bare version is a minimum, and the resolver picks
 the LOWEST satisfying version), RubyGems (the `~>` pessimistic operator), and

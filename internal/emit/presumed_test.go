@@ -22,8 +22,11 @@ func presumedGraph() (*graph.Graph, verdict.Result) {
 		Attr: map[string]string{graph.AttrVersionTruth: graph.TruthPresumed, graph.AttrVersionCandidates: "3"}})
 	cont := g.AddNode(&graph.Node{ID: "pkg:pypi/split", Kind: graph.KindPackage, Name: "split", Ecosystem: "pypi", Depth: 2,
 		Attr: map[string]string{graph.AttrVersionTruth: graph.TruthContested}})
+	asrt := g.AddNode(&graph.Node{ID: "pkg:pypi/werkzeug@3.0.1", Kind: graph.KindPackage, Name: "werkzeug", Version: "3.0.1", Ecosystem: "pypi", Depth: 2,
+		Attr: map[string]string{graph.AttrVersionTruth: graph.TruthAsserted}})
 	g.AddEdge(root.ID, pres.ID, graph.EdgeDependsOn)
 	g.AddEdge(root.ID, cont.ID, graph.EdgeDependsOn)
+	g.AddEdge(root.ID, asrt.ID, graph.EdgeDependsOn)
 
 	res := verdict.Evaluate(g, []finding.Finding{{
 		CheckID: "VC-006", Axis: finding.AxisKnownCompromise, Severity: finding.SevHigh,
@@ -58,6 +61,9 @@ func TestJSONSurfacesVersionTruth(t *testing.T) {
 	if got["pkg:pypi/split"] != graph.TruthContested {
 		t.Errorf("contested node version_truth = %q, want contested", got["pkg:pypi/split"])
 	}
+	if got["pkg:pypi/werkzeug@3.0.1"] != graph.TruthAsserted {
+		t.Errorf("asserted node version_truth = %q, want asserted", got["pkg:pypi/werkzeug@3.0.1"])
+	}
 	// An observed node OMITS the field, so its absence is meaningful.
 	if got["pkg:pypi/app@1.0.0"] != "" {
 		t.Errorf("observed node should omit version_truth, got %q", got["pkg:pypi/app@1.0.0"])
@@ -91,6 +97,9 @@ func TestDOTStylesPresumedNodes(t *testing.T) {
 	}
 	if !strings.Contains(out, "(contested)") {
 		t.Error("DOT did not label the contested node")
+	}
+	if !strings.Contains(out, "(asserted)") {
+		t.Error("DOT did not distinguish the asserted node from presumed")
 	}
 }
 

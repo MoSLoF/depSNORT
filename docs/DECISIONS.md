@@ -1469,3 +1469,26 @@ it caught one latent gap: the canonical-name half of PyPI's folding was
 untested, and `purl.NewPyPI` normalizing downstream had been masking it — a
 node identity that folded while the match key did not would silently under-dedupe
 exactly the way D-15 warned.
+
+**The asserted tier: deps.dev, opt-in.** Presuming is this tool's guess at what
+an installer would pick; deps.dev is a service that actually ran a resolver, and
+its answer is a concrete version for every dependency of a coordinate. That is
+the `asserted` tier the truth axis reserved from the start (D-01 named deps.dev
+for exactly this). It is a distinct walk operation, not a `presume` hook,
+because deps.dev resolves a WHOLE transitive graph per coordinate rather than a
+single constraint: `expand.AssertRoot` merges that graph, marking every resolved
+dependency `asserted` and attributing it (`asserted_by = deps.dev`), and the
+presume walk then treats an asserted subtree as a closed frontier so a guess
+never overwrites a real resolution. The two tiers compose cleanly — asserted
+where deps.dev has an answer, presumed for the rest (deps.dev has no Composer
+system, so Composer roots always fall through to presume).
+
+Three properties keep it honest. It is OPT-IN (`-depsdev`): reaching a new
+external service is an operator's policy choice, not a default, and the trust
+posture differs from the package registries the tool already consults. The
+observed root is never re-versioned — an asserted version for a lockfile pin
+would demote a fact to a claim. And asserted still NEVER GATES: a resolver's
+answer is A build's fact, not THIS build's, so verdict demotes it exactly as it
+does presumed. The emitters distinguish all four states now — JSON/Cypher carry
+the raw `version_truth`, SARIF tags the finding, DOT labels the node, and the
+PDF marks an asserted version `+`, a presumed one `~`, a contested one `?`.
