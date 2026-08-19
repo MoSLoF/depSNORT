@@ -1963,3 +1963,36 @@ the assessment named — NuGet's bare-`.csproj`-without-lock shape, and any
 recognized-manifest-yielding-zero-deps case surfacing as coverage-incomplete
 rather than silence — remains a separate cross-cutting concern, not folded in
 here.
+
+## D-59 — a recognized-but-unresolvable manifest degrades coverage, not silence
+
+OPU-10 and OPU-11 each removed one silent false-clean — a real dependency-bearing
+project reading as "nothing to scan" at exit 0. They were instances of a class:
+a directory that carries a recognized dependency manifest the pipeline cannot
+resolve. The assessment named a third instance (NuGet: a bare `.csproj` with
+`PackageReference` and no `packages.lock.json`) and the general shape behind all
+three. For a supply-chain scanner the class is the real defect: malicious intent
+is rarely spelled out at the folder's root, so a manifest the tool cannot read is
+exactly the place it must NOT return a green checkmark that means "did not look".
+
+The fix moves to the discovery layer so it closes the whole class, not one more
+ecosystem. A curated set of manifest filenames the adapters do NOT resolve to
+dependencies — `packages.config` and `*.csproj`/`*.fsproj`/`*.vbproj` (NuGet
+without a lock), `pom.xml` (Maven), `build.gradle[.kts]` (Gradle),
+`pnpm-lock.yaml`, `poetry.lock`, `uv.lock`, `Pipfile`, `Gemfile` — is checked
+only when normal detection finds nothing (a directory carrying a SUPPORTED
+manifest is claimed by an adapter and never reaches this path, so a
+legitimately dependency-less supported manifest never trips it). When one is
+present, a synthetic gap "project" emits a single root that discloses the unread
+manifest through the ordinary `AttrUnresolved` coverage channel, so it flows
+through the existing coverage → verdict → exit path untouched: a loud "coverage
+is incomplete … NOT an all-clear" on stderr, exit 3 under `-fail-on-incomplete`,
+and exit 0 (but disclosed) otherwise. A genuinely manifest-less tree (Go, C, a
+docs repo) still reads "nothing to scan" at exit 0, unchanged. The recursive
+sweep discloses gap directories too, bounded by a cap.
+
+The generality is the point: the next unsupported format — a Maven project, a
+Gradle build, an ecosystem no adapter exists for yet — now degrades coverage
+honestly instead of vanishing. Turning a manifest the tool cannot read into a
+disclosed gap rather than a silent pass is the founding posture of the whole
+project, applied at the one layer where every ecosystem passes through.
