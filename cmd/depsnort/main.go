@@ -31,6 +31,7 @@ import (
 	"ihbv.io/depsnort/internal/check/builtin"
 	"ihbv.io/depsnort/internal/datasource"
 	"ihbv.io/depsnort/internal/datasource/depsdev"
+	"ihbv.io/depsnort/internal/datasource/goproxy"
 	"ihbv.io/depsnort/internal/datasource/ioc"
 	"ihbv.io/depsnort/internal/datasource/npmreg"
 	"ihbv.io/depsnort/internal/datasource/osv"
@@ -38,6 +39,7 @@ import (
 	"ihbv.io/depsnort/internal/ecosystem"
 	"ihbv.io/depsnort/internal/ecosystem/cargo"
 	"ihbv.io/depsnort/internal/ecosystem/composer"
+	"ihbv.io/depsnort/internal/ecosystem/gomod"
 	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/ecosystem/npm"
 	"ihbv.io/depsnort/internal/ecosystem/nuget"
@@ -210,6 +212,7 @@ func adapterRegistry(offline bool) *ecosystem.Registry {
 		cargo.New(),
 		composer.New(),
 		nuget.New(),
+		gomod.New(),
 	)
 }
 
@@ -836,6 +839,7 @@ func cmdScan(args []string) int {
 			gemIdx := registry.NewGem(datasource.NewCache(filepath.Join(*regCacheDir, "gem"), 24*time.Hour), *offline)
 			composerDeps := registry.NewComposerDeps(datasource.NewCache(filepath.Join(*regCacheDir, "composer-deps"), 24*time.Hour), *offline)
 			composerIdx := registry.NewComposer(datasource.NewCache(filepath.Join(*regCacheDir, "composer"), 24*time.Hour), *offline)
+			goProxy := goproxy.New(datasource.NewCache(filepath.Join(*regCacheDir, "goproxy"), 24*time.Hour), *offline)
 			sources := []expand.Declarer{
 				&pypi.WalkSource{Deps: depsClient, Index: pypiIdx},
 				&npm.WalkSource{Reg: npmReg},
@@ -843,6 +847,7 @@ func cmdScan(args []string) int {
 				&nuget.WalkSource{Deps: nugetDeps, Index: nugetIdx},
 				&rubygems.WalkSource{Deps: gemDeps, Index: gemIdx},
 				&composer.WalkSource{Deps: composerDeps, Index: composerIdx},
+				&gomod.WalkSource{Proxy: goProxy},
 			}
 			var resolver expand.Resolver
 			if *depsDev {

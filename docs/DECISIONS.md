@@ -1605,3 +1605,37 @@ start; the trials were about contact with how projects are actually committed.
 What remains uncovered is disclosed, not silently wrong: Go and Gradle have no
 adapter and now say "nothing to scan" cleanly, and poetry.lock/uv.lock defer to
 their manifest siblings.
+
+## D-48 — the Go module adapter, and MVS as a lowest-resolver
+
+Go was the one primary ecosystem depSNORT could not read: a go.mod repo reported
+"no supported projects". The adapter now reads go.mod's resolved require set —
+every module, direct and indirect, at the exact version Go's
+minimal-version-selection already pinned — with no execution (D-04: `go` is never
+run). go.mod records no inter-module edges, so it is a FLAT resolution like a
+pinned requirements.txt (D-24), disclosed as such; go.sum is a hash ledger, not
+parsed for structure.
+
+Expansion rebuilds the real tree by reading each module's own go.mod from
+proxy.golang.org (in the egress allowlist, so it works where the other registry
+hosts are blocked). Go slots into the existing walk with no engine change once
+one fact is modeled right: a go.mod `require M vX` is a MINIMUM, and MVS selects,
+per module, the maximum among all required minimums — which is the LOWEST version
+satisfying every ">= vX" at once. So Go expresses each require as ">=version" and
+declares PrefersLowest, the same NuGet-shaped resolution the walk already
+supports. Presuming the newest version instead would model an upgrade Go never
+performs; a live scan confirmed the walk presumes the lowest satisfying version
+and never the newest.
+
+Two properties a real scan verified. The go.mod pins are already the global MVS
+result, so when a dependency requires a module at a lower minimum than the root
+resolved, the walk must LINK to the observed pin, not presume a lower duplicate —
+and on a 145-module project every module appeared exactly once, no
+observed/presumed version split. And Go 1.17 module-graph pruning omits
+deps-of-deps the root does not import, so expansion legitimately discovered 87
+modules past the pruned go.mod, each read from the proxy.
+
+Module identity is the full path including any /vN major suffix; the PURL encodes
+its slashes, and reports render the raw path from the node name. The Go module
+proxy's !-escaping of uppercase letters is a transport detail confined to the
+proxy client.

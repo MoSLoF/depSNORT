@@ -20,6 +20,7 @@ import (
 
 	"ihbv.io/depsnort/internal/ecosystem/cargo"
 	"ihbv.io/depsnort/internal/ecosystem/composer"
+	"ihbv.io/depsnort/internal/ecosystem/gomod"
 	"ihbv.io/depsnort/internal/ecosystem/npm"
 	"ihbv.io/depsnort/internal/ecosystem/nuget"
 	"ihbv.io/depsnort/internal/ecosystem/pypi"
@@ -93,6 +94,14 @@ func cases() []ecoCase {
 			ascending: []string{"1.0.0", "1.0.1", "1.1.0", "2.0.0"},
 		},
 		{
+			eco: "gomod", src: &gomod.WalkSource{},
+			// Go module paths are case-sensitive and carry no scope; nothing folds.
+			foldDiff:   [][2]string{{"github.com/Foo/Bar", "github.com/foo/bar"}},
+			sat:        []satCase{{">=v1.2.0", "v1.5.0", true, true}, {">=v1.2.0", "v1.0.0", false, true}, {">=v1.2.0", "v2.0.0", true, true}},
+			ascending:  []string{"v1.0.0", "v1.0.1", "v1.1.0", "v2.0.0"},
+			lowestWins: true,
+		},
+		{
 			eco: "composer", src: &composer.WalkSource{},
 			foldSame: [][2]string{{"Monolog/Monolog", "monolog/monolog"}},
 			// composer tilde is pessimistic: ~1.2 admits 1.9.0 (npm's would not).
@@ -105,7 +114,7 @@ func cases() []ecoCase {
 // Every ecosystem the CLI expands must appear here. A new WalkSource wired into
 // the scan without a conformance entry is the gap this asserts against.
 func TestEveryExpandedEcosystemIsCovered(t *testing.T) {
-	want := map[string]bool{"pypi": true, "npm": true, "cargo": true, "nuget": true, "gem": true, "composer": true}
+	want := map[string]bool{"pypi": true, "npm": true, "cargo": true, "nuget": true, "gem": true, "composer": true, "gomod": true}
 	for _, c := range cases() {
 		if c.src.Ecosystem() != c.eco {
 			t.Errorf("%s: Ecosystem() = %q, want %q", c.eco, c.src.Ecosystem(), c.eco)

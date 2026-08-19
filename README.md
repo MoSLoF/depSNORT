@@ -267,11 +267,13 @@ of each dependency — the *asserted* tier, `version_truth = asserted` — and o
 presumes what deps.dev cannot resolve; asserted versions are stronger than a
 guess but still never gate, since they are not this build's lockfile.
 `-no-expand` restores the manifest-only posture; `-expand-depth=N` steps
-through the tree one layer at a time. Expansion covers all six ecosystems: PyPI (PEP 440), npm (semver ranges),
+through the tree one layer at a time. Expansion covers all seven ecosystems: PyPI (PEP 440), npm (semver ranges),
 Cargo (crates.io, where a bare requirement means caret), NuGet (interval
 ranges like `[1.0,2.0)`, a bare version is a minimum, and the resolver picks
-the LOWEST satisfying version), RubyGems (the `~>` pessimistic operator), and
-Composer (npm-family semver whose `~` is pessimistic, not npm’s tilde). Each
+the LOWEST satisfying version), RubyGems (the `~>` pessimistic operator), Composer
+(npm-family semver whose `~` is pessimistic, not npm’s tilde), and Go (module
+requires are minimum versions; MVS selects the lowest satisfying, read from
+`go.mod` and the module proxy). Each
 reads only the registry metadata the tool already fetches for the temporal
 axis; a dependency the lockfile records as git-, path-, or url-sourced is
 never walked against a registry, since its name could collide with a real
