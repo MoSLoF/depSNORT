@@ -92,7 +92,7 @@ Seven ecosystems share the same graph, check, verdict, and output model:
 |-----------|-------------|-----------|----------------------|
 | **npm** | `package-lock.json` (v1–v3), `yarn.lock` (v1 + Berry), or `package.json` | `pkg:npm/` | `preinstall`/`postinstall` and related lifecycle scripts |
 | **PyPI** | `requirements*.txt` (incl. dev/test siblings), `Pipfile.lock`, `pyproject.toml`, `setup.py` | `pkg:pypi/` | `setup.py`, PEP 517 build backends, `.pth` files |
-| **RubyGems** | `Gemfile.lock` | `pkg:gem/` | `extconf.rb` / native-extension install paths |
+| **RubyGems** | `Gemfile.lock`, or `Gemfile` | `pkg:gem/` | `extconf.rb` / native-extension install paths |
 | **Cargo** | `Cargo.lock` | `pkg:cargo/` | `build.rs` and compile-time code paths |
 | **Composer** | `composer.lock`, or `composer.json` | `pkg:composer/` | scripts, plugin packages, plugin entrypoints |
 | **NuGet** | `packages.lock.json`, or `packages.config` | `pkg:nuget/` | install/init scripts and package build assets |

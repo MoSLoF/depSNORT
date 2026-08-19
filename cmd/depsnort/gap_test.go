@@ -18,7 +18,6 @@ func TestClassifyGapManifest(t *testing.T) {
 		"pnpm-lock.yaml": "pnpm",
 		"poetry.lock":    "pypi",
 		"Pipfile":        "pypi",
-		"Gemfile":        "rubygems",
 	}
 	for name, wantEco := range gaps {
 		if eco, ok := classifyGapManifest(name); !ok || eco != wantEco {
@@ -27,7 +26,7 @@ func TestClassifyGapManifest(t *testing.T) {
 	}
 	// Supported manifests must NOT be gap manifests: a dir carrying one is claimed
 	// by a real adapter, and a dep-less one is legitimately empty, not a gap.
-	for _, name := range []string{"package.json", "requirements.txt", "pyproject.toml", "composer.json", "go.mod", "Cargo.lock", "packages.lock.json", "packages.config", "README.md"} {
+	for _, name := range []string{"package.json", "requirements.txt", "pyproject.toml", "composer.json", "go.mod", "Cargo.lock", "packages.lock.json", "packages.config", "Gemfile", "README.md"} {
 		if _, ok := classifyGapManifest(name); ok {
 			t.Errorf("classifyGapManifest(%q) should be false (supported or non-manifest)", name)
 		}
