@@ -70,6 +70,22 @@ func (r *Registry) Detect(path string) (Adapter, error) {
 	return nil, fmt.Errorf("no ecosystem adapter matched %q (have: %v)", path, names)
 }
 
+// DetectAll returns EVERY adapter that claims the path, in registry
+// (precedence) order — so the first is the one Detect would pick and the rest
+// are the ecosystems a same-directory scan drops under the one-adapter-per-dir
+// rule. Used to disclose that drop as incomplete coverage (OPU-12) rather than
+// let a polyglot directory scan green on one ecosystem while the others go
+// unmentioned.
+func (r *Registry) DetectAll(path string) []Adapter {
+	var out []Adapter
+	for _, a := range r.adapters {
+		if a.Detect(path) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // Names lists registered adapter names.
 func (r *Registry) Names() []string {
 	out := make([]string, 0, len(r.adapters))

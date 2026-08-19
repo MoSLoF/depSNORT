@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"ihbv.io/depsnort/internal/graph"
@@ -102,5 +103,84 @@ func writeGapFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// OPU-12: a default (non-recursive) scan must disclose projects in
+// subdirectories it did not reach, rather than silently under-covering.
+func TestDiscoveryGapsSubdirProjects(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "svcA"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "svcB"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGapFile(t, filepath.Join(root, "svcA", "requirements.txt"), "flask==2.0.1\n")
+	writeGapFile(t, filepath.Join(root, "svcB", "go.mod"), "module x\ngo 1.21\n")
+
+	reg := adapterRegistry(true)
+	// Root itself is not a project (nothing scanned), so both subdir projects
+	// must be disclosed.
+	notes := discoveryCoverageGaps(root, nil, reg, false)
+	if len(notes) != 2 {
+		t.Fatalf("notes = %v, want 2 subdir-project disclosures", notes)
+	}
+	joined := strings.Join(notes, "|")
+	if !strings.Contains(joined, "additional-project") || !strings.Contains(joined, "-recursive") {
+		t.Errorf("subdir disclosure should name additional projects and recommend -recursive: %v", notes)
+	}
+}
+
+// A same-directory polyglot root drops all-but-one ecosystem; the dropped ones
+// must be disclosed in BOTH default and recursive mode.
+func TestDiscoveryGapsSameDirPolyglot(t *testing.T) {
+	dir := t.TempDir()
+	writeGapFile(t, filepath.Join(dir, "package-lock.json"), `{"name":"x","lockfileVersion":3,"packages":{"":{"name":"x"}}}`)
+	writeGapFile(t, filepath.Join(dir, "requirements.txt"), "flask==2.0.1\n")
+	writeGapFile(t, filepath.Join(dir, "go.mod"), "module x\ngo 1.21\n")
+
+	reg := adapterRegistry(true)
+	adapter, err := reg.Detect(dir)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	scanned := []discovered{{Path: dir, Adapter: adapter}}
+	for _, recursive := range []bool{false, true} {
+		notes := discoveryCoverageGaps(dir, scanned, reg, recursive)
+		var dropped int
+		for _, n := range notes {
+			if strings.Contains(n, "unscanned-ecosystem") {
+				dropped++
+			}
+		}
+		if dropped != 2 {
+			t.Errorf("recursive=%v: dropped-ecosystem disclosures = %d, want 2 (the two non-winning ecosystems)", recursive, dropped)
+		}
+	}
+}
+
+// A genuine single-project directory with no siblings and no subdir projects
+// must produce no disclosure — no false alarm.
+func TestDiscoveryGapsSingleProjectQuiet(t *testing.T) {
+	dir := t.TempDir()
+	writeGapFile(t, filepath.Join(dir, "package-lock.json"), `{"name":"x","lockfileVersion":3,"packages":{"":{"name":"x"}}}`)
+
+	reg := adapterRegistry(true)
+	adapter, _ := reg.Detect(dir)
+	notes := discoveryCoverageGaps(dir, []discovered{{Path: dir, Adapter: adapter}}, reg, false)
+	if len(notes) != 0 {
+		t.Errorf("a lone single-project directory must produce no disclosure, got %v", notes)
+	}
+}
+
+// The note adapter's synthetic root discloses its tokens as incomplete coverage.
+func TestNoteAdapterDisclosesIncomplete(t *testing.T) {
+	g, err := noteAdapter{tokens: []string{"<additional-project: pypi in ./svc>"}}.Resolve("/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.Coverage().Incomplete() {
+		t.Error("a discovery note must degrade coverage")
 	}
 }
