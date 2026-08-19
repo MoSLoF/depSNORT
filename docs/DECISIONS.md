@@ -2201,3 +2201,47 @@ it safe:
   generally: a lockfile depsnort cannot read becomes a disclosed gap, not a green
   checkmark meaning "did not look." The catch-all is deliberately narrow (`.lock`
   only) and trivially extended (e.g. `.lockfile`) as new formats surface.
+
+## D-66 — OPU-18: the gap.go recognition tables are widened, under a dedication rule
+
+The D-59 disclosure layer had a well-built three-tier classifier (exact name →
+ecosystem; dedicated extension → ecosystem; a `.lock` catch-all → "unknown") but
+minimal tables: the extension tier held only the NuGet project files, and a long
+list of dependency-bearing files went SILENT — a directory carrying only a
+`.gemspec`, `.podspec`, `.vcxproj`, `.cabal`, `.nimble`, `build.sbt`,
+`gradle.lockfile`, `bun.lockb`, `.terraform.lock.hcl`, `mix.exs`, or
+`Directory.Packages.props` read as "nothing to scan" at exit 0. This is pure
+disclosure work (D-59): none of it resolves dependencies, and a gap match only
+degrades coverage into a note gated under `-fail-on-incomplete`, never a block.
+
+The tables now cover:
+
+- **Dedicated per-project extensions** (`gapManifestByExt`): `.vcxproj`,
+  `.gemspec`, `.podspec`, `.cabal`, `.nimble`, `.sbt` — joining the existing
+  `.csproj`/`.fsproj`/`.vbproj`. Each is a suffix whose name varies per project
+  but which exists solely to declare dependencies.
+- **Non-`.lock` locks and general-extension manifests** (`gapManifestByName`):
+  `gradle.lockfile`, `bun.lockb`, `.terraform.lock.hcl`, `mix.exs`,
+  `Directory.Packages.props`, `pubspec.yaml`, `Podfile`, `Package.swift`.
+- **Attribution promotions**: `mix.lock`, `Podfile.lock`, `pubspec.lock`,
+  `flake.lock`, `conan.lock`, `deno.lock` already disclosed via the `.lock`
+  catch-all as "unknown"; naming them reports the real tool (elixir, cocoapods,
+  dart, nix, conan, deno). They are gaps, not parsed, so they are deliberately
+  NOT added to `adapterHandledLocks`.
+
+**The guardrail, stated in the code: dedication.** An extension is added to a
+table ONLY if it exists solely to declare dependencies. A general extension used
+for many non-dependency purposes — `.exs` (any Elixir script), `.props` /
+`.targets` (any MSBuild fragment), `.hcl` (mostly Terraform config), `.yaml` /
+`.toml` / `.json` — is NEVER blanket-added; it would manufacture false
+disclosures on unrelated files. Such ecosystems' real manifests go in the
+exact-name table instead (`mix.exs`, `Directory.Packages.props`,
+`.terraform.lock.hcl`), so a bare `Custom.props` or an arbitrary `foo.exs` stays
+silent. This is what lets the net be wide without becoming noisy.
+
+`go.work` was in the proposed set but omitted: it is a workspace aggregator whose
+local `use` modules are each scanned on their own, so disclosing the workspace
+file as an unread gap would be a spurious note on an already-covered repo — the
+same dedication reasoning applied to a name. A dot-prefixed FILE like
+`.terraform.lock.hcl` is reached because the walk's dot-skip is directory-only;
+file-level classification has no hidden-file filter (regression-tested).
