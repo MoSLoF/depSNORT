@@ -34,6 +34,7 @@ type pypiResponse struct {
 
 type pypiFile struct {
 	UploadTime string `json:"upload_time_iso_8601"`
+	Yanked     bool   `json:"yanked"`
 }
 
 func parsePyPIVersions(name string, raw []byte) (*datasource.ReleaseHistory, error) {
@@ -46,9 +47,16 @@ func parsePyPIVersions(name string, raw []byte) (*datasource.ReleaseHistory, err
 		if len(files) == 0 {
 			continue
 		}
-		// Use the earliest upload timestamp among the files for this version.
+		// Use the earliest upload timestamp among the files for this version, and
+		// treat the version as YANKED when EVERY file is yanked (PEP 592 yank-lure
+		// substrate, OPU-26). Yanking is per-file; while any file remains live, pip
+		// can still resolve the version, so it is not effectively withdrawn.
 		var earliest time.Time
+		allYanked := true
 		for _, f := range files {
+			if !f.Yanked {
+				allYanked = false
+			}
 			if f.UploadTime == "" {
 				continue
 			}
@@ -61,7 +69,7 @@ func parsePyPIVersions(name string, raw []byte) (*datasource.ReleaseHistory, err
 			}
 		}
 		if !earliest.IsZero() {
-			h.Releases = append(h.Releases, datasource.Release{Version: version, Published: earliest})
+			h.Releases = append(h.Releases, datasource.Release{Version: version, Published: earliest, Yanked: allYanked})
 		}
 	}
 	h.Sort()

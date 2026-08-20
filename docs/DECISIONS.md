@@ -3061,3 +3061,39 @@ clean, go test -race ./... green (33 packages).
 The OPU-26 composite is now complete: Signal 1 (yank-lure shape), 2 (new build-dep),
 3 (typosquat), 4 (hostile build.rs). The temporal snapshot-diff path remains the one
 optional, unbuilt piece.
+
+## D-84 — OPU-26 (Increment 4): PyPI yank-lure — the shape detection generalizes
+
+VC-012 was cargo-scoped by construction (D-81) because cargo was the only ecosystem
+whose Release.Yanked was populated. PyPI is the strongest cross-ecosystem parallel:
+PEP 592 yank makes a yanked release un-selectable in a fresh pip resolution while
+keeping it installable when EXACTLY pinned — the same "consumer of a yanked version
+is nudged to the newest non-yanked release" mechanism cargo yank has, and PyPI
+declares setup.py install hooks, so the payload half exists too.
+
+Substrate. PyPI's JSON API already carried per-file `yanked` (PEP 592); the release
+parser now reads it and marks a version yanked when EVERY file is yanked — while any
+file stays live, pip can still resolve the version, so it is not effectively
+withdrawn. Confirmed against real PyPI (urllib3 reports 1.25 / 1.25.1 / 2.0.0 / 2.0.1
+fully yanked). No new fetch: the flag rides the metadata already pulled.
+
+Check. VC-012's cargo hardcoding is replaced by yankLureRegistry(ecosystem), an
+explicit allowlist of the registries that supply a per-version yanked flag —
+{cargo, pypi} — returning the installer name and the install-hook file for the
+wording (cargo/build.rs, pip/setup.py). Everywhere else Release.Yanked is always
+false and means "unknown", so the check does not run: an allowlist, not a guess, is
+the honest scope (D-24). The pinned-to-yanked anchor and the lure-shape elevation are
+ecosystem-agnostic and now fire for PyPI with pip/setup.py in the text.
+
+Scope of this increment. Only the SHAPE half generalizes here — a PyPI node gets the
+pinned-to-yanked finding and the lure elevation, never the introduced-build-dep /
+typosquat / hostile-build.rs escalations, which are cargo-specific (the enrichment
+stage runs only for cargo, so those node attributes are simply absent for PyPI). The
+PyPI payload analogue — the live-newest's setup.py hostility, which would reuse the
+existing sdist fetcher and AnalyzeSetupPy rather than the crate machinery — is a
+later increment, deliberately not folded in.
+
+Process: the yanked parse proven against real PyPI JSON and a unit test (all-files
+-yanked is yanked, one-live-file is not); the check by a pypi shape test (fires high
+with pip/setup.py wording) and a repointed scope guard (npm — an ecosystem with no
+yanked flag — stays quiet). gofmt/vet clean, go test -race ./... green (33 packages).

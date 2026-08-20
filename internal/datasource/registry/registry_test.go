@@ -170,6 +170,38 @@ func TestParsePyPIVersions(t *testing.T) {
 	}
 }
 
+// A PyPI version is yanked (PEP 592) only when EVERY file is yanked; while any
+// file remains live, pip can still resolve the version, so it is not withdrawn.
+func TestParsePyPIVersionsYanked(t *testing.T) {
+	raw := `{
+		"releases": {
+			"1.0.0": [{"upload_time_iso_8601":"2019-03-10T12:00:00Z","yanked":true}],
+			"1.1.0": [
+				{"upload_time_iso_8601":"2020-01-01T00:00:00Z","yanked":true},
+				{"upload_time_iso_8601":"2020-01-01T01:00:00Z","yanked":false}
+			],
+			"1.2.0": [{"upload_time_iso_8601":"2021-01-01T00:00:00Z","yanked":false}]
+		}
+	}`
+	h, err := parsePyPIVersions("soup", []byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	yank := map[string]bool{}
+	for _, r := range h.Releases {
+		yank[r.Version] = r.Yanked
+	}
+	if !yank["1.0.0"] {
+		t.Error("1.0.0 (all files yanked) should be yanked")
+	}
+	if yank["1.1.0"] {
+		t.Error("1.1.0 (one live file) must NOT be yanked — pip can still resolve it")
+	}
+	if yank["1.2.0"] {
+		t.Error("1.2.0 (no yanked files) must be live")
+	}
+}
+
 func TestParsePyPIBadJSON(t *testing.T) {
 	_, err := parsePyPIVersions("bad", []byte(`not json`))
 	if err == nil {
