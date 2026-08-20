@@ -17,6 +17,11 @@ type DataSourceCoverage struct {
 	Name  string           `json:"name"`
 	Stats datasource.Stats `json:"stats"`
 	Error string           `json:"error,omitempty"`
+	// Note is a non-error coverage caveat surfaced into the report — e.g. a
+	// transitive closure built on presumed versions because the asserted tier
+	// was not consulted (OPU-12 D-2). It degrades the reader's confidence in the
+	// result without being a failure.
+	Note string `json:"note,omitempty"`
 }
 
 // RuleInfo describes a registered check, so emitters that need a rule catalog
