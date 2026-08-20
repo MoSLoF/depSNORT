@@ -132,6 +132,10 @@ type cargoResponse struct {
 type cargoVersion struct {
 	Num       string `json:"num"`
 	CreatedAt string `json:"created_at"`
+	// Yanked is crates.io's per-version withdrawal flag. crates.io is the only
+	// registry of the six that exposes it in the metadata depsnort fetches; it is
+	// the substrate of the yank-lure signal (VC-012, OPU-26).
+	Yanked bool `json:"yanked"`
 	// PublishedBy is crates.io's per-version publisher. It is the second of
 	// the six ecosystems to expose one (npm is the other), and the only reason
 	// the actor axis can be evaluated for Rust at all (D-40).
@@ -155,7 +159,7 @@ func parseCargoVersions(name string, raw []byte) (*datasource.ReleaseHistory, er
 		if err != nil {
 			continue
 		}
-		h.Releases = append(h.Releases, datasource.Release{Version: v.Num, Published: t})
+		h.Releases = append(h.Releases, datasource.Release{Version: v.Num, Published: t, Yanked: v.Yanked})
 		// published_by is null for releases predating crates.io recording it,
 		// and for versions published by a token whose owner was since deleted.
 		// Absent stays absent: an unknown publisher must never be filled in.
