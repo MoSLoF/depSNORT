@@ -2915,3 +2915,49 @@ pattern (the frozen table is that proof), and VC-002g by check-level tests
 (persistence fires; a benign install write does not) whose exclusion was verified
 by mutation. The eleven-pattern coverage map is frozen so it cannot silently
 regress (acceptance §5).
+
+## D-81 — OPU-26 (Increment 1): VC-012 yank-lure — pinned-to-yanked anchor + lure shape
+
+The 2026-08-20 crates.io compromise (arrayref / proc-macro1) used a yank-lure: an
+attacker with a taken-over maintainer account yanks the good releases and publishes
+a malicious one as the newest LIVE version, so cargo's "use a version that is not
+yanked" nudge funnels every consumer of a yanked version straight onto the payload.
+depsnort had no substrate for it — `Release` carried no yank status, and nothing
+consumed one.
+
+Substrate. crates.io is the only one of the six registries that exposes a
+per-version `yanked` flag in the metadata depsnort already fetches
+(`/api/v1/crates/<crate>/versions`). So `Release` gains a `Yanked bool`, and the
+cargo versions parser fills it — no new fetch, no new source. For every other
+registry the flag stays false and means UNKNOWN, not "live", so the consumer scopes
+itself to cargo (reading an always-false flag elsewhere would be a silent miss
+dressed as clean, D-24).
+
+The check (VC-012), scoped to what maps cleanly onto existing substrate this
+increment. Two halves:
+  - Anchor (concrete, low-FP): a resolved dependency pinned to a version the
+    registry has yanked. A fresh resolution would refuse it; a lockfile carries it
+    forward silently. Medium / advisory on its own — a hygiene note.
+  - Elevation (the attack shape): when that crate's highest SEMVER version is LIVE
+    and sits atop a contiguous run of >=2 yanked versions, the pinned-yanked
+    consumer is standing exactly where the lure funnels an upgrade. High /
+    gate-eligible, and the finding names the live-newest as the version to audit
+    before upgrading rather than accepting cargo's nudge. Ordering is by semver, not
+    publish time, because cargo resolves the nudge by version (0.3.10 > 0.3.9, not a
+    lexical sort).
+
+Scope of THIS increment, stated honestly. The introduced-dependency corroborators
+the attack also leaves — a new build-kind dependency vs the last-good release, a
+typosquat neighbour (proc-macro1 vs proc-macro2), a hostile build.rs — all live in
+the live-newest version, which is NOT in the resolved graph (that is the whole point
+of a lure: it targets the version you have not upgraded to yet). Reaching them needs
+per-version dependency + build.rs enrichment of the live-newest, a later increment.
+So VC-012 anchors on the concrete pinned-to-yanked fact and adds the lure shape as
+context, rather than pretending to run the full composite over data it does not
+have. The resolved-graph payload case (already on the malicious version) is
+unchanged: a hostile build.rs there is VC-002's job.
+
+Process: the yank field was proven against the real crates.io API (libc carries 9
+genuinely-yanked versions in the same `/versions` response), and the check against
+the arrayref shape plus negatives (single legit yank stays advisory, live pins stay
+quiet, non-cargo ecosystems are ignored, semver ordering is not lexical).

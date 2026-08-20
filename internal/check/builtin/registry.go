@@ -34,5 +34,6 @@ func Default() *check.Registry {
 		UnverifiableSource{},  // VC-009
 		CapabilityDrift{},     // VC-010
 		PublisherLineage{},    // VC-011
+		YankLure{},            // VC-012
 	)
 }

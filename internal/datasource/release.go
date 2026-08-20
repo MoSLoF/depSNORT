@@ -10,6 +10,12 @@ import (
 type Release struct {
 	Version   string    `json:"version"`
 	Published time.Time `json:"published"`
+	// Yanked reports whether the registry has withdrawn this version ("do not
+	// use this release"). Only crates.io currently exposes it per version through
+	// the metadata depsnort already fetches; for every other registry it stays
+	// false and must be read as UNKNOWN, not as "live" — so a consumer keying on
+	// it (VC-012) scopes itself to the ecosystem that actually supplies it.
+	Yanked bool `json:"yanked,omitempty"`
 }
 
 // Publisher is the identity that published one specific version.

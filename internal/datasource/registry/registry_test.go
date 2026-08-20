@@ -29,11 +29,13 @@ func TestParseGemVersions(t *testing.T) {
 }
 
 func TestParseCargoVersions(t *testing.T) {
+	// Shape mirrors the real crates.io /api/v1/crates/<crate>/versions response,
+	// including the per-version `yanked` flag depsnort now parses (OPU-26).
 	raw := `{
 		"versions": [
-			{"num":"0.1.0","created_at":"2019-05-01T00:00:00+00:00"},
-			{"num":"0.2.0","created_at":"2019-11-15T00:00:00+00:00"},
-			{"num":"1.0.0","created_at":"2020-08-20T00:00:00+00:00"}
+			{"num":"0.1.0","created_at":"2019-05-01T00:00:00+00:00","yanked":false},
+			{"num":"0.2.0","created_at":"2019-11-15T00:00:00+00:00","yanked":true},
+			{"num":"1.0.0","created_at":"2020-08-20T00:00:00+00:00","yanked":false}
 		]
 	}`
 	h, err := parseCargoVersions("serde", []byte(raw))
@@ -48,6 +50,17 @@ func TestParseCargoVersions(t *testing.T) {
 	}
 	if h.Releases[0].Version != "0.1.0" {
 		t.Errorf("first = %q, want 0.1.0", h.Releases[0].Version)
+	}
+	// The yanked flag must survive parsing — it is the substrate of VC-012.
+	yank := map[string]bool{}
+	for _, r := range h.Releases {
+		yank[r.Version] = r.Yanked
+	}
+	if !yank["0.2.0"] {
+		t.Error("0.2.0 should be parsed as yanked")
+	}
+	if yank["0.1.0"] || yank["1.0.0"] {
+		t.Error("0.1.0 and 1.0.0 should be live (not yanked)")
 	}
 }
 
