@@ -1,0 +1,82 @@
+# depSNORT Go pruning acceptance oracle -- opensnitch/daemon
+#
+# Source:   github.com/evilsocket/opensnitch  (daemon/go.mod, go 1.25.0)
+# Oracle:   `go list -m all` in daemon/  (Go's own resolver == ground truth)
+# Captured: 2026-08-20T17:21Z
+#
+# Why this repo: its 64-module build list spans 14 distinct `go` directive levels
+#   (no-directive, 1.9, 1.11, 1.12, 1.13, 1.15, 1.17, 1.18, 1.20, 1.21, 1.22, 1.23,
+#   1.24, 1.25), so 34/64 modules exercise the go<=1.16 UNPRUNED-subtree branch and
+#   30 exercise the go 1.17+ pruned branch -- both pruning modes in one fixture (OPU-15).
+#
+# Acceptance (validated 2026-08-20): a default `depsnort scan` of opensnitch must CONTAIN
+#   every module@version below (build-list coverage 64/64). Spot anchors:
+#     cloud.google.com/go  v0.26.0   (NOT the unpruned max v0.112.1 -- pruning must engage)
+#     golang.org/x/net     v0.48.0   (root-pinned build version present)
+#
+# Regenerate: cd daemon && GOFLAGS=-mod=mod go list -m all | tail -n +2 | sort
+# ---
+cloud.google.com/go v0.26.0
+github.com/BurntSushi/toml v1.6.0
+github.com/census-instrumentation/opencensus-proto v0.2.1
+github.com/cilium/ebpf v0.22.0
+github.com/client9/misspell v0.3.4
+github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f
+github.com/containerd/stargz-snapshotter/estargz v0.16.3
+github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
+github.com/docker/cli v29.2.0+incompatible
+github.com/docker/distribution v2.8.3+incompatible
+github.com/docker/docker-credential-helpers v0.9.3
+github.com/envoyproxy/go-control-plane v0.9.4
+github.com/envoyproxy/protoc-gen-validate v0.1.0
+github.com/fsnotify/fsnotify v1.4.7
+github.com/go-quicktest/qt v1.101.1-0.20240301121107-c6c8733fa1e6
+github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
+github.com/golang/mock v1.1.1
+github.com/golang/protobuf v1.5.0
+github.com/google/go-cmp v0.7.0
+github.com/google/go-containerregistry v0.20.6
+github.com/google/gopacket v1.1.19
+github.com/google/nftables v0.2.0
+github.com/google/uuid v1.3.0
+github.com/inconshreveable/mousetrap v1.1.0
+github.com/josharian/native v1.1.0
+github.com/jsimonetti/rtnetlink/v2 v2.0.1
+github.com/klauspost/compress v1.18.0
+github.com/kr/pretty v0.3.1
+github.com/kr/text v0.2.0
+github.com/mdlayher/netlink v1.7.2
+github.com/mdlayher/socket v0.5.1
+github.com/mitchellh/go-homedir v1.1.0
+github.com/opencontainers/go-digest v1.0.0
+github.com/opencontainers/image-spec v1.1.1
+github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
+github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4
+github.com/rogpeppe/go-internal v1.14.1
+github.com/sirupsen/logrus v1.9.4
+github.com/spf13/cobra v1.10.2
+github.com/spf13/pflag v1.0.10
+github.com/stretchr/testify v1.11.1
+github.com/varlink/go v0.4.0
+github.com/vbatts/tar-split v0.12.1
+github.com/vishvananda/netlink v1.3.0
+github.com/vishvananda/netns v0.0.4
+golang.org/x/crypto v0.46.0
+golang.org/x/exp v0.0.0-20190121172915-509febef88a4
+golang.org/x/exp/typeparams v0.0.0-20260209203927-2842357ff358
+golang.org/x/lint v0.0.0-20200302205851-738671d3881b
+golang.org/x/mod v0.31.0
+golang.org/x/net v0.48.0
+golang.org/x/oauth2 v0.0.0-20180821212333-d2e6202438be
+golang.org/x/sync v0.20.0
+golang.org/x/sys v0.43.0
+golang.org/x/term v0.38.0
+golang.org/x/text v0.32.0
+golang.org/x/tools v0.40.1-0.20260108161641-ca281cf95054
+golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543
+google.golang.org/appengine v1.4.0
+google.golang.org/genproto v0.0.0-20190819201941-24fa4b261c55
+google.golang.org/grpc v1.32.0
+google.golang.org/protobuf v1.26.0
+gotest.tools/v3 v3.5.0
+honnef.co/go/tools v0.7.0
