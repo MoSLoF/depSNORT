@@ -197,3 +197,67 @@ dependencies = [
 		t.Errorf("declared deps = %d, want 3 (rich, typer, somepkg)", n)
 	}
 }
+
+// TestParsePyprojectExtras locks in OPU-12 D-1: [project.optional-dependencies]
+// is parsed into the union of every extra's deps; a self-referential meta-extra
+// (soup-cli[all], soup-cli[train,mlx]) expands to local extras WITHOUT emitting
+// the project's own name as an external dependency; and a cross-extra pin split
+// (transformers <5 in train, >=5 in mlx) collapses to one deduped node — never
+// two conflicting constraints that would be mis-reported as contested.
+func TestParsePyprojectExtras(t *testing.T) {
+	raw := []byte(`[project]
+name = "soup-cli"
+dependencies = [
+    "rich>=13.0.0",
+    "typer<0.21.0",
+]
+
+[project.optional-dependencies]
+train = [
+    "torch>=2.0",
+    "transformers<5.0.0",  # train wants the pre-5 line
+    "trl<0.29",
+]
+mlx = [
+    "mlx-lm",
+    "transformers>=5.0.0",  # mlx wants 5+ — a mutually exclusive profile
+]
+dev = [
+    "soup-cli[all]",  # self-referential meta-extra
+    "pytest>=7",
+    "ruff",
+]
+all = [
+    "soup-cli[train,mlx]",
+]
+`)
+	g, err := parsePyproject("/repo/soup/pyproject.toml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := g.Get(g.Roots[0])
+	got := map[string]string{}
+	for _, d := range root.DeclaredDepsOf() {
+		got[d.Name] = d.Constraint
+	}
+
+	// The project's OWN name must never be emitted (dependency-confusion FP).
+	if _, ok := got["soup-cli"]; ok {
+		t.Error("self-reference leaked the project's own name as a dependency")
+	}
+	// Union of core + every extra's deps, deduped by name.
+	want := []string{"rich", "typer", "torch", "transformers", "trl", "mlx-lm", "pytest", "ruff"}
+	for _, name := range want {
+		if _, ok := got[name]; !ok {
+			t.Errorf("declared dep %q missing (extras not unioned?)", name)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("declared deps = %d %v, want %d", len(got), got, len(want))
+	}
+	// Cross-extra pin split: transformers is ONE node with ONE constraint (the
+	// sorted-first extra, mlx), not two conflicting constraints → no contested.
+	if got["transformers"] != ">=5.0.0" {
+		t.Errorf("transformers constraint = %q, want >=5.0.0 (deterministic sorted-first extra)", got["transformers"])
+	}
+}
