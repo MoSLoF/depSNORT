@@ -267,3 +267,52 @@ func TestResolverMVSReadsSupersededVersions(t *testing.T) {
 		t.Errorf("build list = %v (%d), want %d modules", got, len(got), len(want))
 	}
 }
+
+// TestResolverUnprunedSubtreeKeeps117Modules isolates the pruning sub-rule the
+// other pruning tests miss: once the walk is inside a go<=1.16 dependency's
+// UNPRUNED subtree, a go 1.17+ module reached there stays unpruned too — its own
+// requirements are kept, not re-pruned for being go 1.17+. TestResolverPrunedGraph
+// only places pre-1.17 modules inside the unpruned subtree, so a resolver that
+// re-pruned at a 1.17+ node inside an unpruned context would still pass it. This
+// test fails loudly on that regression (the `it.unpruned` term in `expand`).
+//
+//	R (1.20) ─> old v1.0.0 (1.15) ─> modern v1.0.0 (1.19) ─> leaf v1.0.0 (1.19) ─> leafdep v1.0.0
+//	             (UNPRUNED: old's whole subtree is kept — the two go 1.19 modules
+//	              inside it must ALSO keep expanding, or leafdep is lost)
+//
+// leafdep is reachable ONLY through the go 1.19 modules inside old's unpruned
+// subtree. Correct pruning keeps it; a resolver that re-prunes at a 1.17+ node
+// inside an unpruned subtree stops before leafdep.
+func TestResolverUnprunedSubtreeKeeps117Modules(t *testing.T) {
+	proxy := fakeProxy{
+		"R@v1.0.0":       "module R\ngo 1.20\nrequire old v1.0.0\n",
+		"old@v1.0.0":     "module old\ngo 1.15\nrequire modern v1.0.0\n",
+		"modern@v1.0.0":  "module modern\ngo 1.19\nrequire leaf v1.0.0\n",
+		"leaf@v1.0.0":    "module leaf\ngo 1.19\nrequire leafdep v1.0.0\n",
+		"leafdep@v1.0.0": "module leafdep\ngo 1.19\n",
+	}
+	rg, ok, err := NewResolver(proxy).Resolve(context.Background(), "gomod", "R", "v1.0.0")
+	if err != nil || !ok {
+		t.Fatalf("Resolve ok=%v err=%v", ok, err)
+	}
+	got := map[string]bool{}
+	for _, n := range rg.Nodes {
+		got[n.Name] = true
+	}
+	// leafdep is the tell: it is reachable only via leaf, which is reached via the
+	// go 1.19 module `modern` inside `old`'s go 1.15 unpruned subtree. It survives
+	// only if the unpruned flag propagates THROUGH the 1.17+ nodes so they keep
+	// expanding. (leaf alone is insufficient: modern records it before the expand
+	// check even when broken — the regression only shows one level deeper.)
+	if !got["leafdep"] {
+		t.Error("leafdep missing: resolver stopped expanding at a go 1.17+ module (modern/leaf) inside a go<=1.16 unpruned subtree — the unpruned flag did not propagate through 1.17+ nodes")
+	}
+	for _, m := range []string{"R", "old", "modern", "leaf", "leafdep"} {
+		if !got[m] {
+			t.Errorf("build list missing %s: %v", m, got)
+		}
+	}
+	if len(got) != 5 {
+		t.Errorf("build list = %v (%d modules), want 5 (R, old, modern, leaf, leafdep)", got, len(got))
+	}
+}

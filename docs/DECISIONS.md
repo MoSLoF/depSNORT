@@ -2627,3 +2627,60 @@ ship until the oracle agreed — three real repos (a heavy go 1.25 divergence ca
 a heavy go 1.26 case, and a pre-1.17 no-regression case), each matched
 module-for-module and version-for-version against `go list -m all`, plus a
 synthetic unit case that separates correct pruning from both disproven shortcuts.
+
+Scope of "exact" (see D-76): this proof is at the RESOLVER — `selectPruned`
+seeded with a main module's own go.mod produces exactly Go's build list. A
+`depsnort scan` of a local main module does not seed the resolver with the local
+root (it is not proxy-queryable, per OPU-06); it resolves each of the root's
+direct dependencies independently and takes the union, so the end-to-end scan is
+a pruned-per-dependency SUPERSET of the build list, not the exact build list.
+D-76 records the end-to-end acceptance and the residual over-approximation.
+
+## D-76 — OPU-15 follow-up: pruning acceptance re-validated end-to-end; the scan is a pruned superset
+
+Two field artifacts landed after D-75 merged: a regression test isolating a
+pruning sub-rule, and a `go list -m all` acceptance oracle for opensnitch/daemon.
+Acting on both surfaced an honest refinement of D-75's "exact" claim.
+
+Sub-rule test (locked in). `selectPruned` carries an `unpruned` flag that a
+`go <= 1.16` dependency sets and that must PROPAGATE through the `go 1.17+`
+modules inside that dependency's subtree — otherwise a module reachable only via
+those `go 1.17+` nodes is dropped. D-75's `TestResolverPrunedGraph` placed only
+pre-1.17 modules inside the unpruned subtree, so a resolver that wrongly re-pruned
+at a `go 1.17+` node inside an unpruned context would still pass it.
+`TestResolverUnprunedSubtreeKeeps117Modules` closes that gap: R(1.20) → old(1.15)
+→ modern(1.19) → leaf(1.19) → leafdep, where `leafdep` survives only if the flag
+propagates through the two go 1.19 nodes. The merged resolver already passes it
+(the `it.unpruned || selfUnpruned` term is correct); a mutation dropping
+`it.unpruned` from the expand guard fails the new test while leaving
+`TestResolverPrunedGraph` green — proof the test discriminates the exact
+regression it names.
+
+Acceptance oracle (committed). `testdata/opensnitch_daemon_golistmall.oracle` is
+Go's own 64-module build list for opensnitch/daemon (go 1.25.0), spanning 14
+distinct `go` directive levels, captured with `cd daemon && GOFLAGS=-mod=mod go
+list -m all`. A default `depsnort scan` of that go.mod, re-run against the merged
+code, CONTAINS all 64 modules at their exact versions (coverage 64/64), with the
+discriminating anchor holding: cloud.google.com/go resolves to v0.26.0, NOT the
+unpruned max v0.112.1 — pruning demonstrably engages.
+
+Honest residual: that same scan produces ~170 gomod nodes, not 64. The extra
+~106 are the union artifact D-75's "Scope of exact" note predicts — shared
+modules at superseded versions (x/sys at 11, x/net at 8) and ~45 modules the real
+build prunes away (e.g. github.com/docker/docker, pulled in because a direct
+dependency is resolved as if it were the main module and its own pruned frontier
+is kept). The build list is a subset of the scan (64 ⊆ 170): coverage is
+guaranteed (no real module missed — the conservative direction for a scanner),
+but surface is inflated, so a gomod finding can still land on a version the
+project never ships. The over-approximation is far smaller than pre-pruning (170
+vs 384) and the anchors prove pruning works where it most distorts, which is why
+the field acceptance is framed as containment + anchors, not exact equality.
+
+Exact end-to-end is future work (its own oracle-proven cycle): seed the resolver
+with the LOCAL main-module go.mod as the root require set (the `go` directive and
+direct+indirect requires depsnort already parses) and resolve the main module's
+build list as a whole, instead of unioning per-direct-dependency resolutions.
+That collapses 170 → 64 and removes the false-surface modules. It touches the
+OPU-06 boundary (the local root is deliberately not proxy-resolved), so it is
+held for a dedicated change rather than folded in here. Until then the residual
+stands recorded, not silently presented as the build.
