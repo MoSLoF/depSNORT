@@ -9,10 +9,14 @@
 #   1.24, 1.25), so 34/64 modules exercise the go<=1.16 UNPRUNED-subtree branch and
 #   30 exercise the go 1.17+ pruned branch -- both pruning modes in one fixture (OPU-15).
 #
-# Acceptance (validated 2026-08-20): a default `depsnort scan` of opensnitch must CONTAIN
-#   every module@version below (build-list coverage 64/64). Spot anchors:
-#     cloud.google.com/go  v0.26.0   (NOT the unpruned max v0.112.1 -- pruning must engage)
-#     golang.org/x/net     v0.48.0   (root-pinned build version present)
+# Acceptance:
+#   - Containment (validated 2026-08-20, D-76): a default `depsnort scan` CONTAINS
+#     every module@version below (build-list coverage 64/64). Spot anchors:
+#       cloud.google.com/go  v0.26.0  (NOT the unpruned max v0.112.1 -- pruning must engage)
+#       golang.org/x/net     v0.48.0  (root-pinned build version present)
+#   - Exact (validated 2026-08-20, D-77): with local-main-module whole-build-list
+#     resolution, the scan's gomod nodes EQUAL this set exactly -- 64 nodes, one
+#     version per module, no per-dependency union inflation (was 170 before D-77).
 #
 # Regenerate: cd daemon && GOFLAGS=-mod=mod go list -m all | tail -n +2 | sort
 # ---

@@ -3,6 +3,8 @@ package gomod
 import (
 	"context"
 	"testing"
+
+	"ihbv.io/depsnort/internal/expand"
 )
 
 // fakeProxy serves canned go.mod text per module@version, with no network.
@@ -314,5 +316,122 @@ func TestResolverUnprunedSubtreeKeeps117Modules(t *testing.T) {
 	}
 	if len(got) != 5 {
 		t.Errorf("build list = %v (%d modules), want 5 (R, old, modern, leaf, leafdep)", got, len(got))
+	}
+}
+
+// localReqs is a tiny helper: the require set a manifest parses for a local main
+// module, in the shape ResolveLocalRoot consumes.
+func localReqs(pairs ...[2]string) []expand.ResolvedRef {
+	out := make([]expand.ResolvedRef, 0, len(pairs))
+	for _, p := range pairs {
+		out = append(out, expand.ResolvedRef{Ecosystem: "gomod", Name: p[0], Version: p[1]})
+	}
+	return out
+}
+
+// TestResolveLocalRootCollapsesToOneVersion is the heart of OPU-15-exact: a LOCAL
+// main module resolves to Go's build list — ONE version per module — from its own
+// require set, WITHOUT a proxy coordinate for the root. The failure mode it guards
+// is the per-dependency union: two direct deps that require different versions of
+// a shared module. Resolving each dep independently and merging keeps BOTH
+// versions (the 170-vs-64 opensnitch inflation); resolving the whole root runs one
+// MVS and collapses to the max.
+//
+//	M ─┬─> A v1.0.0 ─> X v2.0.0
+//	   └─> B v1.0.0 ─> X v1.0.0
+//
+// Whole-root build list: M, A, B, X v2.0.0 (max) — X appears exactly once.
+func TestResolveLocalRootCollapsesToOneVersion(t *testing.T) {
+	proxy := fakeProxy{
+		"A@v1.0.0": "module A\ngo 1.16\nrequire X v2.0.0\n",
+		"B@v1.0.0": "module B\ngo 1.16\nrequire X v1.0.0\n",
+		"X@v2.0.0": "module X\ngo 1.16\n",
+		"X@v1.0.0": "module X\ngo 1.16\n",
+	}
+	root := expand.LocalRoot{
+		Ecosystem: "gomod", Name: "M", Version: "0.0.0",
+		Requires: localReqs([2]string{"A", "v1.0.0"}, [2]string{"B", "v1.0.0"}),
+		Attr:     map[string]string{}, // no `go` directive → pre-1.17 classic MVS
+	}
+	rg, ok, err := NewResolver(proxy).ResolveLocalRoot(context.Background(), root)
+	if err != nil || !ok {
+		t.Fatalf("ResolveLocalRoot ok=%v err=%v", ok, err)
+	}
+	if rg.Nodes[0].Name != "M" {
+		t.Errorf("Nodes[0] = %q, want the seeded root M", rg.Nodes[0].Name)
+	}
+	got := map[string]string{}
+	xCount := 0
+	for _, n := range rg.Nodes {
+		got[n.Name] = n.Version
+		if n.Name == "X" {
+			xCount++
+		}
+	}
+	if xCount != 1 {
+		t.Errorf("X appears %d times, want exactly 1 (whole-root MVS collapses; the union would keep both versions)", xCount)
+	}
+	if got["X"] != "v2.0.0" {
+		t.Errorf("X selected %q, want v2.0.0 (MVS max over the whole root)", got["X"])
+	}
+	want := map[string]string{"M": "0.0.0", "A": "v1.0.0", "B": "v1.0.0", "X": "v2.0.0"}
+	if len(got) != len(want) {
+		t.Errorf("build list = %v (%d), want %d (M, A, B, X)", got, len(got), len(want))
+	}
+}
+
+// TestResolveLocalRootPrunes proves the go 1.17+ pruning applies through the
+// LOCAL-root entry too: a main declaring go 1.17+ prunes a purely go 1.17+ chain
+// at its direct dependency's direct requirement, exactly as the queried-coordinate
+// path does (TestResolverPrunedFrontierNotWalked), but seeded from the parsed
+// require set rather than a fetched root go.mod.
+//
+//	M (go 1.20) ─> A v1.0.0 (go 1.17) ─> B v1.0.0 (go 1.17) ─> C v1.0.0
+//
+// A is a go 1.17+ frontier: B is kept, C is pruned. Expected: M, A, B. Not C.
+func TestResolveLocalRootPrunes(t *testing.T) {
+	proxy := fakeProxy{
+		"A@v1.0.0": "module A\ngo 1.17\nrequire B v1.0.0\n",
+		"B@v1.0.0": "module B\ngo 1.17\nrequire C v1.0.0\n",
+		"C@v1.0.0": "module C\ngo 1.17\n",
+	}
+	root := expand.LocalRoot{
+		Ecosystem: "gomod", Name: "M", Version: "0.0.0",
+		Requires: localReqs([2]string{"A", "v1.0.0"}),
+		Attr:     map[string]string{AttrGoDirective: "1.20"}, // go 1.17+ → pruned
+	}
+	rg, ok, err := NewResolver(proxy).ResolveLocalRoot(context.Background(), root)
+	if err != nil || !ok {
+		t.Fatalf("ResolveLocalRoot ok=%v err=%v", ok, err)
+	}
+	got := map[string]bool{}
+	for _, n := range rg.Nodes {
+		got[n.Name] = true
+	}
+	if !got["A"] || !got["B"] {
+		t.Errorf("build list missing A/B frontier: %v", got)
+	}
+	if got["C"] {
+		t.Error("C is present: a go 1.17+ frontier's requirement's requirement must be pruned via the local-root path too")
+	}
+	if len(got) != 3 {
+		t.Errorf("build list = %v, want 3 (M, A, B)", got)
+	}
+}
+
+// TestResolveLocalRootDeclinesNonGomod: the whole-root path is gomod-only; any
+// other ecosystem (or an empty require set) returns ok=false so the walker falls
+// back to the per-dependency AssertRoot path.
+func TestResolveLocalRootDeclinesNonGomod(t *testing.T) {
+	r := NewResolver(fakeProxy{})
+	if _, ok, _ := r.ResolveLocalRoot(context.Background(), expand.LocalRoot{
+		Ecosystem: "pypi", Name: "app", Requires: localReqs([2]string{"flask", "v1.0.0"}),
+	}); ok {
+		t.Error("ResolveLocalRoot must decline a non-gomod root")
+	}
+	if _, ok, _ := r.ResolveLocalRoot(context.Background(), expand.LocalRoot{
+		Ecosystem: "gomod", Name: "M",
+	}); ok {
+		t.Error("ResolveLocalRoot must decline a root with no requires")
 	}
 }

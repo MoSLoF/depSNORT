@@ -385,7 +385,14 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 	// local project root is never handed to the resolver — it has no registry
 	// coordinate, and doing so is exactly what kept this tier from ever firing.
 	if opts.Resolver != nil {
-		w.assertDirectSubtrees(ctx, g, root, opts.Resolver, byName, inSubtree, expanded, &res)
+		// Prefer resolving the local main module's WHOLE build list in one shot
+		// (LocalRootResolver — gomod) over resolving each direct dependency
+		// independently and unioning: the union is a superset of the real build
+		// list, the whole-root resolution is exact (OPU-15). Falls back to the
+		// per-dependency path when the resolver has no whole-root answer.
+		if !w.assertLocalRoot(ctx, g, root, opts.Resolver, inSubtree, expanded, &res) {
+			w.assertDirectSubtrees(ctx, g, root, opts.Resolver, byName, inSubtree, expanded, &res)
+		}
 	}
 
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {

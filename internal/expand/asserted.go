@@ -43,6 +43,33 @@ type ResolvedRef struct {
 	Version   string
 }
 
+// LocalRoot describes a LOCAL main module whose whole build list a resolver can
+// resolve from the require set the manifest already parsed — without a proxy
+// coordinate for the root itself. It exists because the local project root has no
+// published version to fetch (D-41/D-43): its own dependency declarations are all
+// the resolver needs to seed resolution.
+type LocalRoot struct {
+	Ecosystem string
+	Name      string
+	Version   string            // the root's placeholder/observed version, for node 0
+	Requires  []ResolvedRef     // the root's parsed require set (direct + indirect)
+	Attr      map[string]string // root-node attributes (e.g. the gomod `go` directive)
+}
+
+// LocalRootResolver is an optional refinement of Resolver: it resolves a LOCAL
+// main module's ENTIRE build list from the manifest's require set, rather than
+// resolving each direct dependency independently and unioning the results.
+//
+// The union is a superset of the real build list — for a pruned (Go 1.17+) graph
+// it re-includes modules and versions the real build prunes away, because each
+// dependency is resolved as if it were its own main module. Resolving the main
+// module as a whole reproduces the exact build list instead (OPU-15). gomod
+// implements this; ecosystems that do not are unaffected (the walker falls back
+// to the per-dependency AssertRoot path).
+type LocalRootResolver interface {
+	ResolveLocalRoot(ctx context.Context, root LocalRoot) (ResolvedGraph, bool, error)
+}
+
 // ResolvedEdge is a dependency relation, as indices into ResolvedGraph.Nodes.
 type ResolvedEdge struct{ From, To int }
 
@@ -91,18 +118,30 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		return out, err
 	}
 	out.Resolved = true
+	out.Asserted = w.mergeResolved(g, root, rg, assertedByFor(r, root.Ecosystem))
+	return out, nil
+}
 
-	// Attribute asserted nodes to the backend that actually answered for this
-	// ecosystem (go-proxy for gomod, deps.dev otherwise) when the resolver is a
-	// dispatcher; fall back to its own Name (OPU-13).
-	assertedBy := r.Name()
+// assertedByFor attributes an asserted node to the backend that actually answered
+// for an ecosystem (go-proxy for gomod, deps.dev otherwise) when the resolver is a
+// dispatcher; it falls back to the resolver's own Name (OPU-13).
+func assertedByFor(r Resolver, ecosystem string) string {
 	if en, isNamer := r.(EcosystemNamer); isNamer {
-		if nm := en.NameFor(root.Ecosystem); nm != "" {
-			assertedBy = nm
+		if nm := en.NameFor(ecosystem); nm != "" {
+			return nm
 		}
 	}
+	return r.Name()
+}
+
+// mergeResolved folds a resolver's full transitive graph for one root into g:
+// index 0 is the root (already an observed node — never re-added or re-versioned),
+// and every other node becomes a TruthAsserted node with the resolved edges
+// between them. Returns how many asserted nodes were added. Observed beats
+// asserted, so a node the lockfile already pinned is left untouched.
+func (w *Walker) mergeResolved(g *graph.Graph, root *graph.Node, rg ResolvedGraph, assertedBy string) int {
 	if len(rg.Nodes) == 0 {
-		return out, nil
+		return 0
 	}
 
 	// Depth by shortest path from the resolved root (index 0), so an asserted node
@@ -114,6 +153,7 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 	// Map each resolved node index to a graph node ID. Index 0 is the root,
 	// which already exists as an observed node; do not re-add or re-version it.
 	ids := make([]string, len(rg.Nodes))
+	asserted := 0
 	for i, n := range rg.Nodes {
 		if n.Name == "" || n.Version == "" {
 			continue
@@ -144,7 +184,7 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		})
 		setAttr(child, graph.AttrVersionTruth, graph.TruthAsserted)
 		setAttr(child, AttrAssertedBy, assertedBy)
-		out.Asserted++
+		asserted++
 	}
 
 	for _, e := range rg.Edges {
@@ -156,7 +196,76 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		}
 		g.AddEdge(ids[e.From], ids[e.To], graph.EdgeDependsOn)
 	}
-	return out, nil
+	return asserted
+}
+
+// assertLocalRoot resolves a main module's ENTIRE build list in one shot, when
+// the resolver supports it (LocalRootResolver — gomod), instead of resolving each
+// direct dependency independently and unioning (assertDirectSubtrees). The union
+// is a superset of the real build list; the whole-root resolution is the exact
+// build list (OPU-15). It returns true when it handled the root, so the caller
+// skips the per-dependency path.
+//
+// The root passed to ExpandRoot IS the scanned project root; assertDirectSubtrees
+// already aims the resolver at that root's direct dependencies rather than the
+// root itself (the root has no proxy coordinate, D-41/D-43), so no per-root
+// AssertRoot is bypassed here. The whole-root path only changes HOW those direct
+// dependencies are resolved — as one pruned build list instead of a union. The
+// resolver decides applicability by ecosystem: a non-gomod root returns ok=false
+// and the per-dependency path runs unchanged. On success the whole reachable
+// subtree is marked expanded so the presume walk does not re-derive (with weaker,
+// presumed claims) what the resolver just stated exactly.
+func (w *Walker) assertLocalRoot(ctx context.Context, g *graph.Graph, root *graph.Node, r Resolver,
+	inSubtree, expanded map[string]bool, res *Result) bool {
+
+	lrr, ok := r.(LocalRootResolver)
+	if !ok || root == nil {
+		return false
+	}
+	reqs := directRequiresOf(g, root)
+	if len(reqs) == 0 {
+		return false
+	}
+	rg, ok, err := lrr.ResolveLocalRoot(ctx, LocalRoot{
+		Ecosystem: root.Ecosystem, Name: root.Name, Version: root.Version,
+		Requires: reqs, Attr: root.Attr,
+	})
+	if err != nil || !ok {
+		return false
+	}
+	res.Asserted += w.mergeResolved(g, root, rg, assertedByFor(r, root.Ecosystem))
+	// The resolver returned the COMPLETE build list under this root; its direct
+	// dependencies and their subtrees are closed. Mark everything reachable from
+	// the root expanded so the presume walk below never re-derives it — otherwise
+	// an observed direct dependency would be presume-expanded and reintroduce the
+	// very union artifacts (now as presumed nodes) this path exists to remove.
+	for id := range reachable(g, root.ID) {
+		inSubtree[id] = true
+		expanded[id] = true
+	}
+	return true
+}
+
+// directRequiresOf reads a root's direct dependencies out of the graph as a
+// resolver-ready require set (the manifest already parsed them into depth-1
+// nodes). For a gomod root that is the go.mod `require` block — direct and
+// recorded indirect alike — which is exactly what seeds a whole-build-list
+// resolution.
+func directRequiresOf(g *graph.Graph, root *graph.Node) []ResolvedRef {
+	var out []ResolvedRef
+	seen := map[string]bool{}
+	for _, id := range directDepIDs(g, root.ID) {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		n := g.Get(id)
+		if n == nil || n.Kind != graph.KindPackage || n.Name == "" || n.Version == "" {
+			continue
+		}
+		out = append(out, ResolvedRef{Ecosystem: n.Ecosystem, Name: n.Name, Version: n.Version})
+	}
+	return out
 }
 
 // assertedDepths returns, per resolved-node index, its depth as the shortest

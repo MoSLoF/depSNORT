@@ -592,6 +592,19 @@ func (a assertedResolver) Resolve(ctx context.Context, ecosystem, name, version 
 	return expand.ResolvedGraph{}, false, nil
 }
 
+// ResolveLocalRoot dispatches whole-build-list resolution of a LOCAL main module
+// to the ecosystem's resolver when it supports it (gomod), so a `depsnort scan`
+// of a local go.mod resolves Go's exact build list instead of the per-dependency
+// union (expand.LocalRootResolver, OPU-15). Ecosystems whose resolver does not
+// implement it return ok=false and the walker falls back to the per-dependency
+// AssertRoot path.
+func (a assertedResolver) ResolveLocalRoot(ctx context.Context, root expand.LocalRoot) (expand.ResolvedGraph, bool, error) {
+	if r, ok := a.pick(root.Ecosystem).(expand.LocalRootResolver); ok {
+		return r.ResolveLocalRoot(ctx, root)
+	}
+	return expand.ResolvedGraph{}, false, nil
+}
+
 func (a assertedResolver) pick(ecosystem string) expand.Resolver {
 	if ecosystem == "gomod" {
 		return a.gomod

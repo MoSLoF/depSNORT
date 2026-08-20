@@ -2676,11 +2676,78 @@ project never ships. The over-approximation is far smaller than pre-pruning (170
 vs 384) and the anchors prove pruning works where it most distorts, which is why
 the field acceptance is framed as containment + anchors, not exact equality.
 
-Exact end-to-end is future work (its own oracle-proven cycle): seed the resolver
-with the LOCAL main-module go.mod as the root require set (the `go` directive and
-direct+indirect requires depsnort already parses) and resolve the main module's
-build list as a whole, instead of unioning per-direct-dependency resolutions.
-That collapses 170 → 64 and removes the false-surface modules. It touches the
-OPU-06 boundary (the local root is deliberately not proxy-resolved), so it is
-held for a dedicated change rather than folded in here. Until then the residual
-stands recorded, not silently presented as the build.
+Exact end-to-end is future work (its own oracle-proven cycle — now done in D-77):
+seed the resolver with the LOCAL main-module go.mod as the root require set (the
+`go` directive and direct+indirect requires depsnort already parses) and resolve
+the main module's build list as a whole, instead of unioning per-direct-dependency
+resolutions. That collapses 170 → 64 and removes the false-surface modules. It
+touches the OPU-06 boundary (the local root is deliberately not proxy-resolved),
+so it is held for a dedicated change rather than folded in here. Until then the
+residual stands recorded, not silently presented as the build.
+
+## D-77 — OPU-15 exact: resolve a local main module's WHOLE build list (union → exact)
+
+D-76's residual: a `depsnort scan` of a local Go main module produced a
+pruned-per-dependency SUPERSET (opensnitch 170 gomod nodes vs Go's 64), because
+the expansion resolved each of the root's direct dependencies independently and
+unioned them. The union re-includes modules the real build prunes away (e.g.
+github.com/docker/docker) and keeps a shared module at every version any single
+dependency selects (x/sys at 11). This closes that gap: the scan now resolves the
+main module's ENTIRE build list in one shot and matches `go list -m all` exactly.
+
+Cause. The asserted tier resolves each registry-queryable coordinate's transitive
+graph (D-44/OPU-06). The local project root has no proxy coordinate, so the walk
+never resolved the main module as a whole — it aimed the resolver at each direct
+dependency instead. Resolving a dependency as if IT were the main module keeps
+that dependency's own pruned frontier and its independently-selected versions;
+unioning many such resolutions over-approximates. The resolver was already exact
+GIVEN a main module's require set (D-75, proven at the resolver); the pipeline
+just never handed it the local root's require set.
+
+Fix. A `LocalRootResolver` seam (internal/expand): the walker, before the
+per-dependency path, offers the resolver the local root's parsed require set (the
+go.mod `require` block — direct and recorded indirect — already depth-1 nodes) plus
+its `go` directive. gomod's `ResolveLocalRoot` seeds minimal version selection
+from that set exactly as the queried-coordinate path seeds from a fetched go.mod
+(`selectBuildList` / `selectPrunedSeed` / `selectFullGraphSeed` are shared by
+both entry points), walks the proxy for the rest, and returns the one-version-per-
+module build list. The walker merges it with the same logic that merges a resolved
+dependency (`mergeResolved`, extracted from AssertRoot — root stays observed, the
+rest become asserted) and marks the whole reachable subtree expanded so the
+presume walk does not re-derive it. Ecosystems whose resolver does not implement
+the seam are untouched: the dispatcher returns ok=false and the per-dependency
+path runs unchanged.
+
+Proven exact against `go list -m all`, end to end (a full `depsnort scan`, not the
+resolver in isolation):
+
+```
+opensnitch/daemon (go 1.25.0, pruned):   64/64 nodes EXACT (was 170), cloud.google.com/go v0.26.0
+spf13/cobra       (go 1.12,  classic):  160/160 nodes EXACT (seeded selectFullGraphSeed)
+```
+
+The seeding concept was gated before any pipeline change: a throwaway harness fed
+the daemon's local go.mod to the existing resolver via a proxy shim and matched
+the 64-module oracle with 0 missing / 0 mismatched / 0 extra. Only then was the
+seam built.
+
+Orphans are the honest residual, not a regression. An exact build list contains
+modules Go includes via a SUPERSEDED version's requirement (the D-73/OPU-14
+phenomenon): the requiring version is not selected, so no selected module's go.mod
+carries an edge to them, and they show as orphans (opensnitch 5, cobra 1). They
+are correctly IN the build list at the correct version and are scanned for
+advisories; only their root→node path is unavailable (Go answers the same "why"
+through `go mod why -m`, tracing a superseded version). The union masked these by
+carrying the superseded requirer versions as extra nodes — i.e. it hid an orphan
+count behind an over-approximation. Fabricating a root edge to clear the metric
+would over-claim a dependency that does not exist at the selected version, so the
+orphans stand recorded (D-18), the same honesty D-24/D-76 apply elsewhere.
+
+The D-76 disclosure note stays retired: the asserted Go closure is now the exact
+build list end to end, and an offline / -no-depsdev run still falls back to the
+presumed walk disclosed as presumed-only (D-70). Process: this changes resolution,
+so per the standing rule it did not ship until the oracle agreed — two real repos
+(a pruned go 1.25 case collapsing 170→64, a classic go 1.12 case at 160), each
+matched module-for-module and version-for-version, plus resolver-level and
+walker-level unit tests that separate the whole-root path from the union it
+replaces.
