@@ -92,3 +92,47 @@ func TestResolverUnknownCoordinate(t *testing.T) {
 		t.Error("the Go resolver must decline a non-gomod ecosystem")
 	}
 }
+
+// TestResolverMVSReadsSupersededVersions locks in OPU-14: classic MVS reads the
+// go.mod of EVERY version in the module graph, not only the selected one. A
+// superseded lower version can carry a HIGHER requirement for a third module,
+// and that requirement still counts in Go's build list. Reading selected-only
+// undershoots it.
+//
+//	R ─┬─> A v3.0.0 ─> B v1.0.0        (selected A drops the higher B requirement)
+//	   └─> C v1.0.0 ─> A v2.0.0 ─> B v2.0.0   (A@v2 SUPERSEDED by A@v3, but its
+//	                                            B v2.0.0 requirement still counts)
+//
+// A is selected at v3.0.0 (max of root's v3 and C's v2). A selected-only read
+// picks B v1.0.0 (from A@v3); full-graph MVS reads the superseded A@v2.0.0 too
+// and selects B v2.0.0.
+func TestResolverMVSReadsSupersededVersions(t *testing.T) {
+	proxy := fakeProxy{
+		"R@v1.0.0": "module R\nrequire (\n\tA v3.0.0\n\tC v1.0.0\n)\n",
+		"C@v1.0.0": "module C\nrequire A v2.0.0\n",
+		"A@v3.0.0": "module A\nrequire B v1.0.0\n",
+		"A@v2.0.0": "module A\nrequire B v2.0.0\n",
+		"B@v1.0.0": "module B\n",
+		"B@v2.0.0": "module B\n",
+	}
+	rg, ok, err := NewResolver(proxy).Resolve(context.Background(), "gomod", "R", "v1.0.0")
+	if err != nil || !ok {
+		t.Fatalf("Resolve ok=%v err=%v", ok, err)
+	}
+	got := map[string]string{}
+	for _, n := range rg.Nodes {
+		got[n.Name] = n.Version
+	}
+	if got["A"] != "v3.0.0" {
+		t.Errorf("A selected %q, want v3.0.0", got["A"])
+	}
+	// The heart of OPU-14: B must be v2.0.0, which exists ONLY in the superseded
+	// A@v2.0.0's go.mod. A selected-only read would undershoot to v1.0.0.
+	if got["B"] != "v2.0.0" {
+		t.Errorf("B selected %q, want v2.0.0 (resolver did not read the superseded A@v2.0.0's requirement)", got["B"])
+	}
+	want := map[string]string{"R": "v1.0.0", "A": "v3.0.0", "C": "v1.0.0", "B": "v2.0.0"}
+	if len(got) != len(want) {
+		t.Errorf("build list = %v (%d), want %d modules", got, len(got), len(want))
+	}
+}
