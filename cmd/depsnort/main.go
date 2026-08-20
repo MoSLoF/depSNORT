@@ -557,11 +557,46 @@ func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Decl
 // because deps.dev was unreachable.
 const presumedClosureNote = "transitive closure expanded on PRESUMED versions only — no version was resolved as fact (deps.dev asserted tier not consulted via -offline/-no-depsdev, or unreachable); these versions are this tool's guesses, so a clean result over this closure is not an authoritative all-clear"
 
-// useAssertedTier reports whether a scan should consult the deps.dev asserted
-// tier: default on (OPU-12 D-2), suppressed by -no-depsdev, and impossible under
+// useAssertedTier reports whether a scan should consult the asserted tier:
+// default on (OPU-12 D-2), suppressed by -no-depsdev, and impossible under
 // -offline (no network), where the walk falls back to presumed versions.
 func useAssertedTier(depsDev, noDepsDev, offline bool) bool {
 	return depsDev && !noDepsDev && !offline
+}
+
+// assertedResolver routes asserted resolution by ecosystem (OPU-13 D-2). Go is
+// resolved by a native goproxy MVS resolver because deps.dev's :dependencies
+// endpoint 404s for every Go coordinate; every other supported ecosystem is
+// resolved by deps.dev. Routing gomod away from deps.dev guarantees zero
+// deps.dev traffic for Go coordinates.
+type assertedResolver struct {
+	depsDev expand.Resolver
+	gomod   expand.Resolver
+}
+
+func (assertedResolver) Name() string { return "asserted" }
+
+// NameFor attributes an asserted node to the backend that actually answered, so
+// a Go node reads as go-proxy and a PyPI node as deps.dev (expand.EcosystemNamer).
+func (a assertedResolver) NameFor(ecosystem string) string {
+	if r := a.pick(ecosystem); r != nil {
+		return r.Name()
+	}
+	return "asserted"
+}
+
+func (a assertedResolver) Resolve(ctx context.Context, ecosystem, name, version string) (expand.ResolvedGraph, bool, error) {
+	if r := a.pick(ecosystem); r != nil {
+		return r.Resolve(ctx, ecosystem, name, version)
+	}
+	return expand.ResolvedGraph{}, false, nil
+}
+
+func (a assertedResolver) pick(ecosystem string) expand.Resolver {
+	if ecosystem == "gomod" {
+		return a.gomod
+	}
+	return a.depsDev
 }
 
 // resolveResult is what one pass over a project list produced: the merged
@@ -928,13 +963,19 @@ func cmdScan(args []string) int {
 				&composer.WalkSource{Deps: composerDeps, Index: composerIdx},
 				&gomod.WalkSource{Proxy: goProxy},
 			}
-			// The asserted tier (deps.dev) is default-on (OPU-12 D-2): a verdict
-			// presented as authoritative should rest on resolved facts, not this
-			// tool's presumed guesses. -offline (no network) and -no-depsdev both
-			// fall back to the presumed walk, which is then disclosed as such.
+			// The asserted tier is default-on (OPU-12 D-2): a verdict presented as
+			// authoritative should rest on resolved facts, not this tool's presumed
+			// guesses. -offline (no network) and -no-depsdev both fall back to the
+			// presumed walk, which is then disclosed as such. The tier is
+			// multi-source (OPU-13): deps.dev resolves pypi/npm/cargo/nuget/gem, but
+			// its v3 :dependencies endpoint 404s for every Go coordinate, so gomod is
+			// routed to a native goproxy MVS resolver instead — never to deps.dev.
 			var resolver expand.Resolver
 			if useAssertedTier(*depsDev, *noDepsDev, *offline) {
-				resolver = depsdev.New(datasource.NewCache(filepath.Join(*regCacheDir, "depsdev"), 24*time.Hour), false)
+				resolver = assertedResolver{
+					depsDev: depsdev.New(datasource.NewCache(filepath.Join(*regCacheDir, "depsdev"), 24*time.Hour), false),
+					gomod:   gomod.NewResolver(goProxy),
+				}
 			}
 			expCov := expandTransitive(g, rootNodes, sources, resolver, *expandDepth)
 			if expCov.Stats.Gaps > 0 {

@@ -27,6 +27,15 @@ type Resolver interface {
 	Resolve(ctx context.Context, ecosystem, name, version string) (ResolvedGraph, bool, error)
 }
 
+// EcosystemNamer is an optional refinement of Resolver for a DISPATCHING
+// resolver that routes different ecosystems to different backends (deps.dev for
+// pypi/npm/…, a goproxy resolver for gomod — OPU-13). AssertRoot uses NameFor to
+// attribute an asserted node to the backend that actually answered (go-proxy vs
+// deps.dev) rather than to the dispatcher, so provenance stays truthful.
+type EcosystemNamer interface {
+	NameFor(ecosystem string) string
+}
+
 // ResolvedRef is one node in a resolver's answer: a concrete coordinate.
 type ResolvedRef struct {
 	Ecosystem string
@@ -82,6 +91,16 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 		return out, err
 	}
 	out.Resolved = true
+
+	// Attribute asserted nodes to the backend that actually answered for this
+	// ecosystem (go-proxy for gomod, deps.dev otherwise) when the resolver is a
+	// dispatcher; fall back to its own Name (OPU-13).
+	assertedBy := r.Name()
+	if en, isNamer := r.(EcosystemNamer); isNamer {
+		if nm := en.NameFor(root.Ecosystem); nm != "" {
+			assertedBy = nm
+		}
+	}
 	if len(rg.Nodes) == 0 {
 		return out, nil
 	}
@@ -124,7 +143,7 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 			Name: n.Name, Version: n.Version, Depth: depthOf[i],
 		})
 		setAttr(child, graph.AttrVersionTruth, graph.TruthAsserted)
-		setAttr(child, AttrAssertedBy, r.Name())
+		setAttr(child, AttrAssertedBy, assertedBy)
 		out.Asserted++
 	}
 

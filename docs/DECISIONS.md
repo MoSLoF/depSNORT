@@ -2440,3 +2440,48 @@ The handoff's richer form — prefixing the chain with the DECLARING EXTRA
 (train → torch → …) — needs per-edge extra provenance that D-1 did not thread
 through declared deps into the graph; it is a clean follow-on, and the
 dependency-path core (the actionable "why is it here") lands here.
+
+## D-72 — OPU-13: Go modules get a native asserted tier (goproxy MVS)
+
+OPU-12 D-2 made the asserted tier default-on, but it delivered only for PyPI and
+Cargo — Go got nothing (a run-delta showed a pure-Go repo byte-identical before
+and after). The root cause is structural, not a missing mapper case: deps.dev's
+v3 `:dependencies` endpoint 404s for every Go coordinate. deps.dev HAS Go
+package/version data, but does not expose resolved dependency GRAPHS for Go, so
+the asserted tier — built solely on that endpoint — cannot cover Go by
+construction. Verified: adding `case "gomod": return "go"` to `depsdev.system()`
+leaves a Go repo at 0 asserted; it only converts a silent skip into a stream of
+404s. That mapper case is therefore deliberately NOT added.
+
+The fix is a Go-native resolver on infrastructure already in the tree.
+`internal/datasource/goproxy` talks to proxy.golang.org — the public,
+zero-execution source `go` itself reads — and exposes `ModFile` (raw go.mod,
+whose `require` block IS the dependency set). A new `gomod.Resolver` satisfies
+`expand.Resolver` over it: fetch a coordinate's go.mod (reusing the adapter's own
+`scanGoMod`), recurse, and apply MINIMAL VERSION SELECTION — the selected version
+of a module is the MAXIMUM any reachable module requires, to a fixpoint that
+re-reads each module at its selected version. That fixpoint is the actual work
+and the reason it is a resolver, not a fetch loop: naive recursion mis-versions a
+module two paths require differently. `+incompatible` (build metadata, stripped),
+same-base pseudo-versions (14-digit timestamps order lexically as numerically),
+and major-version path suffixes (`foo` vs `foo/v2` are distinct module-path keys)
+all fall out correctly. A 404 on the queried coordinate returns ok=false so the
+walk falls back to presume — the same contract deps.dev's resolver honors.
+
+The asserted tier becomes MULTI-SOURCE: a dispatching `assertedResolver` routes
+by ecosystem — deps.dev for pypi/npm/cargo/nuget/gem, the goproxy resolver for
+gomod — so Go is NEVER handed to deps.dev (zero 404 traffic). `expand`/`AssertRoot`
+stay ecosystem-agnostic; a small optional `expand.EcosystemNamer` lets the
+dispatcher attribute each asserted node to the backend that answered, so a Go
+node reads `asserted_by: go-proxy` and a PyPI node `deps.dev`.
+
+This is MORE aligned with depsnort's charter than deps.dev ever was for Go:
+go.mod is static text, MVS is deterministic, the proxy is cacheable and is the
+exact source `go` reads — zero execution (D-04), deterministic (D-09),
+offline-capable. Under `-offline` the tier is off and Go degrades to presumed
+with the same disclosure banner PyPI/Cargo emit (D-70), keyed on asserted==0.
+
+Verified live against proxy.golang.org: a one-require go.mod (logrus v1.9.0)
+resolved its full transitive tree as 7 asserted nodes with concrete
+MVS-selected versions, each attributed to go-proxy — the exact null-delta the
+run-delta flagged, now closed.
