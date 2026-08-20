@@ -159,7 +159,12 @@ var (
 		".npmrc", ".git-credentials", "AWS_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY",
 		".aws/credentials", "KUBECONFIG", ".kube/config", "VAULT_TOKEN",
 		"DOCKER_AUTH_CONFIG", ".docker/config.json", "SSH_PRIVATE_KEY", "id_rsa",
-		".ssh/id_", "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_CLIENT_SECRET",
+		".ssh/id_", "authorized_keys", "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_CLIENT_SECRET",
+		// cloud instance-metadata endpoints: an install hook reaching these is
+		// reaching for cloud credentials (A.I.G recon/SSRF-to-creds). These are the
+		// cheap bare-host backstop; imdsRe (run on raw source before URL stripping)
+		// is the real fix for the common urlopen("http://169.254.169.254/…") shape.
+		"169.254.169.254", "metadata.google.internal", "metadata.azure.com",
 		"STRIPE_SECRET", "SLACK_TOKEN", "HF_TOKEN", "OPENAI_API_KEY",
 		// Python
 		".pypirc", "PYPI_TOKEN", "TWINE_PASSWORD", "TWINE_USERNAME",
@@ -176,7 +181,7 @@ var (
 
 	envMarkers = []string{
 		"process.env", "os.environ", "getenv(",
-		"os.getenv(", "platform.node(", "socket.gethostname(",
+		"os.getenv(", "platform.node(", "socket.gethostname(", "socket.getfqdn(", ".getsockname(",
 		"getpass.getuser(", "uuid.getnode(",
 		// Ruby
 		"ENV[", "ENV.fetch",
@@ -278,9 +283,28 @@ var (
 	// cmd.exe delayed expansion — enables !var! substitution for evasion.
 	delayedExpansionRe = regexp.MustCompile(`(?i)/v:on\b`)
 
-	filesystemMarkers = []string{
-		".bashrc", ".bash_profile", ".zshrc", ".profile", "/etc/", "os.homedir()",
-		"crontab", "systemd", "AppData\\Roaming", "startup",
+	// persistenceMarkers are filesystem locations that AUTO-EXECUTE on boot or
+	// login — shell profiles, cron, systemd/launchd services, the Windows Startup
+	// folder, the PowerShell $PROFILE. A library's install hook essentially never
+	// installs one of these; that is an OS-package/admin action, not a build step
+	// (A.I.G SkillTrustBench T06). VC-002g gates on exactly this set. They are
+	// CapFilesystem like any other install write, so Part A's capability output is
+	// unchanged — the persistence/benign split lives in the marker taxonomy, read
+	// by the check via IsPersistenceMarker, not in a new capability.
+	persistenceMarkers = []string{
+		".bashrc", ".bash_profile", ".zshrc", ".profile", "/etc/",
+		"crontab", "systemd", "systemctl", "launchctl", "launchd", "startup",
+		// PowerShell / .NET
+		"$PROFILE", "Microsoft.PowerShell",
+	}
+
+	// installWriteMarkers are ordinary filesystem writes an install legitimately
+	// makes (site-packages, .pth, gem dirs, locating the home directory). They are
+	// CapFilesystem but must NOT raise VC-002g — flagging a site-packages write as
+	// persistence would false-positive at exactly the rate the tool's discipline
+	// avoids.
+	installWriteMarkers = []string{
+		"os.homedir()", "AppData\\Roaming",
 		// Python
 		"site-packages", "sysconfig.", "distutils.",
 		"pathlib.Path.home(", ".pth",
@@ -288,10 +312,28 @@ var (
 		"Gem.dir", "Gem.path", "spec.extensions",
 		// PHP
 		"vendor/autoload.php",
-		// PowerShell / .NET
-		"$PROFILE", "Microsoft.PowerShell",
 	}
+
+	// imdsRe recognizes a cloud instance-metadata reach on the RAW source, before
+	// URL stripping removes the host (Decision D-25 strips doc-URLs, but an IMDS URL
+	// passed to urlopen is behavior, not documentation). An install hook reaching
+	// IMDS is reaching for cloud credentials, so a match elevates to CapCredentials
+	// — VC-002c, or VC-002d with egress — not a bland VC-002b network note.
+	imdsRe = regexp.MustCompile(`(?i)169\.254\.169\.254|metadata\.google\.internal|metadata\.azure\.com|/latest/meta-data/`)
 )
+
+// IsPersistenceMarker reports whether an install-surface evidence marker names a
+// persistence mechanism (auto-executes on boot/login) as opposed to an ordinary
+// install write. VC-002g uses it to gate on cron/service/profile/startup writes
+// only, excluding benign site-packages/.pth/gem writes (OPU-19).
+func IsPersistenceMarker(marker string) bool {
+	for _, m := range persistenceMarkers {
+		if strings.EqualFold(marker, m) {
+			return true
+		}
+	}
+	return false
+}
 
 // stripCodeComments removes C-family block and line comments so that URLs and
 // capability markers sitting in documentation are not mistaken for behavior
@@ -332,7 +374,11 @@ func scanCaps(text string) ([]Capability, []string) {
 	scan(envMarkers, CapEnv)
 	scan(execMarkers, CapExec)
 	scan(obfuscationMarkers, CapObfuscation)
-	scan(filesystemMarkers, CapFilesystem)
+	// Persistence and ordinary install writes are both CapFilesystem; the
+	// persistence/benign distinction lives in the marker (IsPersistenceMarker),
+	// read by VC-002g, so the capability output is unchanged (OPU-19).
+	scan(persistenceMarkers, CapFilesystem)
+	scan(installWriteMarkers, CapFilesystem)
 
 	// A URL anywhere is a network reach even without a named client.
 	if urlRe.MatchString(text) {
@@ -816,6 +862,14 @@ func analyzeSetupPy(source string) []Hook {
 
 	allCaps, allEvidence := scanCaps(cleaned)
 	allSinks := findSinks(cleaned)
+	// IMDS is almost always reached via a URL (urlopen("http://169.254.169.254/…")),
+	// and the URL strip above removes the host before credential scanning. Recognize
+	// it on the RAW source and elevate to CapCredentials so it raises VC-002c/d, not
+	// a bland VC-002b network note (OPU-19 Part B).
+	if m := imdsRe.FindString(source); m != "" {
+		allCaps = appendUnique(allCaps, CapCredentials)
+		allEvidence = appendStr(allEvidence, "imds:"+m)
+	}
 
 	if len(allCaps) > 0 {
 		h := Hook{
@@ -853,6 +907,10 @@ func analyzeSetupPy(source string) []Hook {
 					body := extractIndentedBlock(source[loc[1]:])
 					h.Caps, h.Evidence = scanCaps(body)
 					h.Sinks = findSinks(body)
+					if m := imdsRe.FindString(body); m != "" {
+						h.Caps = appendUnique(h.Caps, CapCredentials)
+						h.Evidence = appendStr(h.Evidence, "imds:"+m)
+					}
 				}
 				hooks = append(hooks, h)
 			}

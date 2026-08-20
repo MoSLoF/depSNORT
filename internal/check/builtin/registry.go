@@ -24,6 +24,7 @@ func Default() *check.Registry {
 		HookExfilCapable{},    // VC-002d
 		HookObfuscated{},      // VC-002e
 		HookDownloadCradle{},  // VC-002f
+		HookPersistence{},     // VC-002g
 		IOCMatch{},            // VC-003
 		Dormancy{},            // VC-004
 		PatchBurst{},          // VC-005

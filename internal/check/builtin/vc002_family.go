@@ -8,6 +8,7 @@ import (
 	"ihbv.io/depsnort/internal/check"
 	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
+	"ihbv.io/depsnort/internal/installsurface"
 )
 
 // hookView is the install-time subgraph rooted at one hook, flattened into the
@@ -280,6 +281,66 @@ func (HookDownloadCradle) Run(ctx *check.Context) []finding.Finding {
 			Title:       fmt.Sprintf("install hook (%s) is a download cradle", v.Hook.Name),
 			Evidence:    ev,
 			Remediation: "do not install; an install hook has no legitimate reason to pull and run code from the network",
+		})
+	}
+	return out
+}
+
+// ---- VC-002g: install-hook persistence ------------------------------------
+
+// HookPersistence (VC-002g) reports an install hook that writes to a persistence
+// location — a shell profile, cron, a systemd/launchd service, the Windows Startup
+// folder, the PowerShell $PROFILE. A library's install hook has no legitimate
+// reason to establish boot/login persistence; that is an OS-package/admin action,
+// not a build step (A.I.G SkillTrustBench T06 weights it as its own category).
+//
+// It gates on the PERSISTENCE subset of CapFilesystem only. Ordinary install
+// writes — site-packages, .pth, gem dirs, locating the home directory — are also
+// CapFilesystem but are excluded (installsurface.IsPersistenceMarker), so a normal
+// install does not fire this. That precision is why it is gate-eligible/high
+// (closer to VC-002c) rather than the common-and-benign VC-002b shape.
+type HookPersistence struct{}
+
+func (HookPersistence) Meta() check.Meta {
+	return check.Meta{
+		ID: "VC-002g", Axis: finding.AxisKnownCompromise,
+		DefaultSeverity: finding.SevHigh, DefaultGate: finding.GateEligible,
+		Description: "install hook writes a boot/login persistence mechanism",
+	}
+}
+
+func (HookPersistence) Run(ctx *check.Context) []finding.Finding {
+	var out []finding.Finding
+	for _, v := range collectHooks(ctx.Graph) {
+		if !v.Caps["filesystem"] {
+			continue
+		}
+		// Fire only when a PERSISTENCE marker fired — not a benign site-packages/.pth
+		// write, which is also CapFilesystem. Evidence entries are comma-joined
+		// marker strings, so split before testing each.
+		var hits []string
+		seen := map[string]bool{}
+		for _, ev := range v.Evidence {
+			for _, part := range strings.Split(ev, ",") {
+				part = strings.TrimSpace(part)
+				if part != "" && installsurface.IsPersistenceMarker(part) && !seen[part] {
+					seen[part] = true
+					hits = append(hits, part)
+				}
+			}
+		}
+		if len(hits) == 0 {
+			continue
+		}
+		sort.Strings(hits)
+		out = append(out, finding.Finding{
+			CheckID: "VC-002g", Axis: finding.AxisKnownCompromise,
+			Severity: finding.SevHigh, GateClass: finding.GateEligible,
+			Confidence: 0.6, NodeID: v.Pkg.ID,
+			Title:    fmt.Sprintf("install hook (%s) establishes persistence", v.Hook.Name),
+			Evidence: fmt.Sprintf("writes boot/login persistence location(s): %s", strings.Join(hits, ", ")),
+			Remediation: "an install hook has no legitimate need to install a cron job, service, " +
+				"shell-profile, or startup entry; review before installing",
 		})
 	}
 	return out
