@@ -2343,3 +2343,41 @@ DUPLICATE disclosure — a harmless note, never a false block or false CVE. That
 the safe direction. Over-exposing a generated copy is a cosmetic gap-count bump;
 under-exposing real source hides actual dependencies, which is the failure this
 closes. If a tool's layout is found to leak, its subdir is added to the list.
+
+## D-69 — OPU-12 D-1: pyproject extras are parsed into the declared surface
+
+depSNORT read only a pyproject's core `[project] dependencies` (and the Poetry
+table); `[project.optional-dependencies]` — the extras — was ignored entirely.
+For a real repo that is where most of the dependency surface lives: soup-cli
+declares 62 packages, 55 of them in extras (the whole heavy ML stack — torch,
+transformers, vllm, deepspeed). A supply-chain IDS that reads 7 of 62 declared
+packages is looking at a thin shell.
+
+Each key under `[project.optional-dependencies]` is a named extra whose value is
+a PEP 508 array. A default install pulls none of them, but any of them CAN be
+installed, so the honest surface for a scanner is the UNION of every extra's
+dependencies — the maximal set an install could pull. That union is emitted as
+declared deps, deduped by name downstream, parsed with the same comment-stripping
+(D-…/OPU-11) and quote-aware bracket matching as the core array.
+
+Two hazards the extras block introduces, both handled:
+
+- **Self-reference.** A meta-extra like `all = ["soup-cli[train,mlx]"]` or
+  `dev = ["soup-cli[all]"]` names the project's OWN distribution to pull in its
+  local extras. Emitting that name would be a dependency-confusion false positive
+  on the project against itself — and it is redundant, since every extra is
+  already iterated into the union. A dependency whose normalized name equals the
+  `[project].name` is therefore skipped, not emitted. (Its referenced extras'
+  deps are present regardless, because all extras are unioned.)
+
+- **Cross-extra pin split.** `train` pins `transformers<5.0.0`, `mlx` pins
+  `>=5.0.0`. These are mutually exclusive PROFILES, not a contradiction. Because
+  declared deps are deduped by NAME before expansion (one constraint per package
+  reaches the walker), the two never accumulate onto a single node, so the split
+  is not mis-reported as an unsatisfiable `contested`. Extras are iterated in
+  sorted order, so which representative constraint survives is deterministic.
+
+Collapsing mutually-exclusive profiles to a union is deliberate: for an IDS the
+union IS the answer — every package any extra could install is in the blast
+radius, and that is exactly what must be examined. Resolving one named profile
+per invocation is a possible future refinement, not a correctness need here.

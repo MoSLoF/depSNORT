@@ -100,6 +100,42 @@ func parsePyprojectDeps(raw []byte) (deps []graph.DeclaredDep, poetry bool) {
 		}
 	}
 
+	// --- PEP 621 extras: [project.optional-dependencies] (OPU-12 D-1) ---
+	//
+	// Each key under the section is a named extra whose value is a PEP 508 array.
+	// A default install pulls none of them, but a supply-chain IDS must see the
+	// full declared surface: for soup-cli that is 55 of 62 declared packages —
+	// the entire heavy stack (torch, transformers, vllm, …) lives here and was
+	// invisible before. We emit the UNION of every extra's dependencies (the
+	// maximal set any install could pull), deduped by name downstream.
+	//
+	// Two hazards the extras block introduces:
+	//   - Self-reference: a meta-extra like `all = ["soup-cli[train,mlx]"]` or
+	//     `dev = ["soup-cli[all]"]` names the project's OWN distribution to pull
+	//     in its local extras. Emitting that name would be a dependency-confusion
+	//     false positive on the project itself — and it is redundant, because
+	//     every extra is already iterated into the union. So a self-reference is
+	//     skipped, not emitted.
+	//   - Cross-extra pin split: `train` pins `transformers<5.0.0`, `mlx` pins
+	//     `>=5.0.0`. These are mutually exclusive PROFILES, not a contradiction.
+	//     Because declared deps are deduped by NAME downstream (one constraint per
+	//     package reaches expansion), the two never accumulate onto one node, so
+	//     the split is not mis-reported as `contested`. Extras are iterated in
+	//     sorted order so which representative constraint survives is deterministic.
+	projName := purl.NormalizePyPI(pyprojectProjectName(lines))
+	extras := extractNamedArrays(lines, "[project.optional-dependencies]")
+	for _, extra := range sortedKeys(extras) {
+		for _, item := range extras[extra] {
+			rawName, _, _ := pep508.SplitSpecifier(item)
+			if projName != "" && purl.NormalizePyPI(pep508.StripExtras(rawName)) == projName {
+				continue // self-reference to a local extra; its deps are already in the union
+			}
+			if d, ok := declFromPEP508(item); ok {
+				deps = append(deps, d)
+			}
+		}
+	}
+
 	// --- Poetry: [tool.poetry.dependencies] name = "constraint" ---
 	for _, kv := range extractTable(lines, "[tool.poetry.dependencies]") {
 		name := strings.TrimSpace(kv[0])
@@ -252,6 +288,96 @@ func topLevelCloseBracket(s string) int {
 		}
 	}
 	return -1
+}
+
+// pyprojectProjectName returns the [project] name field (unquoted), or "" if
+// absent. Used to recognize a self-referential extra (myproj[extra]) so the
+// project's own distribution name is never emitted as an external dependency.
+func pyprojectProjectName(lines []string) string {
+	for _, kv := range extractTable(lines, "[project]") {
+		if strings.TrimSpace(kv[0]) == "name" {
+			return strings.Trim(strings.TrimSpace(kv[1]), `"'`)
+		}
+	}
+	return ""
+}
+
+// extractNamedArrays returns every `key = [ ... ]` array declared under section,
+// keyed by its key — the shape [project.optional-dependencies] uses (one PEP 508
+// array per extra name). It spans multi-line arrays and strips trailing TOML
+// comments per line (OPU-11), reusing the same quote-aware bracket matching as
+// extractArray so a ']' inside a quoted requirement does not close the array
+// early.
+func extractNamedArrays(lines []string, section string) map[string][]string {
+	out := map[string][]string{}
+	inSection := section == ""
+	collecting := false
+	var curKey string
+	var buf strings.Builder
+	finish := func() {
+		if s := buf.String(); curKey != "" {
+			if idx := topLevelCloseBracket(s); idx >= 0 {
+				out[curKey] = quotedItems(s[:idx])
+			} else {
+				out[curKey] = quotedItems(s)
+			}
+		}
+		buf.Reset()
+		curKey = ""
+		collecting = false
+	}
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !collecting {
+			if strings.HasPrefix(line, "[") {
+				inSection = (line == section)
+				continue
+			}
+			if !inSection || line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			i := strings.Index(line, "=")
+			if i < 0 {
+				continue
+			}
+			open := strings.Index(line[i+1:], "[")
+			if open < 0 {
+				continue // not an array value
+			}
+			curKey = strings.TrimSpace(line[:i])
+			collecting = true
+			buf.WriteString(stripArrayLineComment(line[i+1+open+1:]))
+			if idx := topLevelCloseBracket(buf.String()); idx >= 0 {
+				finish()
+			}
+			continue
+		}
+		// A new section header ends an unterminated array (malformed).
+		if strings.HasPrefix(line, "[") {
+			finish()
+			inSection = (line == section)
+			continue
+		}
+		buf.WriteString("\n")
+		buf.WriteString(stripArrayLineComment(raw))
+		if idx := topLevelCloseBracket(buf.String()); idx >= 0 {
+			finish()
+		}
+	}
+	if collecting {
+		finish()
+	}
+	return out
+}
+
+// sortedKeys returns the map keys in sorted order, for deterministic iteration.
+func sortedKeys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // extractTable returns key/value pairs under a section header until the next
