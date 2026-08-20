@@ -2381,3 +2381,39 @@ Collapsing mutually-exclusive profiles to a union is deliberate: for an IDS the
 union IS the answer — every package any extra could install is in the blast
 radius, and that is exactly what must be examined. Resolving one named profile
 per invocation is a possible future refinement, not a correctness need here.
+
+## D-70 — OPU-12 D-2: the asserted (deps.dev) tier is default-on
+
+Every default scan expanded the transitive closure on PRESUMED versions — this
+tool's guesses at what an installer would pick — while the asserted tier
+(deps.dev's whole resolved graph, a concrete version on every node) sat behind
+an opt-in `-depsdev`, default off. For a supply-chain IDS whose primary work
+product IS the resolved transitive closure (real-world attacks live 4–8 hops down
+it), that meant the authoritative artifact ran on guesswork by default, and a
+presumed walk truncates before the depths an asserted walk reaches.
+
+The asserted tier is now default-on (Option A of the handoff). `-offline` (no
+network) and a new `-no-depsdev` both fall back to the presumed walk. The gate is
+one pure function, `useAssertedTier(depsDev, noDepsDev, offline)` =
+`depsDev && !noDepsDev && !offline`. The tier asserts each root's
+registry-queryable DIRECT dependencies (their depth-1 coordinates are published);
+the synthetic unpublished project root (`name@0.0.0`) is never queried
+(`registryQueryable` guard, the OPU-06 hardening), so "0 asserted for the root"
+is expected and correct — the assertions land on the direct deps.
+
+**Honest degradation, keyed on the outcome not the flag.** When the closure was
+discovered but NOTHING was asserted (`asserted == 0 && discovered > 0`), the
+report carries a run-level note that the closure rests on presumed versions and a
+clean result over it is not an authoritative all-clear. Crucially this keys on
+`asserted == 0`, not on "the resolver was nil": it fires equally when the tier
+was not consulted (`-offline`/`-no-depsdev`) AND when deps.dev was consulted but
+unreachable — so a silently-failed asserted fetch cannot pass an entirely-presumed
+closure off as fact. (The per-node version-truth axis already marks each node
+presumed/asserted; this is the summary a reader needs so a presumed "0 findings"
+does not over-claim.) The note rides on a new `DataSourceCoverage.Note` field, so
+it is in the report, not only on stderr.
+
+Defaulting a network call on is a real departure from the air-gap-by-default
+posture (D-09/D-13), taken deliberately: a verdict presented as authoritative
+should rest on resolved facts. `-offline` remains a first-class, fully-honest
+mode — it simply discloses that its closure is presumed.

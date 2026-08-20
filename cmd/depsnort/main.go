@@ -148,9 +148,11 @@ scan flags:
                            versions it presumes are labelled and never gate
   -expand-depth int        stop expansion after N layers (0 = full depth); set 1
                            to step through the tree one layer at a time
-  -depsdev                 consult deps.dev for REAL resolved versions before
-                           presuming (asserted tier); opt-in — reaches an
-                           external service, and asserted versions still never gate
+  -no-depsdev              expand transitive layers on PRESUMED (guessed) versions
+                           only; by default the asserted tier consults deps.dev for
+                           REAL resolved versions (also disabled by -offline).
+                           Asserted versions still never gate; a presumed-only
+                           closure is disclosed as such in the report
   -no-expand               alias for -expand=false: only what the files state
   -no-install-surface      skip static install-hook extraction (VC-002b..e)
   -no-recursive            scan only the given directory, not its subdirectories
@@ -531,8 +533,35 @@ func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Decl
 		fmt.Fprintf(os.Stderr, "depsnort: expansion discovered %d transitive package(s) past the manifest (%d asserted, %d presumed, %d contested, %d unread)\n",
 			discovered+asserted, asserted, presumed, contested, unread)
 	}
+	// Presumed-only disclosure (OPU-12 D-2): when the asserted tier resolved
+	// NOTHING (asserted == 0) yet a transitive closure WAS discovered, state in the
+	// report that the closure rests on presumed versions — this tool's guesses,
+	// not resolved facts — so a clean result over it is not read as an
+	// authoritative all-clear. Keying on asserted==0 rather than "resolver was
+	// nil" is deliberate: it fires equally when the tier was not consulted
+	// (-offline / -no-depsdev) AND when deps.dev was consulted but unreachable, so
+	// a silently-failed asserted fetch cannot pass an entirely-presumed closure off
+	// as fact. The per-node version-truth axis marks each node; this is the
+	// run-level summary a reader needs.
+	if asserted == 0 && discovered > 0 {
+		cov.Note = presumedClosureNote
+		fmt.Fprintln(os.Stderr, "depsnort: NOTE - "+presumedClosureNote)
+	}
 	cov.Stats.Queried = discovered + asserted
 	return cov
+}
+
+// presumedClosureNote is the in-report statement attached to the expand data
+// source when the transitive closure was built entirely on presumed versions —
+// whether because the asserted tier was not consulted (-offline / -no-depsdev) or
+// because deps.dev was unreachable.
+const presumedClosureNote = "transitive closure expanded on PRESUMED versions only — no version was resolved as fact (deps.dev asserted tier not consulted via -offline/-no-depsdev, or unreachable); these versions are this tool's guesses, so a clean result over this closure is not an authoritative all-clear"
+
+// useAssertedTier reports whether a scan should consult the deps.dev asserted
+// tier: default on (OPU-12 D-2), suppressed by -no-depsdev, and impossible under
+// -offline (no network), where the walk falls back to presumed versions.
+func useAssertedTier(depsDev, noDepsDev, offline bool) bool {
+	return depsDev && !noDepsDev && !offline
 }
 
 // resolveResult is what one pass over a project list produced: the merged
@@ -613,7 +642,8 @@ func cmdScan(args []string) int {
 	expandTree := fs.Bool("expand", true, "discover transitive layers past what the lockfile recorded; presumed versions are labelled and never gate")
 	noExpand := fs.Bool("no-expand", false, "alias for -expand=false")
 	expandDepth := fs.Int("expand-depth", 0, "stop expansion after N layers (0 = full depth); 1 steps one layer at a time")
-	depsDev := fs.Bool("depsdev", false, "consult deps.dev for real resolved versions before presuming (the asserted tier); opt-in, reaches an external service")
+	depsDev := fs.Bool("depsdev", true, "consult deps.dev for REAL resolved versions before presuming (the asserted tier; default on) — a supply-chain verdict should rest on resolved facts, not guesses; -offline or -no-depsdev falls back to presumed")
+	noDepsDev := fs.Bool("no-depsdev", false, "do not consult deps.dev; expand transitive layers on presumed (guessed) versions only")
 	noInstallSurface := fs.Bool("no-install-surface", false, "skip static install-hook extraction")
 	recursive := fs.Bool("recursive", true, "walk the path as a workspace root: discover and merge every project beneath it (default; full-send)")
 	shallow := fs.Bool("no-recursive", false, "scan only the given directory, not its subdirectories (still co-scans every ecosystem in it)")
@@ -898,9 +928,13 @@ func cmdScan(args []string) int {
 				&composer.WalkSource{Deps: composerDeps, Index: composerIdx},
 				&gomod.WalkSource{Proxy: goProxy},
 			}
+			// The asserted tier (deps.dev) is default-on (OPU-12 D-2): a verdict
+			// presented as authoritative should rest on resolved facts, not this
+			// tool's presumed guesses. -offline (no network) and -no-depsdev both
+			// fall back to the presumed walk, which is then disclosed as such.
 			var resolver expand.Resolver
-			if *depsDev {
-				resolver = depsdev.New(datasource.NewCache(filepath.Join(*regCacheDir, "depsdev"), 24*time.Hour), *offline)
+			if useAssertedTier(*depsDev, *noDepsDev, *offline) {
+				resolver = depsdev.New(datasource.NewCache(filepath.Join(*regCacheDir, "depsdev"), 24*time.Hour), false)
 			}
 			expCov := expandTransitive(g, rootNodes, sources, resolver, *expandDepth)
 			if expCov.Stats.Gaps > 0 {
