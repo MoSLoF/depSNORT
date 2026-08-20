@@ -50,72 +50,44 @@ func (r *Resolver) Resolve(ctx context.Context, ecosystem, name, version string)
 		return expand.ResolvedGraph{}, false, nil
 	}
 
-	// requiresOf caches each module@version's parsed require set for this call;
-	// the goproxy client caches the raw fetches across the whole scan. A cached
-	// nil means "fetched, not found" so a 404 is not re-requested.
+	// fetch caches each module@version's `go` directive and require set for this
+	// call; the goproxy client caches the raw fetches across the whole scan. A
+	// cached ok=false means "fetched, not found" so a 404 is not re-requested.
 	type reqSet struct {
-		reqs []require
-		ok   bool
+		goVer string
+		reqs  []require
+		ok    bool
 	}
 	cache := map[string]reqSet{}
-	fetch := func(mod, ver string) ([]require, bool) {
+	fetch := func(mod, ver string) (string, []require, bool) {
 		key := mod + "@" + ver
 		if rs, hit := cache[key]; hit {
-			return rs.reqs, rs.ok
+			return rs.goVer, rs.reqs, rs.ok
 		}
 		raw, ok, err := r.Proxy.ModFile(ctx, mod, ver)
 		if err != nil || !ok {
-			cache[key] = reqSet{nil, false}
-			return nil, false
+			cache[key] = reqSet{"", nil, false}
+			return "", nil, false
 		}
-		_, reqs := scanGoMod(raw)
-		cache[key] = reqSet{reqs, true}
-		return reqs, true
+		_, goVer, reqs := scanGoMod(raw)
+		cache[key] = reqSet{goVer, reqs, true}
+		return goVer, reqs, true
 	}
 
 	// The queried coordinate must resolve, or there is nothing to assert.
-	if _, ok := fetch(name, version); !ok {
+	mainGoVer, _, ok := fetch(name, version)
+	if !ok {
 		return expand.ResolvedGraph{}, false, nil
 	}
 
-	// MVS selection: selected[modulePath] = the highest version any reachable
-	// module requires. A module path carries its own major-version suffix
+	// MVS selection: selected[modulePath] = the highest version any module in the
+	// build graph requires. A module path carries its own major-version suffix
 	// (foo vs foo/v2), so those are distinct keys by construction.
-	//
-	// Build the FULL module graph (OPU-14): read the go.mod of every
-	// module@version that appears ANYWHERE, not only the version finally selected.
-	// A superseded lower version can carry a HIGHER requirement for a third
-	// module, and classic (pre-1.17) MVS counts it — reading only selected
-	// versions undershoots that third module. Proven on shellz:
-	// cloud.google.com/go@v0.52.0 (superseded by v0.54.0, which drops the
-	// requirement) is the only requirer of google.golang.org/appengine@v1.6.5, so
-	// a selected-only read picked v1.5.0 and the tool would evaluate the wrong
-	// artifact for advisories. Reading superseded versions is the correct,
-	// conservative direction for a scanner: never evaluate a version LOWER than a
-	// real build resolves.
-	type coord struct{ mod, ver string }
 	selected := map[string]string{name: version}
-	graphSeen := map[coord]bool{{name, version}: true}
-	work := []coord{{name, version}}
-	for len(work) > 0 {
-		c := work[len(work)-1]
-		work = work[:len(work)-1]
-		reqs, ok := fetch(c.mod, c.ver)
-		if !ok {
-			continue
-		}
-		for _, req := range reqs {
-			if cur, exists := selected[req.module]; !exists || goVersionLess(cur, req.version) {
-				selected[req.module] = req.version
-			}
-			// Enqueue THIS exact version — its go.mod is read even when the module
-			// is selected higher elsewhere, which is the whole point.
-			rc := coord{req.module, req.version}
-			if !graphSeen[rc] {
-				graphSeen[rc] = true
-				work = append(work, rc)
-			}
-		}
+	if HasPrunedModuleGraph(mainGoVer) {
+		selectPruned(name, version, selected, fetch)
+	} else {
+		selectFullGraph(name, version, selected, fetch)
 	}
 
 	// Flatten: node 0 is the queried root, then modules in sorted order for
@@ -140,7 +112,7 @@ func (r *Resolver) Resolve(ctx context.Context, ecosystem, name, version string)
 	var edges []expand.ResolvedEdge
 	seen := map[[2]int]bool{}
 	for _, m := range order {
-		reqs, ok := fetch(m, selected[m])
+		_, reqs, ok := fetch(m, selected[m])
 		if !ok {
 			continue
 		}
@@ -158,6 +130,110 @@ func (r *Resolver) Resolve(ctx context.Context, ecosystem, name, version string)
 		}
 	}
 	return expand.ResolvedGraph{Nodes: nodes, Edges: edges}, true, nil
+}
+
+// modFetch is the go.mod reader the selection passes share: it returns a
+// module@version's own `go` directive and require set (ok=false on a 404).
+type modFetch func(mod, ver string) (goVer string, reqs []require, ok bool)
+
+// selectFullGraph is classic, unpruned minimal version selection for a main
+// module below go 1.17 (OPU-14). It reads the go.mod of EVERY module@version
+// that appears ANYWHERE in the graph, not only the version finally selected: a
+// superseded lower version can carry a HIGHER requirement for a third module,
+// and pre-1.17 MVS counts it, so a selected-only read undershoots that third
+// module. Proven on shellz: cloud.google.com/go@v0.52.0 (superseded by v0.54.0,
+// which drops the requirement) is the only requirer of
+// google.golang.org/appengine@v1.6.5 — a selected-only read picked v1.5.0 and
+// the tool would evaluate the wrong artifact. Reading superseded versions never
+// evaluates a version LOWER than a real build resolves.
+func selectFullGraph(name, version string, selected map[string]string, fetch modFetch) {
+	type coord struct{ mod, ver string }
+	seen := map[coord]bool{{name, version}: true}
+	work := []coord{{name, version}}
+	for len(work) > 0 {
+		c := work[len(work)-1]
+		work = work[:len(work)-1]
+		_, reqs, ok := fetch(c.mod, c.ver)
+		if !ok {
+			continue
+		}
+		for _, req := range reqs {
+			if cur, exists := selected[req.module]; !exists || goVersionLess(cur, req.version) {
+				selected[req.module] = req.version
+			}
+			// Enqueue THIS exact version — its go.mod is read even when the module
+			// is selected higher elsewhere, which is the whole point.
+			rc := coord{req.module, req.version}
+			if !seen[rc] {
+				seen[rc] = true
+				work = append(work, rc)
+			}
+		}
+	}
+}
+
+// selectPruned reproduces Go 1.17+ module-graph pruning statically (OPU-15) for a
+// main module that itself declares go 1.17+. Go prunes such a graph: it keeps the
+// full transitive requirements of dependencies at go <= 1.16, but only the
+// IMMEDIATE (direct) requirements of dependencies at go 1.17+. A go 1.17+ main's
+// own go.mod records every module needed to build the main module's packages and
+// tests, but the pruned build GRAPH is larger — the extra modules come from
+// reading the roots' go.mods under these rules. Walking the full unpruned graph
+// instead (selectFullGraph) over-approximates badly: opensnitch/daemon (go 1.25)
+// resolves to 384 modules unpruned vs Go's 64, selecting versions no real build
+// uses (e.g. cloud.google.com/go at the unpruned max instead of Go's v0.26.0).
+//
+// The pruning is a property of the PATH, not the module alone: once the walk
+// enters a go <= 1.16 dependency, that dependency's entire subtree is unpruned —
+// including its own transitive go 1.17+ modules. So the walk carries an "unpruned"
+// flag that, once set by a go <= 1.16 module, propagates to everything below it.
+// A go 1.17+ module reached only through go 1.17+ modules is a frontier: its
+// version and its direct requirements count toward the graph, but its
+// requirements' requirements are pruned away (never read) unless some go <= 1.16
+// module elsewhere pulls them back in.
+func selectPruned(name, version string, selected map[string]string, fetch modFetch) {
+	type coord struct{ mod, ver string }
+	type item struct {
+		c        coord
+		unpruned bool // inside a go<=1.16 subtree: expand this module's whole subtree
+	}
+	main := coord{name, version}
+	// Keyed by (coord, unpruned): a coord first reached as a pruned frontier may
+	// later be reached unpruned and must then expand its subtree, so both modes
+	// can each run once. Recording a version is idempotent (MVS max), so the only
+	// added work is the second expansion, which the frontier case needs.
+	seen := map[item]bool{{main, false}: true}
+	work := []item{{main, false}}
+	for len(work) > 0 {
+		it := work[len(work)-1]
+		work = work[:len(work)-1]
+		goVer, reqs, ok := fetch(it.c.mod, it.c.ver)
+		if !ok {
+			continue
+		}
+		// This module expands its children (reads their go.mods) when it is the
+		// main module (its requires are the graph roots), when it is already inside
+		// a go<=1.16 subtree, or when it is itself go<=1.16 (which starts one).
+		selfUnpruned := !HasPrunedModuleGraph(goVer)
+		expand := it.c == main || it.unpruned || selfUnpruned
+		for _, req := range reqs {
+			// Every immediate requirement of a READ module is a node in the pruned
+			// graph and counts toward MVS — including a go1.17+ module's frontier
+			// requirements, which Go keeps even though it prunes their subtrees.
+			if cur, exists := selected[req.module]; !exists || goVersionLess(cur, req.version) {
+				selected[req.module] = req.version
+			}
+			if !expand {
+				continue
+			}
+			childUnpruned := it.unpruned || selfUnpruned
+			child := item{coord{req.module, req.version}, childUnpruned}
+			if !seen[child] {
+				seen[child] = true
+				work = append(work, child)
+			}
+		}
+	}
 }
 
 // goVersionLess reports whether a < b under Go's version ordering. semver.Parse

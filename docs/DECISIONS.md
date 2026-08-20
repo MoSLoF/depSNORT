@@ -2522,6 +2522,11 @@ module's go directive — but never at the cost of re-introducing under-selectio
 
 ## D-74 — OPU-15: a go 1.17+ Go closure is disclosed as unpruned (interim mitigation)
 
+**Superseded by D-75.** This interim disclosure shipped before the pruning
+feature, per its own sunset clause ("removed once static pruning lands and the
+closure matches the oracle"). D-75 implements the pruning, so the closure is now
+exact and the `gomod-graph` over-approximation note is retired.
+
 D-73's MVS is unpruned pre-1.17 selection. Go 1.17 changed module resolution:
 for a main module that itself declares `go 1.17+`, Go PRUNES the module graph —
 it reads the full transitive requirements only of dependencies that are
@@ -2564,3 +2569,61 @@ not proven until the oracle agrees. This mitigation makes no resolution claim to
 prove — it discloses that the existing claim is an over-approximation — so it
 ships now; the pruning feature that changes resolution is held for its own
 oracle-proven cycle.
+
+## D-75 — OPU-15: static Go 1.17+ module-graph pruning (the feature)
+
+D-74 was the interim disclosure; this is the feature it deferred. The asserted Go
+resolver now reproduces Go 1.17's pruned module graph statically — no `go`
+execution, only the `go` directives that go.mod files carry as text (D-04) — so a
+`go 1.17+` main's resolved closure matches `go list -m all` exactly instead of
+over-approximating.
+
+The resolver switches on the queried main module's own `go` directive
+(gomod.HasPrunedModuleGraph): a pre-1.17 main keeps classic unpruned full-graph
+MVS (D-73, `selectFullGraph`, unchanged); a `go 1.17+` main runs pruned selection
+(`selectPruned`). Pruning is a property of the PATH, not the module: the walk
+carries an "unpruned" flag that a `go <= 1.16` dependency sets and that then
+propagates to its entire subtree — so a `go <= 1.16` module contributes its full
+transitive closure (including that closure's own `go 1.17+` modules), while a
+`go 1.17+` module reached only through `go 1.17+` modules is a frontier whose
+version and direct requirements count toward MVS but whose requirements'
+requirements are pruned away unless some `go <= 1.16` module pulls them back in.
+MVS then takes the max version per module over that pruned edge set — one selected
+version per module, a build list, not a union of every version seen.
+
+Both failure modes the hand-off disproved are avoided by construction:
+go.mod-as-closed under-selects (it is the pruned roots, not the whole graph) and
+global-max-collapse over-selects (it reads deep requirements Go's pruned graph
+never walks — e.g. cloud.google.com/go's unpruned max vs Go's v0.26.0). Only
+pruning reproduces the build list, and it was proven against the `go list -m all`
+oracle in-sandbox:
+
+```
+opensnitch/daemon (go 1.25.0):  64/64 modules exact, incl cloud.google.com/go v0.26.0
+xtls/xray-core    (go 1.26):   142/142 modules exact
+spf13/cobra       (go 1.15):     6/6 modules exact  (pre-1.17: selectFullGraph, no regression)
+```
+
+Parser fix (found by the proof, not incidental): the modfile grammar lets a module
+path or version be a quoted string literal, and real modules use it
+(`kr/text@v0.2.0` writes `require "github.com/creack/pty" v1.1.9`; `gopkg.in/yaml.v2`
+writes `module "gopkg.in/yaml.v2"`). The parser left the quotes on, so a quoted
+path became a phantom module key distinct from its unquoted form — a duplicate
+node at the wrong version. This diverged xray-core by exactly two modules until
+`modToken` unquoted every path/version token. It is a general Go-resolution
+correctness fix, independent of pruning.
+
+The D-74 `gomod-graph` over-approximation note is removed: with pruning the
+asserted closure is exact, and when the asserted tier is off (offline /
+-no-depsdev) the Go closure is presumed and already disclosed as presumed-only
+(D-70), so no Go-specific caveat is layered on top. The main module's `go`
+directive is still recorded on the root node (gomod.AttrGoDirective) as
+provenance. Edges remain best-effort at the selected versions; the acceptance
+criteria and the checks that run on the graph are about node membership and
+versions, which now match the oracle.
+
+Process: this change DOES alter resolution, so per the standing rule it did not
+ship until the oracle agreed — three real repos (a heavy go 1.25 divergence case,
+a heavy go 1.26 case, and a pre-1.17 no-regression case), each matched
+module-for-module and version-for-version against `go list -m all`, plus a
+synthetic unit case that separates correct pruning from both disproven shortcuts.

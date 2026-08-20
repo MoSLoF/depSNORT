@@ -59,7 +59,7 @@ func (w *WalkSource) Declared(ctx context.Context, coords []datasource.Coord) (m
 		if !ok {
 			continue // not on the proxy (a replace/local module): a frontier
 		}
-		_, requires := scanGoMod(raw)
+		_, _, requires := scanGoMod(raw)
 		decls := make([]expand.Declaration, 0, len(requires))
 		for _, r := range requires {
 			// A module's own go.mod lists its full transitive minimum set in

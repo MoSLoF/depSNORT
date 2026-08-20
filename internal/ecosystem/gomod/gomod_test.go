@@ -104,9 +104,9 @@ func TestGoDirectivePruning(t *testing.T) {
 	}
 }
 
-// TestGoDirectiveExtraction confirms goDirective reads the `go` line out of go.mod
+// TestGoDirectiveExtraction confirms scanGoMod reads the `go` line out of go.mod
 // text (single- and multi-digit minors) and returns "" when there is none — the
-// input that makes the disclosure conservatively silent.
+// input that makes the disclosure conservatively silent and drives pruning.
 func TestGoDirectiveExtraction(t *testing.T) {
 	cases := []struct {
 		name string
@@ -119,8 +119,8 @@ func TestGoDirectiveExtraction(t *testing.T) {
 		{"leading-space", "module x\n  go 1.21 \n", "1.21"},
 	}
 	for _, c := range cases {
-		if got := goDirective([]byte(c.raw)); got != c.want {
-			t.Errorf("%s: goDirective = %q, want %q", c.name, got, c.want)
+		if _, got, _ := scanGoMod([]byte(c.raw)); got != c.want {
+			t.Errorf("%s: scanGoMod goVersion = %q, want %q", c.name, got, c.want)
 		}
 	}
 }

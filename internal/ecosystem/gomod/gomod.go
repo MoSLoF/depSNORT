@@ -33,14 +33,15 @@ import (
 const goModName = "go.mod"
 
 // AttrGoDirective is the root-node attribute holding a Go main module's `go`
-// directive (e.g. "1.25"), set by the adapter and read by the report layer to
-// decide the module-graph-pruning disclosure (OPU-15).
+// directive (e.g. "1.25"), recorded by the adapter as provenance — it is what
+// tells a reader (and the resolver) that Go 1.17+ module-graph pruning applies to
+// this main module's closure (OPU-15).
 const AttrGoDirective = "gomod.go"
 
-// HasPrunedModuleGraph reports whether a main module's `go` directive triggers
-// Go 1.17+ module-graph pruning. depsnort resolves the UNPRUNED graph, so such a
-// module's Go closure is a deliberate over-approximation, disclosed in the report
-// until static pruning lands (OPU-15).
+// HasPrunedModuleGraph reports whether a `go` directive triggers Go 1.17+
+// module-graph pruning. The asserted Go resolver uses it to switch between classic
+// full-graph MVS (pre-1.17 mains) and static pruned selection (go 1.17+ mains),
+// reproducing `go list -m all` for either (OPU-15).
 func HasPrunedModuleGraph(goDirective string) bool { return goDirectiveAtLeast(goDirective, 1, 17) }
 
 // Adapter implements ecosystem.Adapter for Go modules.
@@ -93,7 +94,7 @@ type require struct {
 }
 
 func parseGoMod(path string, raw []byte) (*graph.Graph, error) {
-	modName, requires := scanGoMod(raw)
+	modName, goVersion, requires := scanGoMod(raw)
 	if modName == "" {
 		modName = filepath.Base(filepath.Dir(path))
 	}
@@ -111,11 +112,10 @@ func parseGoMod(path string, raw []byte) (*graph.Graph, error) {
 	if root.Attr == nil {
 		root.Attr = map[string]string{}
 	}
-	// Record the `go` directive: a go 1.17+ main module has a PRUNED module graph,
-	// so its expanded closure is a deliberate over-approximation, disclosed at the
-	// report level (OPU-15) until static pruning lands.
-	if gd := goDirective(raw); gd != "" {
-		root.Attr[AttrGoDirective] = gd
+	// Record the `go` directive so the report/resolver layer can apply Go 1.17+
+	// module-graph pruning (OPU-15): a go 1.17+ main module's graph is pruned.
+	if goVersion != "" {
+		root.Attr[AttrGoDirective] = goVersion
 	}
 
 	if len(requires) == 0 {
@@ -142,12 +142,14 @@ func parseGoMod(path string, raw []byte) (*graph.Graph, error) {
 	return g, nil
 }
 
-// scanGoMod extracts the module path and the require set. It handles both the
-// block form `require ( ... )` and single-line `require mod v1.2.3`, and the
-// "// indirect" marker. `replace`, `exclude`, and `retract` directives are
-// ignored — they are policy, not the resolved set, and this adapter reads what
-// go.mod pins.
-func scanGoMod(raw []byte) (module string, requires []require) {
+// scanGoMod extracts the module path, the `go` directive (e.g. "1.25", or "" if
+// absent), and the require set. It handles both the block form `require ( ... )`
+// and single-line `require mod v1.2.3`, and the "// indirect" marker. `replace`,
+// `exclude`, and `retract` directives are ignored — they are policy, not the
+// resolved set, and this adapter reads what go.mod pins. The `go` directive is
+// the switch for module-graph pruning (OPU-15): a module at go 1.17+ contributes
+// only its direct requirements to a pruned main's graph, not its full closure.
+func scanGoMod(raw []byte) (module, goVersion string, requires []require) {
 	sc := bufio.NewScanner(bytes.NewReader(raw))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	inRequireBlock := false
@@ -165,7 +167,9 @@ func scanGoMod(raw []byte) (module string, requires []require) {
 		}
 		switch {
 		case strings.HasPrefix(line, "module "):
-			module = strings.TrimSpace(strings.TrimPrefix(line, "module "))
+			module = modToken(strings.TrimPrefix(line, "module "))
+		case strings.HasPrefix(line, "go "):
+			goVersion = strings.TrimSpace(strings.TrimPrefix(line, "go "))
 		case line == "require (":
 			inRequireBlock = true
 		case inRequireBlock && line == ")":
@@ -181,23 +185,7 @@ func scanGoMod(raw []byte) (module string, requires []require) {
 		}
 	}
 	sort.Slice(requires, func(i, j int) bool { return requires[i].module < requires[j].module })
-	return module, requires
-}
-
-// goDirective returns the `go` directive version of a go.mod (e.g. "1.25"), or
-// "" if absent. It is the switch for module-graph pruning: Go 1.17+ prunes the
-// graph, so a go 1.17+ main module's resolved closure is a deliberate
-// over-approximation until static pruning lands (OPU-15).
-func goDirective(raw []byte) string {
-	sc := bufio.NewScanner(bytes.NewReader(raw))
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if rest, ok := strings.CutPrefix(line, "go "); ok {
-			return strings.TrimSpace(rest)
-		}
-	}
-	return ""
+	return module, goVersion, requires
 }
 
 // goDirectiveAtLeast reports whether a `go` directive string (e.g. "1.25",
@@ -231,9 +219,27 @@ func parseRequireLine(line string) (require, bool) {
 	if len(fields) < 2 {
 		return require{}, false
 	}
-	mod, ver := fields[0], fields[1]
+	mod, ver := modToken(fields[0]), modToken(fields[1])
 	if mod == "" || !strings.HasPrefix(ver, "v") {
 		return require{}, false
 	}
 	return require{module: mod, version: ver, indirect: indirect}, true
+}
+
+// modToken unquotes a go.mod token. The modfile grammar allows a module path or
+// version to be written as a quoted string literal — double-quoted with Go escape
+// sequences, or backquoted raw — and real modules use it (e.g.
+// `module "gopkg.in/yaml.v2"`, `require "github.com/creack/pty" v1.1.9`). Left
+// quoted, such a path becomes a phantom module key distinct from its unquoted
+// form, inflating the graph with a duplicate at the wrong version. A bare token
+// is returned unchanged.
+func modToken(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '`') {
+		if uq, err := strconv.Unquote(s); err == nil {
+			return uq
+		}
+		return strings.Trim(s, "\"`")
+	}
+	return s
 }
