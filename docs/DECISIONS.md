@@ -2802,3 +2802,54 @@ transient from 404 (an `*IncompleteResolution` on the former, `nil` on the latte
 and the walker marks the node and degrades coverage. Both regression tests were
 shown to have teeth by mutation: collapsing transient back into 404 fails the
 transient tests while the 404 test stays green.
+
+## D-79 — OPU-16: advisory/typosquat scoping is per-node, and per-node is correct (investigation, no fix)
+
+The OPU-16 hand-off asked one question and forbade a fix until it was answered
+against a planted advisory: do the advisory (VC-008) and typosquat (VC-006) checks
+evaluate EVERY version present in the graph (per-node), or only the version a real
+build selects (per-selected-version)? The worry was that a superseded, never-built
+version carried as a node would draw a finding against an artifact the project does
+not ship.
+
+Answer: scoping is per-node / version-specific, end to end. `prefetchAdvisories`
+queries OSV for every non-root node's exact (ecosystem, name, version) and keys the
+result by node ID; VC-008, VC-001 and VC-006 each iterate `ctx.Graph.SortedNodes()`
+and evaluate per node. A planted advisory confirms it empirically
+(`vc008_opu16_test.go`): an advisory on `leftpad@1.0.0` where the graph also holds
+`leftpad@2.0.0` fires on exactly the 1.0.0 node and no other; advisories on both
+versions yield one finding each, with no per-name collapse that could mask a
+version-specific CVE.
+
+Per-node is the correct scoping, because the graph's nodes ARE the selected and
+observed versions — there is no separate "build" to scope to. The exposure the
+hand-off feared was real, but it was a symptom of the pre-OPU-15 UNION
+over-approximation, which carried a module at many superseded versions as extra
+nodes (opensnitch/daemon: 11 versions of golang.org/x/sys, 8 of x/net). D-75 and
+D-77 removed it: the resolver now emits one node per module at its selected
+build-list version (opensnitch re-measured post-D-77: 64 nodes, zero multi-version),
+and the MVS reads superseded versions' go.mods (D-73) WITHOUT emitting them as
+nodes. The D-77 "orphans" are not a counterexample — they are modules IN the build
+list at their correct selected version, missing only a root->node edge, so scanning
+them per-node is right. So the very over-approximation OPU-15 fought was also the
+source of OPU-16's feared false-positive surface; closing the former closed the
+latter.
+
+Two residuals stand recorded, neither warranting the fix the hand-off held back:
+  1. Presumed-tier nodes are advisory-scanned per-node like any other, so a
+     presumed (guessed) version could draw an advisory that a different real build
+     would not. This is not silent: presumed is a disclosed, non-gating truth tier
+     (D-70, the version-truth axis), so such a finding already rests on a labelled
+     guess, and demoting or hiding it would fight D-24's degrade-honestly rule.
+  2. VC-006 is name-based but emits per node, so a genuinely multi-version graph
+     (distinct roots pinning different versions of one squatted name) would surface
+     one typosquat finding per version node — duplicate report noise, not a
+     false positive, and it cannot arise from a single resolved root post-OPU-15.
+
+Recommendation: no fix. Per-node scoping is correct for the resolved graph, and the
+feared exposure was resolved as a side effect of OPU-15. If the field ever shows a
+presumed-version advisory or a cross-version typosquat duplicate that matters in a
+real report, revisit as its own scoped item — but do not pre-emptively re-scope a
+correct behavior. Per the standing rule, this hand-off made no resolution change, so
+it ships as an investigation record plus the planted-advisory regression that pins
+the confirmed behavior; nothing was changed that an oracle needs to agree with.
