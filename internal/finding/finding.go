@@ -100,6 +100,11 @@ type Finding struct {
 	Title        string    `json:"title"`
 	Evidence     string    `json:"evidence,omitempty"`
 	Remediation  string    `json:"remediation,omitempty"`
+	// DepPath is the shortest dependency chain from a project root to the subject
+	// node — [root, …, node] — so a deep transitive finding is traceable to why
+	// it is present (OPU-12 D-3). Empty for a root or a node reachable by no
+	// depends-on edge (e.g. an install-hook subject).
+	DepPath []string `json:"dep_path,omitempty"`
 }
 
 // Score composes severity, confidence, and recency into a single ordering

@@ -116,3 +116,38 @@ func TestFullyConnectedGraphHasNoOrphans(t *testing.T) {
 		t.Errorf("orphans = %d, want 0", n)
 	}
 }
+
+// TestPathToNode locks in OPU-12 D-3: the shortest root→node dependency chain,
+// deterministic, empty for unreachable or root nodes.
+func TestPathToNode(t *testing.T) {
+	g := New()
+	for _, id := range []string{"root", "a", "b", "c", "island"} {
+		g.AddNode(&Node{ID: id, Name: id})
+	}
+	g.MarkRoot("root")
+	g.AddEdge("root", "a", EdgeDependsOn)
+	g.AddEdge("a", "b", EdgeDependsOn)
+	g.AddEdge("b", "c", EdgeDependsOn)
+	g.AddEdge("root", "c", EdgeDependsOn) // a shorter path to c also exists
+
+	// Shortest path to c is the direct root→c edge, not root→a→b→c.
+	if got := g.PathToNode("c"); len(got) != 2 || got[0] != "root" || got[1] != "c" {
+		t.Errorf("PathToNode(c) = %v, want [root c] (shortest)", got)
+	}
+	// Deep node b: root→a→b.
+	if got := g.PathToNode("b"); len(got) != 3 || got[0] != "root" || got[1] != "a" || got[2] != "b" {
+		t.Errorf("PathToNode(b) = %v, want [root a b]", got)
+	}
+	// A node reachable by no depends-on edge is unreachable.
+	if got := g.PathToNode("island"); got != nil {
+		t.Errorf("PathToNode(island) = %v, want nil (unreachable)", got)
+	}
+	// The root itself has a length-1 chain (no path TO cross); callers skip len<=1.
+	if got := g.PathToNode("root"); len(got) != 1 || got[0] != "root" {
+		t.Errorf("PathToNode(root) = %v, want [root]", got)
+	}
+	// A nonexistent node yields nil.
+	if got := g.PathToNode("nope"); got != nil {
+		t.Errorf("PathToNode(nope) = %v, want nil", got)
+	}
+}

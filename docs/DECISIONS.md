@@ -2417,3 +2417,26 @@ Defaulting a network call on is a real departure from the air-gap-by-default
 posture (D-09/D-13), taken deliberately: a verdict presented as authoritative
 should rest on resolved facts. `-offline` remains a first-class, fully-honest
 mode — it simply discloses that its closure is presumed.
+
+## D-71 — OPU-12 D-3: findings carry their root→node dependency path
+
+With the full transitive closure now scanned (D-1 breadth, D-2 asserted depth),
+a finding can sit 6+ hops down the resolved graph, in a package nobody declared
+and nobody reads. Its first question is "why is this even here?" The graph
+carried the edges; the emitters did not surface the chain.
+
+Each finding now carries `DepPath` — the shortest dependency chain from a project
+root to the subject node, `[root, …, node]`, computed by multi-source BFS over
+depends-on edges (`graph.PathToNode`). It is attached to the findings slice
+BEFORE the verdict runs, so every downstream copy (the ranked `res.Findings` and
+each `graph.Node.Findings`) inherits the same value. JSON emits it as `dep_path`
+(the authoritative record); SARIF carries it as a `dep_path` result property and
+the PDF as a `Path:` line. It is empty for a root or a node reachable by no
+depends-on edge (an install-hook subject), so callers skip a length-≤1 chain.
+
+The path keys on graph topology only, never on content, and the BFS is made
+deterministic (sorted roots and adjacency) to keep a CI diff reproducible (D-09).
+The handoff's richer form — prefixing the chain with the DECLARING EXTRA
+(train → torch → …) — needs per-edge extra provenance that D-1 did not thread
+through declared deps into the graph; it is a clean follow-on, and the
+dependency-path core (the actionable "why is it here") lands here.
