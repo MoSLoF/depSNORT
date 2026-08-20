@@ -564,6 +564,22 @@ func useAssertedTier(depsDev, noDepsDev, offline bool) bool {
 	return depsDev && !noDepsDev && !offline
 }
 
+// goUnprunedNote is the in-report caveat when a Go main module declares go 1.17+.
+// Go PRUNES such a module's graph; depsnort resolves the unpruned graph, so the
+// Go closure over-approximates the real build (OPU-15).
+const goUnprunedNote = "a Go main module declares go 1.17+, whose module graph Go PRUNES; depsnort resolves the UNPRUNED graph, so the Go closure may include modules and versions not in the real build — findings on gomod nodes need build-list confirmation (go list -m all) until static pruning lands (OPU-15)"
+
+// goMainNeedsPruningDisclosure reports whether the graph has a Go main module
+// whose go directive triggers Go 1.17+ module-graph pruning.
+func goMainNeedsPruningDisclosure(g *graph.Graph) bool {
+	for _, id := range g.Roots {
+		if n := g.Get(id); n != nil && n.Ecosystem == "gomod" && gomod.HasPrunedModuleGraph(n.Attr[gomod.AttrGoDirective]) {
+			return true
+		}
+	}
+	return false
+}
+
 // assertedResolver routes asserted resolution by ecosystem (OPU-13 D-2). Go is
 // resolved by a native goproxy MVS resolver because deps.dev's :dependencies
 // endpoint 404s for every Go coordinate; every other supported ecosystem is
@@ -982,6 +998,17 @@ func cmdScan(args []string) int {
 				dataSourceGaps = append(dataSourceGaps, expCov.Name)
 			}
 			info.DataSources = append(info.DataSources, expCov)
+
+			// OPU-15 interim disclosure: a Go main module at go 1.17+ has a PRUNED
+			// module graph, but depsnort resolves the UNPRUNED graph — so its Go
+			// closure over-approximates the real build (extra modules and versions).
+			// Disclose it the way the presumed-only closure is disclosed (D-2), so an
+			// over-approximation is never presented as the build. Removed once static
+			// pruning (OPU-15 §3) lands and the closure matches `go list -m all`.
+			if goMainNeedsPruningDisclosure(g) {
+				info.DataSources = append(info.DataSources, emit.DataSourceCoverage{Name: "gomod-graph", Note: goUnprunedNote})
+				fmt.Fprintln(os.Stderr, "depsnort: NOTE - "+goUnprunedNote)
+			}
 		}
 	} else {
 		// -no-registry means requires_dist was never even fetched: a flat PyPI

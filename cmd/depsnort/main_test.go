@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"ihbv.io/depsnort/internal/ecosystem/gomod"
 	"ihbv.io/depsnort/internal/expand"
+	"ihbv.io/depsnort/internal/graph"
 )
 
 // TestUseAssertedTier locks in OPU-12 D-2: the deps.dev asserted tier is default
@@ -74,5 +76,46 @@ func TestAssertedResolverRouting(t *testing.T) {
 	}
 	if a.NameFor("pypi") != "deps.dev" {
 		t.Errorf("NameFor(pypi) = %q, want deps.dev", a.NameFor("pypi"))
+	}
+}
+
+// goRoot builds a one-node graph with a gomod root carrying the given `go`
+// directive, mirroring what the adapter records on the root.
+func goRoot(eco, directive string) *graph.Graph {
+	g := graph.New()
+	id := "root"
+	attr := map[string]string{}
+	if directive != "" {
+		attr[gomod.AttrGoDirective] = directive
+	}
+	g.AddNode(&graph.Node{ID: id, Ecosystem: eco, Name: "main", Version: "0.0.0", Attr: attr})
+	g.MarkRoot(id)
+	return g
+}
+
+// TestGoMainNeedsPruningDisclosure locks in the OPU-15 interim mitigation gate:
+// the disclosure fires when a gomod root declares go 1.17+ (its unpruned closure
+// over-approximates the real build), and stays silent for pre-1.17 Go mains and
+// for non-gomod roots — so an over-approximation is never presented as the build,
+// and no other ecosystem is wrongly tagged.
+func TestGoMainNeedsPruningDisclosure(t *testing.T) {
+	cases := []struct {
+		name string
+		g    *graph.Graph
+		want bool
+	}{
+		{"go1.25 gomod main → disclose", goRoot("gomod", "1.25.0"), true},
+		{"go1.17 boundary → disclose", goRoot("gomod", "1.17"), true},
+		{"go1.16 gomod main → silent", goRoot("gomod", "1.16"), false},
+		{"no directive → silent", goRoot("gomod", ""), false},
+		{"go1.25 but pypi root → silent", goRoot("pypi", "1.25.0"), false},
+	}
+	for _, c := range cases {
+		if got := goMainNeedsPruningDisclosure(c.g); got != c.want {
+			t.Errorf("%s: goMainNeedsPruningDisclosure = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if goUnprunedNote == "" {
+		t.Error("goUnprunedNote must be a non-empty in-report caveat")
 	}
 }
