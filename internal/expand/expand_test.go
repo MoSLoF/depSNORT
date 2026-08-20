@@ -652,3 +652,76 @@ func TestWholeRootResolutionReplacesUnion(t *testing.T) {
 		t.Errorf("X truth = %q, want asserted", n.VersionTruth())
 	}
 }
+
+// stubIncompleteResolver is a LocalRootResolver that returns a real partial build
+// list AND an *IncompleteResolution flagging one node's subtree as unread — the
+// shape a gomod resolver produces on a transient go.mod fetch failure (OPU-17).
+type stubIncompleteResolver struct {
+	whole  expand.ResolvedGraph
+	unread []expand.ResolvedRef
+}
+
+func (*stubIncompleteResolver) Name() string { return "go-proxy-stub" }
+
+func (*stubIncompleteResolver) Resolve(_ context.Context, _, _, _ string) (expand.ResolvedGraph, bool, error) {
+	return expand.ResolvedGraph{}, false, nil
+}
+
+func (s *stubIncompleteResolver) ResolveLocalRoot(_ context.Context, _ expand.LocalRoot) (expand.ResolvedGraph, bool, error) {
+	return s.whole, true, &expand.IncompleteResolution{Unread: s.unread}
+}
+
+// TestIncompleteResolutionMarksUnreadAndDegradesCoverage pins OPU-17 at the
+// walker: when a resolver returns a partial build list with an *IncompleteResolution,
+// ExpandRoot KEEPS the partial graph (no discard, no union fallback), marks the
+// unread node a frontier with the subtree-unread reason, and counts it as unread
+// so coverage degrades visibly. A transient network hole must never pass as a
+// clean, complete resolution.
+func TestIncompleteResolutionMarksUnreadAndDegradesCoverage(t *testing.T) {
+	id := func(name, ver string) string { return "pkg:gomod/" + name + "@" + ver }
+	ref := func(name, ver string) expand.ResolvedRef {
+		return expand.ResolvedRef{Ecosystem: "gomod", Name: name, Version: ver}
+	}
+	resolver := &stubIncompleteResolver{
+		whole: expand.ResolvedGraph{
+			Nodes: []expand.ResolvedRef{ref("M", "0.0.0"), ref("A", "v1.0.0"), ref("B", "v1.0.0")},
+			Edges: []expand.ResolvedEdge{{From: 0, To: 1}, {From: 0, To: 2}},
+		},
+		unread: []expand.ResolvedRef{ref("A", "v1.0.0")}, // A's subtree could not be read
+	}
+
+	g := graph.New()
+	root := g.AddNode(&graph.Node{ID: id("M", "0.0.0"), Kind: graph.KindPackage, Ecosystem: "gomod", Name: "M", Version: "0.0.0"})
+	root.SetSource(graph.SourcePath, "")
+	g.MarkRoot(root.ID)
+	for _, d := range [][2]string{{"A", "v1.0.0"}, {"B", "v1.0.0"}} {
+		dep := g.AddNode(&graph.Node{ID: id(d[0], d[1]), Kind: graph.KindPackage, Ecosystem: "gomod", Name: d[0], Version: d[1], Depth: 1})
+		g.AddEdge(root.ID, dep.ID, graph.EdgeDependsOn)
+	}
+
+	res, err := expand.NewWalker().ExpandRoot(context.Background(), g, root, expand.Options{Resolver: resolver})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The partial build list is kept.
+	if g.Get(id("A", "v1.0.0")) == nil || g.Get(id("B", "v1.0.0")) == nil {
+		t.Fatal("partial build list was discarded; a transient hole must not throw away resolved work")
+	}
+	// The unread node is marked, both as a frontier and with the explicit reason.
+	a := g.Get(id("A", "v1.0.0"))
+	if a.Attr[expand.AttrSubtreeUnread] != "transient-fetch-failure" {
+		t.Errorf("A subtree-unread attr = %q, want %q", a.Attr[expand.AttrSubtreeUnread], "transient-fetch-failure")
+	}
+	if a.Attr[expand.AttrFrontier] != "true" {
+		t.Error("A is not a frontier: an unread subtree must read as a stopped walk, not a confident leaf")
+	}
+	// B, fully resolved, is NOT marked.
+	if b := g.Get(id("B", "v1.0.0")); b.Attr[expand.AttrSubtreeUnread] != "" {
+		t.Error("B wrongly marked unread: only the transiently-failed node should be")
+	}
+	// Coverage degrades: the unread node is counted.
+	if res.Unread < 1 {
+		t.Errorf("res.Unread = %d, want >= 1 (a transient hole must degrade coverage visibly)", res.Unread)
+	}
+}

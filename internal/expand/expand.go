@@ -668,6 +668,9 @@ func (w *Walker) assertDirectSubtrees(ctx context.Context, g *graph.Graph, root 
 
 	for _, dep := range deps {
 		ar, err := w.AssertRoot(ctx, g, dep, r)
+		// Fold an unread hole into coverage even when nothing else was asserted: a
+		// dependency whose subtree could not be read is still a visible gap (OPU-17).
+		res.Unread += ar.Unread
 		if err != nil || !ar.Resolved || ar.Asserted == 0 {
 			continue
 		}

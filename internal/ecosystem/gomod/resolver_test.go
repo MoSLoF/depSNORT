@@ -2,6 +2,7 @@ package gomod
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"ihbv.io/depsnort/internal/expand"
@@ -15,6 +16,23 @@ func (f fakeProxy) ModFile(_ context.Context, module, version string) ([]byte, b
 		return []byte(s), true, nil
 	}
 	return nil, false, nil
+}
+
+// flakyProxy serves canned go.mod text, but a value of the sentinel "ERR" returns
+// a TRANSIENT error (err != nil, ok=false) rather than a genuine 404 (ok=false,
+// err == nil). This models the goproxy client's outGap vs outNotFound distinction,
+// which OPU-17 turns on.
+type flakyProxy map[string]string
+
+func (f flakyProxy) ModFile(_ context.Context, module, version string) ([]byte, bool, error) {
+	v, ok := f[module+"@"+version]
+	if !ok {
+		return nil, false, nil // genuine 404
+	}
+	if v == "ERR" {
+		return nil, false, errors.New("go-proxy: connection reset (transient)")
+	}
+	return []byte(v), true, nil
 }
 
 // TestResolverMVSDiamond locks in OPU-13 D-1: when two paths require different
@@ -433,5 +451,100 @@ func TestResolveLocalRootDeclinesNonGomod(t *testing.T) {
 		Ecosystem: "gomod", Name: "M",
 	}); ok {
 		t.Error("ResolveLocalRoot must decline a root with no requires")
+	}
+}
+
+// asIncomplete returns the *expand.IncompleteResolution an error wraps, or nil.
+func asIncomplete(err error) *expand.IncompleteResolution {
+	var inc *expand.IncompleteResolution
+	if errors.As(err, &inc) {
+		return inc
+	}
+	return nil
+}
+
+// TestResolverTransientFetchFailureSignalsIncomplete locks in OPU-17: a TRANSIENT
+// go.mod fetch failure (network/transport) must NOT be conflated with a clean
+// resolution. The affected module's subtree is unread, so Resolve returns the
+// partial graph AND an *IncompleteResolution naming it — never err==nil, which
+// would present a silently-shrunk build list as complete.
+//
+//	R ─> A v1.0.0 (go.mod fetch TRANSIENTLY fails) ─> B v1.0.0 (never reached)
+//
+// A is in the build list (recorded from R's require before the fetch), but B is
+// unknowable — the point is that the incompleteness is REPORTED, not that B is
+// recovered.
+func TestResolverTransientFetchFailureSignalsIncomplete(t *testing.T) {
+	proxy := flakyProxy{
+		"R@v1.0.0": "module R\ngo 1.16\nrequire A v1.0.0\n",
+		"A@v1.0.0": "ERR", // transient failure fetching A's go.mod
+		"B@v1.0.0": "module B\ngo 1.16\n",
+	}
+	rg, ok, err := NewResolver(proxy).Resolve(context.Background(), "gomod", "R", "v1.0.0")
+	if !ok {
+		t.Fatal("Resolve returned ok=false; a transient failure below the root must still yield the partial graph")
+	}
+	inc := asIncomplete(err)
+	if inc == nil {
+		t.Fatalf("err = %v, want *IncompleteResolution (a transient failure must be signalled, not silent)", err)
+	}
+	if len(inc.Unread) != 1 || inc.Unread[0].Name != "A" || inc.Unread[0].Version != "v1.0.0" {
+		t.Errorf("Unread = %+v, want exactly [A v1.0.0]", inc.Unread)
+	}
+	names := map[string]bool{}
+	for _, n := range rg.Nodes {
+		names[n.Name] = true
+	}
+	if !names["A"] {
+		t.Error("A missing: the partial build list should still contain the module that failed")
+	}
+}
+
+// TestResolver404IsNotIncomplete is the discriminating other half: a GENUINE 404
+// (the module truly has no record) is not a transient failure — Resolve returns
+// err==nil. Same shrunk graph as the transient case, but honestly a "not found",
+// not an "unread". Without this, the fix could cry incomplete on every 404.
+func TestResolver404IsNotIncomplete(t *testing.T) {
+	proxy := flakyProxy{
+		"R@v1.0.0": "module R\ngo 1.16\nrequire A v1.0.0\n",
+		// A@v1.0.0 absent entirely -> genuine 404 (ok=false, err==nil).
+	}
+	_, ok, err := NewResolver(proxy).Resolve(context.Background(), "gomod", "R", "v1.0.0")
+	if !ok {
+		t.Fatal("Resolve returned ok=false; a 404 below the root must still yield the partial graph")
+	}
+	if err != nil {
+		t.Errorf("err = %v, want nil: a genuine 404 is not an incomplete resolution", err)
+	}
+}
+
+// TestResolveLocalRootTransientFailureSignalsIncomplete is the same guarantee on
+// the OPU-15-exact path (the one a real `depsnort scan` of a local go.mod takes):
+// a transient failure while resolving the whole build list must surface as
+// *IncompleteResolution, so the scan reports a gap instead of shrinking silently.
+func TestResolveLocalRootTransientFailureSignalsIncomplete(t *testing.T) {
+	proxy := flakyProxy{
+		"A@v1.0.0": "module A\ngo 1.16\nrequire C v1.0.0\n",
+		"C@v1.0.0": "ERR", // transient failure deep in the build list
+		"D@v1.0.0": "module D\ngo 1.16\n",
+	}
+	root := expand.LocalRoot{
+		Ecosystem: "gomod", Name: "M", Version: "0.0.0",
+		Requires: []expand.ResolvedRef{
+			{Ecosystem: "gomod", Name: "A", Version: "v1.0.0"},
+			{Ecosystem: "gomod", Name: "D", Version: "v1.0.0"},
+		},
+		Attr: map[string]string{AttrGoDirective: "1.16"},
+	}
+	_, ok, err := NewResolver(proxy).ResolveLocalRoot(context.Background(), root)
+	if !ok {
+		t.Fatal("ResolveLocalRoot returned ok=false; a transient failure must still yield the partial build list")
+	}
+	inc := asIncomplete(err)
+	if inc == nil {
+		t.Fatalf("err = %v, want *IncompleteResolution", err)
+	}
+	if len(inc.Unread) != 1 || inc.Unread[0].Name != "C" {
+		t.Errorf("Unread = %+v, want exactly [C ...]", inc.Unread)
 	}
 }

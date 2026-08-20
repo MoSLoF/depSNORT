@@ -51,8 +51,10 @@ func (r *Resolver) Resolve(ctx context.Context, ecosystem, name, version string)
 	}
 
 	// fetch caches each module@version's `go` directive and require set for this
-	// call; the goproxy client caches the raw fetches across the whole scan.
-	fetch := r.fetcher(ctx, map[string]reqSetOf{})
+	// call; the goproxy client caches the raw fetches across the whole scan. unread
+	// collects any coordinate whose go.mod fetch failed TRANSIENTLY (OPU-17).
+	unread := map[string]string{}
+	fetch := r.fetcher(ctx, map[string]reqSetOf{}, unread)
 
 	// The queried coordinate must resolve, or there is nothing to assert.
 	mainGoVer, rootReqs, ok := fetch(name, version)
@@ -61,7 +63,8 @@ func (r *Resolver) Resolve(ctx context.Context, ecosystem, name, version string)
 	}
 
 	selected := selectBuildList(rootReqs, HasPrunedModuleGraph(mainGoVer), fetch)
-	return buildResolvedGraph(name, version, rootReqs, selected, fetch), true, nil
+	rg := buildResolvedGraph(name, version, rootReqs, selected, fetch)
+	return rg, true, incompleteResolution(name, unread, selected)
 }
 
 // ResolveLocalRoot resolves a LOCAL main module's whole build list from the
@@ -82,7 +85,8 @@ func (r *Resolver) ResolveLocalRoot(ctx context.Context, root expand.LocalRoot) 
 	}
 
 	cache := map[string]reqSetOf{}
-	fetch := r.fetcher(ctx, cache)
+	unread := map[string]string{}
+	fetch := r.fetcher(ctx, cache, unread)
 
 	rootReqs := make([]require, 0, len(root.Requires))
 	for _, rr := range root.Requires {
@@ -104,7 +108,41 @@ func (r *Resolver) ResolveLocalRoot(ctx context.Context, root expand.LocalRoot) 
 	if rootVer == "" {
 		rootVer = "0.0.0"
 	}
-	return buildResolvedGraph(root.Name, rootVer, rootReqs, selected, fetch), true, nil
+	rg := buildResolvedGraph(root.Name, rootVer, rootReqs, selected, fetch)
+	return rg, true, incompleteResolution(root.Name, unread, selected)
+}
+
+// incompleteResolution turns the set of transiently-unread coordinates into an
+// *expand.IncompleteResolution keyed on each module's SELECTED version (the
+// version its node carries in the build list), so the caller can find and mark it.
+// Returns nil when nothing was unread — the common, fully-resolved case. The root
+// is never reported: its own fetch failing yields ok=false (a wholesale fallback),
+// not a partial build list. Deterministic order (D-13) so the error is stable.
+func incompleteResolution(rootName string, unread, selected map[string]string) error {
+	if len(unread) == 0 {
+		return nil
+	}
+	refs := make([]expand.ResolvedRef, 0, len(unread))
+	for mod, failVer := range unread {
+		if mod == rootName {
+			continue
+		}
+		ver := selected[mod]
+		if ver == "" {
+			ver = failVer
+		}
+		refs = append(refs, expand.ResolvedRef{Ecosystem: "gomod", Name: mod, Version: ver})
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Name != refs[j].Name {
+			return refs[i].Name < refs[j].Name
+		}
+		return refs[i].Version < refs[j].Version
+	})
+	return &expand.IncompleteResolution{Unread: refs}
 }
 
 // reqSetOf is one cached go.mod fetch: the `go` directive, the require set, and
@@ -117,14 +155,35 @@ type reqSetOf struct {
 
 // fetcher returns a modFetch backed by the proxy and the given per-call cache. A
 // cached ok=false means "fetched, not found" so a 404 is not re-requested.
-func (r *Resolver) fetcher(ctx context.Context, cache map[string]reqSetOf) modFetch {
+//
+// It distinguishes a TRANSIENT failure (err != nil: network/transport/bad status,
+// the goproxy client's outGap) from a genuine NOT-FOUND (ok=false, err == nil: a
+// 404, outNotFound). Both return ok=false — the walk cannot read past either — but
+// a transient failure is also recorded in unread, because that module's subtree is
+// unknown rather than empty. Conflating the two silently shrinks the build list on
+// a network blip and makes the scan non-deterministic (OPU-17); recording the
+// transient one lets the resolution be reported incomplete instead. The FIRST
+// failing version per module is kept (the map write is idempotent for the node,
+// which carries the module's selected version regardless).
+func (r *Resolver) fetcher(ctx context.Context, cache map[string]reqSetOf, unread map[string]string) modFetch {
 	return func(mod, ver string) (string, []require, bool) {
 		key := mod + "@" + ver
 		if rs, hit := cache[key]; hit {
 			return rs.goVer, rs.reqs, rs.ok
 		}
 		raw, ok, err := r.Proxy.ModFile(ctx, mod, ver)
-		if err != nil || !ok {
+		if err != nil {
+			// Transient: cache ok=false so a flaky coordinate is not hammered, but
+			// remember it was unread — not the same as "has no dependencies".
+			cache[key] = reqSetOf{"", nil, false}
+			if unread != nil {
+				if _, seen := unread[mod]; !seen {
+					unread[mod] = ver
+				}
+			}
+			return "", nil, false
+		}
+		if !ok {
 			cache[key] = reqSetOf{"", nil, false}
 			return "", nil, false
 		}
