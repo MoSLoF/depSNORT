@@ -190,7 +190,7 @@ func extractArray(lines []string, section, key string) []string {
 				continue
 			}
 			collecting = true
-			buf.WriteString(v[open+1:])
+			buf.WriteString(stripArrayLineComment(v[open+1:]))
 		} else {
 			// A new section header ends an unterminated array (malformed; a
 			// well-formed one closes with its ']' first, caught below).
@@ -198,7 +198,11 @@ func extractArray(lines []string, section, key string) []string {
 				break
 			}
 			buf.WriteString("\n")
-			buf.WriteString(raw)
+			// Strip any trailing TOML comment BEFORE the line joins the buffer:
+			// quotedItems extracts every quoted token, so a quoted word inside an
+			// in-array comment ("# a silent \"clean\" without it") would otherwise
+			// be minted as a phantom dependency (OPU-11).
+			buf.WriteString(stripArrayLineComment(raw))
 		}
 		// Close the array at the ']' that sits at bracket depth 0 OUTSIDE any
 		// quoted string — NOT at the first ']', which for an element like
@@ -291,6 +295,32 @@ func sortDeclared(d []graph.DeclaredDep) {
 func sortStrings(s []string) { sort.Strings(s) }
 
 func itoa(n int) string { return fmt.Sprintf("%d", n) }
+
+// stripArrayLineComment removes a trailing TOML line comment from one line of an
+// array body: everything from the first '#' that appears OUTSIDE a quoted string.
+// A '#' inside quotes is kept, so a URL requirement's egg fragment
+// ("pkg @ git+https://h/r.git#egg=pkg") survives intact. This mirrors the
+// quote-tracking in topLevelCloseBracket; without it, quotedItems would harvest
+// quoted words out of comments as phantom dependencies (OPU-11).
+func stripArrayLineComment(line string) string {
+	var quote byte // 0 = outside a quote, else the opening quote char
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '#':
+			return line[:i]
+		}
+	}
+	return line
+}
 
 // quotedItems returns the contents of each single- or double-quoted string in s,
 // ignoring commas and whitespace between them. This is the array-of-strings

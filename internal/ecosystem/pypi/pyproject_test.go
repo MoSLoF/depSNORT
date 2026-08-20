@@ -158,3 +158,42 @@ func TestDeclaredDepsRoundTrip(t *testing.T) {
 		t.Error("encoding malformed")
 	}
 }
+
+// TestParsePyprojectArrayComments locks in OPU-11: a `#` comment inside the
+// multi-line dependencies array must not contribute phantom dependencies, even
+// when it contains quoted words — while a `#` inside a quoted requirement (a
+// URL egg fragment) must be preserved. quotedItems harvests every quoted token,
+// so without comment stripping `"clean"` in a comment became a fake dep.
+func TestParsePyprojectArrayComments(t *testing.T) {
+	raw := []byte(`[project]
+name = "soup"
+dependencies = [
+    "rich>=13.0.0",
+    # a silent "clean" without it — the wrong direction for a checker
+    "typer>=0.9.0",  # trailing "phantompkg" note must not leak
+    "somepkg @ git+https://example.com/x.git#egg=somepkg",
+]
+`)
+	g, err := parsePyproject("/repo/soup/pyproject.toml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := g.Get(g.Roots[0])
+	got := map[string]bool{}
+	for _, d := range root.DeclaredDepsOf() {
+		got[d.Name] = true
+	}
+	for _, phantom := range []string{"clean", "phantompkg"} {
+		if got[phantom] {
+			t.Errorf("phantom dependency %q scraped from a comment", phantom)
+		}
+	}
+	for _, real := range []string{"rich", "typer", "somepkg"} {
+		if !got[real] {
+			t.Errorf("real dependency %q missing (comment stripping over-reached)", real)
+		}
+	}
+	if n := len(root.DeclaredDepsOf()); n != 3 {
+		t.Errorf("declared deps = %d, want 3 (rich, typer, somepkg)", n)
+	}
+}
