@@ -2751,3 +2751,54 @@ so per the standing rule it did not ship until the oracle agreed — two real re
 matched module-for-module and version-for-version, plus resolver-level and
 walker-level unit tests that separate the whole-root path from the union it
 replaces.
+
+## D-78 — OPU-17: a transient go.mod fetch failure degrades coverage, never shrinks the surface silently
+
+The Go resolver's fetch seam collapsed two different outcomes into one `ok=false`:
+a genuine 404 (the proxy's `outNotFound` — err == nil) and a TRANSIENT failure (its
+`outGap` — a transport error, non-200 status, or read error, err != nil). Both
+made the walk stop at that coordinate. For a 404 that is correct — the module
+truly has no such record. For a transient failure it is a silent lie: the module's
+subtree was UNREAD, not empty, so the build list came back smaller and looked
+clean. Same scan, different results between runs; a module dropped by a network
+blip is never evaluated for advisories. Observed this session as
+`cloud.google.com/go@v0.54.0`'s direct require `bigquery@v1.4.0` — present on clean
+runs, absent whenever the go-proxy fetch of its parent flaked. A scanner that
+answers the same question differently across runs is failing a test a single run
+cannot see (OPU-17).
+
+The goproxy client already distinguished the two (a 404 carries no error; a
+transient failure does); the resolver threw the distinction away. Now the fetcher
+keeps it: on a transient error it records the coordinate as unread (still returning
+ok=false — the walk genuinely cannot read past it), while a 404 stays a clean
+not-found. `Resolve` / `ResolveLocalRoot` then return the partial build list with a
+new `*expand.IncompleteResolution` error naming the unread coordinates (at their
+selected versions). This is a THIRD outcome, deliberately distinct from both
+existing ones: ok=false means "no answer, fall back to presume"; ok=true with a nil
+error means "the complete build list"; ok=true with an IncompleteResolution means
+"a real partial answer that must not be mistaken for the whole."
+
+The walker consumes it without discarding the asserted work: `AssertRoot` and the
+whole-root `assertLocalRoot` merge the partial graph, then mark each unread node a
+frontier with `depsnort.subtree_unread = transient-fetch-failure` and fold the count
+into the walk's `Unread` — the same coverage channel the presume walk already uses
+for an unread coordinate (`res.Unread` → the `expand` data source's gaps → the
+"coverage is incomplete" warning). Crucially the whole-root path does NOT fall back
+to the per-dependency union on a transient failure: the union resolves against the
+same flaky proxy and would hit the same hole while reintroducing the very
+over-approximation D-77 removed. A degraded run is now a VISIBLY degraded run — a
+marked node and a coverage gap — never a smaller graph passed off as an all-clear.
+
+The distinction is honest about what it can and cannot recover: the unread module
+itself stays in the build list (its version was recorded before the fetch), but its
+dependencies are unknowable, so they are not fabricated — the hole is disclosed, not
+filled. Deps.dev's resolver is unaffected (it never returns ok=true with a non-nil
+error, so the merge-then-mark path is gomod-only).
+
+Process: this changes resolution behavior, so per the standing rule it ships with
+proof. The bug was reproduced first (a transient failure produced the same silent
+drop as a 404), then the fix proven at two levels — the resolver distinguishes
+transient from 404 (an `*IncompleteResolution` on the former, `nil` on the latter),
+and the walker marks the node and degrades coverage. Both regression tests were
+shown to have teeth by mutation: collapsing transient back into 404 fails the
+transient tests while the 404 test stays green.

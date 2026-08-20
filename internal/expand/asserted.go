@@ -2,6 +2,8 @@ package expand
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"ihbv.io/depsnort/internal/graph"
 )
@@ -70,6 +72,38 @@ type LocalRootResolver interface {
 	ResolveLocalRoot(ctx context.Context, root LocalRoot) (ResolvedGraph, bool, error)
 }
 
+// IncompleteResolution is returned as the error — alongside ok=true and a USABLE
+// PARTIAL graph — when a resolver could not read part of the transitive graph
+// because a metadata fetch failed TRANSIENTLY (network/transport/bad status), as
+// distinct from a genuine "not found". The listed coordinates' own dependencies
+// were never read, so the build list is a floor, not the whole: the caller marks
+// those nodes unread and degrades coverage, rather than presenting a
+// silently-shrunk surface as a complete resolution (OPU-17).
+//
+// It is deliberately NOT the same as ok=false. ok=false means the resolver had no
+// answer at all (a 404 on the queried coordinate) and the walk falls back to
+// presume; IncompleteResolution means there IS a partial answer that is real and
+// worth keeping, but must not be mistaken for the complete build list. Conflating
+// the two is the bug: a flaky fetch then looks identical to "this module has no
+// dependencies", and the scanned surface shrinks between runs without a trace.
+type IncompleteResolution struct {
+	// Unread is the coordinates whose own dependencies could not be read. Each is
+	// a node in the returned graph (at its selected version) so the caller can find
+	// and mark it.
+	Unread []ResolvedRef
+}
+
+func (e *IncompleteResolution) Error() string {
+	return fmt.Sprintf("resolution incomplete: %d coordinate(s) unread (transient fetch failure)", len(e.Unread))
+}
+
+// AttrSubtreeUnread marks an asserted node whose own dependencies could not be
+// read because its metadata fetch failed transiently (OPU-17). The node's version
+// is asserted, but its subtree is unknown — so it is also a frontier, and the
+// run's coverage is degraded. This distinguishes a network hole from a
+// depth-capped frontier, so a degraded run is never read as a clean all-clear.
+const AttrSubtreeUnread = "depsnort.subtree_unread"
+
 // ResolvedEdge is a dependency relation, as indices into ResolvedGraph.Nodes.
 type ResolvedEdge struct{ From, To int }
 
@@ -87,6 +121,10 @@ type AssertResult struct {
 	Asserted int `json:"asserted"`
 	// Resolved is whether the service had an answer for this root at all.
 	Resolved bool `json:"resolved"`
+	// Unread is how many asserted nodes had an unread subtree (a transient fetch
+	// failure) — a coverage gap the caller folds into the walk's unread count so a
+	// degraded run is visible, not silently smaller (OPU-17).
+	Unread int `json:"unread"`
 }
 
 // AssertRoot merges a resolver's full transitive graph for one observed root
@@ -114,12 +152,49 @@ func (w *Walker) AssertRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 	}
 
 	rg, ok, err := r.Resolve(ctx, root.Ecosystem, root.Name, root.Version)
-	if err != nil || !ok {
+	if !ok {
+		// No answer at all (a 404 on the queried coordinate): fall back to presume.
+		// Distinct from an incomplete answer below, which IS worth keeping.
 		return out, err
 	}
 	out.Resolved = true
 	out.Asserted = w.mergeResolved(g, root, rg, assertedByFor(r, root.Ecosystem))
-	return out, nil
+	// A transient fetch failure leaves a real partial graph with an unread hole:
+	// keep the asserted work, but mark the hole and count it so coverage degrades
+	// visibly rather than the surface shrinking silently (OPU-17). This is not an
+	// assert failure — the error is consumed here, turned into node marks + a count.
+	var inc *IncompleteResolution
+	if errors.As(err, &inc) {
+		out.Unread = w.markUnread(g, inc.Unread)
+		return out, nil
+	}
+	return out, err
+}
+
+// markUnread flags each unread coordinate's node (resolved to its graph identity)
+// as a frontier with an explicit subtree-unread reason, so a transient network
+// hole inside an asserted subtree is visible on the node itself and counted for
+// coverage — never a silently smaller surface (OPU-17). Returns how many nodes it
+// marked (a coordinate whose node is not in the graph is skipped).
+func (w *Walker) markUnread(g *graph.Graph, refs []ResolvedRef) int {
+	marked := 0
+	for _, ref := range refs {
+		id := ""
+		if d := w.declarers[ref.Ecosystem]; d != nil {
+			id, _ = d.Identify(ref.Name, ref.Version)
+		}
+		if id == "" {
+			id = "pkg:" + ref.Ecosystem + "/" + ref.Name + "@" + ref.Version
+		}
+		node := g.Get(id)
+		if node == nil {
+			continue
+		}
+		markFrontier(node)
+		setAttr(node, AttrSubtreeUnread, "transient-fetch-failure")
+		marked++
+	}
+	return marked
 }
 
 // assertedByFor attributes an asserted node to the backend that actually answered
@@ -230,10 +305,18 @@ func (w *Walker) assertLocalRoot(ctx context.Context, g *graph.Graph, root *grap
 		Ecosystem: root.Ecosystem, Name: root.Name, Version: root.Version,
 		Requires: reqs, Attr: root.Attr,
 	})
-	if err != nil || !ok {
+	if !ok {
 		return false
 	}
 	res.Asserted += w.mergeResolved(g, root, rg, assertedByFor(r, root.Ecosystem))
+	// A transient fetch failure gives a real partial build list with an unread hole.
+	// Keep it and mark the hole (OPU-17) — do NOT fall back to the per-dependency
+	// union, which resolves against the same proxy and would hit the same failure
+	// while reintroducing the union artifacts the whole-root path exists to remove.
+	var inc *IncompleteResolution
+	if errors.As(err, &inc) {
+		res.Unread += w.markUnread(g, inc.Unread)
+	}
 	// The resolver returned the COMPLETE build list under this root; its direct
 	// dependencies and their subtrees are closed. Mark everything reachable from
 	// the root expanded so the presume walk below never re-derives it — otherwise
