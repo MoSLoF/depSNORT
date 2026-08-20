@@ -576,3 +576,79 @@ func TestAssertedTierFiresOnRegistryDirectDeps(t *testing.T) {
 		t.Error("urllib3 was re-presumed beneath an asserted subtree; the subtree was not closed")
 	}
 }
+
+// stubLocalResolver implements both Resolver (the per-dependency union path) and
+// LocalRootResolver (the whole-root path). It records which path the walker took.
+type stubLocalResolver struct {
+	whole      expand.ResolvedGraph            // the whole-root answer
+	perDep     map[string]expand.ResolvedGraph // per-direct-dependency answers
+	localCalls int
+	depCalls   []string
+}
+
+func (*stubLocalResolver) Name() string { return "go-proxy-stub" }
+
+func (s *stubLocalResolver) Resolve(_ context.Context, _, name, version string) (expand.ResolvedGraph, bool, error) {
+	s.depCalls = append(s.depCalls, name+"@"+version)
+	rg, ok := s.perDep[name+"@"+version]
+	return rg, ok, nil
+}
+
+func (s *stubLocalResolver) ResolveLocalRoot(_ context.Context, _ expand.LocalRoot) (expand.ResolvedGraph, bool, error) {
+	s.localCalls++
+	return s.whole, true, nil
+}
+
+// TestWholeRootResolutionReplacesUnion pins OPU-15-exact at the walker: when the
+// resolver supports LocalRootResolver, ExpandRoot resolves the LOCAL main
+// module's whole build list in one shot and does NOT resolve each direct
+// dependency independently. The tell is a shared module two direct deps require
+// at different versions: the whole-root answer collapses it to one version; the
+// per-dependency union (the path that must NOT run) would leave both.
+func TestWholeRootResolutionReplacesUnion(t *testing.T) {
+	id := func(name, ver string) string { return "pkg:gomod/" + name + "@" + ver }
+	ref := func(name, ver string) expand.ResolvedRef {
+		return expand.ResolvedRef{Ecosystem: "gomod", Name: name, Version: ver}
+	}
+	resolver := &stubLocalResolver{
+		// Whole-root build list: M, A, B, X v2.0.0 — X once (MVS max).
+		whole: expand.ResolvedGraph{
+			Nodes: []expand.ResolvedRef{ref("M", "0.0.0"), ref("A", "v1.0.0"), ref("B", "v1.0.0"), ref("X", "v2.0.0")},
+			Edges: []expand.ResolvedEdge{{From: 0, To: 1}, {From: 0, To: 2}, {From: 1, To: 3}, {From: 2, To: 3}},
+		},
+		// The per-dependency path, if wrongly taken, would add X at BOTH versions.
+		perDep: map[string]expand.ResolvedGraph{
+			"A@v1.0.0": {Nodes: []expand.ResolvedRef{ref("A", "v1.0.0"), ref("X", "v2.0.0")}, Edges: []expand.ResolvedEdge{{From: 0, To: 1}}},
+			"B@v1.0.0": {Nodes: []expand.ResolvedRef{ref("B", "v1.0.0"), ref("X", "v1.0.0")}, Edges: []expand.ResolvedEdge{{From: 0, To: 1}}},
+		},
+	}
+
+	g := graph.New()
+	root := g.AddNode(&graph.Node{ID: id("M", "0.0.0"), Kind: graph.KindPackage, Ecosystem: "gomod", Name: "M", Version: "0.0.0"})
+	root.SetSource(graph.SourcePath, "")
+	g.MarkRoot(root.ID)
+	for _, d := range [][2]string{{"A", "v1.0.0"}, {"B", "v1.0.0"}} {
+		dep := g.AddNode(&graph.Node{ID: id(d[0], d[1]), Kind: graph.KindPackage, Ecosystem: "gomod", Name: d[0], Version: d[1], Depth: 1})
+		g.AddEdge(root.ID, dep.ID, graph.EdgeDependsOn)
+	}
+
+	if _, err := expand.NewWalker().ExpandRoot(context.Background(), g, root, expand.Options{Resolver: resolver}); err != nil {
+		t.Fatal(err)
+	}
+
+	if resolver.localCalls != 1 {
+		t.Errorf("ResolveLocalRoot called %d times, want 1", resolver.localCalls)
+	}
+	if len(resolver.depCalls) != 0 {
+		t.Errorf("per-dependency Resolve was called %v; the whole-root path must replace the union", resolver.depCalls)
+	}
+	if g.Get(id("X", "v2.0.0")) == nil {
+		t.Error("X v2.0.0 (the MVS-collapsed build-list version) missing from the graph")
+	}
+	if g.Get(id("X", "v1.0.0")) != nil {
+		t.Error("X v1.0.0 present: the per-dependency union ran and left a second version of the shared module")
+	}
+	if n := g.Get(id("X", "v2.0.0")); n != nil && n.VersionTruth() != graph.TruthAsserted {
+		t.Errorf("X truth = %q, want asserted", n.VersionTruth())
+	}
+}
