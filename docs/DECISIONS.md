@@ -2853,3 +2853,65 @@ real report, revisit as its own scoped item — but do not pre-emptively re-scop
 correct behavior. Per the standing rule, this hand-off made no resolution change, so
 it ships as an investigation record plus the planted-advisory regression that pins
 the confirmed behavior; nothing was changed that an oracle needs to agree with.
+
+## D-80 — OPU-19: VC-002 install-surface delta (A.I.G cross-map) — markers, IMDS-as-credential, VC-002g persistence
+
+Cross-checking depSNORT's install-surface extractor against the AI-Infra-Guard
+skill/MCP evasion patterns found it already covers the decode-exec, ssh-key, and
+download-cradle shapes (and does the supply-chain slice better — graph-resolved,
+not LLM-judged). The deltas were persistence surfacing, a few missing markers, and
+cloud-IMDS credential recognition. Two gap classes: DETECTION gaps (a pattern the
+analyzer never sees) and SURFACING gaps (a capability detected but no sub-check
+raises it).
+
+Part A — markers (detection gaps). `authorized_keys` (ssh-key implant) joins the
+credential markers; `socket.getfqdn(` / `.getsockname(` join the env markers
+alongside the existing `gethostname`; `systemctl` / `launchctl` / `launchd` join
+the persistence markers alongside `crontab` / `systemd`. Each was invisible or
+under-classified before and now fires its capability, frozen in the OPU-19 probe
+table (TestOPU19InstallSurfaceProbeTable).
+
+Part B — IMDS as credential, not bare network. A hook reaching a cloud
+instance-metadata endpoint is reaching for cloud credentials. The IMDS host is
+almost always inside a URL (`urlopen("http://169.254.169.254/…")`), and D-25's
+URL strip — which correctly stops doc-URLs being read as behavior — removed the
+host before credential scanning, so it fired only `network`. Fix: `imdsRe`
+(`169.254.169.254`, `metadata.google.internal`, `metadata.azure.com`,
+`/latest/meta-data/`) runs on the RAW source before the strip and elevates a match
+to CapCredentials, so an IMDS reach raises VC-002c (or VC-002d with egress), not a
+bland VC-002b. The bare hosts are also kept as credential markers — a cheap
+backstop for a non-URL reference; the regex is the real fix. Proven: an IMDS URL
+now resolves to `credentials+network` (was `network`).
+
+Part C — VC-002g, install-hook persistence (surfacing gap, DECIDED yes). CapFilesystem
+was detected but no sub-check consumed it. A library's install hook has no
+legitimate reason to install a cron job, systemd/launchd service, shell-profile
+hook, or Startup entry — that is an OS-package/admin action, not a build step
+(A.I.G weights it as its own T06 category). VC-002g fires on the PERSISTENCE
+subset of CapFilesystem — high severity, gate-eligible, closer to VC-002c than to
+the common-and-benign VC-002b. The precision comes from splitting the filesystem
+markers into `persistenceMarkers` (cron/service/profile/startup — the gate) and
+`installWriteMarkers` (site-packages/.pth/gem dirs — ordinary writes, excluded).
+Both remain CapFilesystem, so Part A's capability output is unchanged; the split
+lives in the marker taxonomy (installsurface.IsPersistenceMarker), read by the
+check via the hook's evidence, not in a new capability. A benign site-packages
+write does not fire VC-002g — proven, and the exclusion shown to have teeth by
+mutation (removing the gate false-positives on site-packages).
+
+Part D — recon, DECIDED no standalone. CapEnv (gethostname/getfqdn/getsockname/
+getuser/getnode) is detected but gets no standalone finding: benign installers
+routinely read host/platform identity for telemetry, cache keys, and
+platform-specific build selection, so a standalone recon finding would
+false-positive at exactly the rate the tool's discipline avoids — the same reason
+bare `process.env` is deliberately not treated as credentials (D upstream). Recon
+is meaningful only as identity collected AND sent (gethostname → POST); if ever
+surfaced it should be CapEnv+CapNetwork as an advisory (never gate-eligible),
+mirroring VC-002d's shape. Deferred until there is a concrete FP budget for it. No
+check consumes CapEnv, so the Part A env markers add coverage without adding a
+finding — the decision is honored by construction.
+
+Process: Part A/B were patch-and-proven by hermetic AnalyzePython probes per
+pattern (the frozen table is that proof), and VC-002g by check-level tests
+(persistence fires; a benign install write does not) whose exclusion was verified
+by mutation. The eleven-pattern coverage map is frozen so it cannot silently
+regress (acceptance §5).

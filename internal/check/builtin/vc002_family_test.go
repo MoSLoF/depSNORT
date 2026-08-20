@@ -192,3 +192,64 @@ func TestFullCapsFiresExfilAndObfuscated(t *testing.T) {
 		t.Errorf("VC-002c should be suppressed, got %d", n)
 	}
 }
+
+// buildPersistenceHookGraph builds a hook graph carrying cap.filesystem plus the
+// given evidence markers (as the analyzer records them: comma-joined on the hook
+// node), the substrate VC-002g reads.
+func buildPersistenceHookGraph(evidence string) *graph.Graph {
+	g := graph.New()
+	pkg := g.AddNode(&graph.Node{
+		ID: "pkg:pypi/suspect@1.0.0", Kind: graph.KindPackage,
+		Ecosystem: "pypi", Name: "suspect", Version: "1.0.0",
+	})
+	g.AddNode(&graph.Node{
+		ID: "hook:pkg:pypi/suspect@1.0.0#setup.py", Kind: graph.KindInstallHook,
+		Ecosystem: "pypi", Name: "setup.py:module-level",
+		Attr: map[string]string{"cap.filesystem": "true", "hook.evidence": evidence},
+	})
+	g.AddEdge(pkg.ID, "hook:pkg:pypi/suspect@1.0.0#setup.py", graph.EdgeDeclaresHook)
+	return g
+}
+
+// ---- VC-002g: install-hook persistence -------------------------------------
+
+func TestHookPersistenceFiresOnPersistenceMarker(t *testing.T) {
+	g := buildPersistenceHookGraph("crontab")
+	findings := (HookPersistence{}).Run(ctx(g))
+	if len(findings) != 1 {
+		t.Fatalf("HookPersistence: want 1, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.CheckID != "VC-002g" {
+		t.Errorf("check id = %q, want VC-002g", f.CheckID)
+	}
+	if f.Severity != finding.SevHigh || f.GateClass != finding.GateEligible {
+		t.Errorf("severity/gate = %q/%q, want high/gate-eligible", f.Severity, f.GateClass)
+	}
+}
+
+// The discriminating case: a filesystem write that is NOT persistence (an ordinary
+// site-packages/.pth install write) must not fire VC-002g. Without the marker
+// split this would false-positive on every package that writes into site-packages.
+func TestHookPersistenceSilentOnBenignInstallWrite(t *testing.T) {
+	g := buildPersistenceHookGraph("site-packages,.pth")
+	if n := countFindings(HookPersistence{}, g); n != 0 {
+		t.Errorf("HookPersistence must not fire on a benign site-packages/.pth write, got %d", n)
+	}
+}
+
+func TestHookPersistenceSilentWithoutFilesystemCap(t *testing.T) {
+	g := buildHookGraph(map[string]bool{"network": true})
+	if n := countFindings(HookPersistence{}, g); n != 0 {
+		t.Errorf("HookPersistence must not fire without filesystem cap, got %d", n)
+	}
+}
+
+// Mixed evidence — a persistence marker alongside a benign one — still fires: the
+// benign write does not launder the cron install sitting next to it.
+func TestHookPersistenceFiresOnMixedEvidence(t *testing.T) {
+	g := buildPersistenceHookGraph("site-packages,systemctl")
+	if n := countFindings(HookPersistence{}, g); n != 1 {
+		t.Errorf("HookPersistence should fire when a persistence marker is present among benign ones, got %d", n)
+	}
+}
