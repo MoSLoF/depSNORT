@@ -4,6 +4,8 @@ import (
 	"math"
 	"sort"
 	"time"
+
+	"ihbv.io/depsnort/internal/semver"
 )
 
 // Release is one published version of a package.
@@ -141,6 +143,60 @@ func (h *ReleaseHistory) PriorPublishers(version string) PriorPublisherSet {
 		out.Unrecorded++
 	}
 	return out
+}
+
+// YankLureMinRun is how many contiguous yanked versions must sit beneath the live
+// newest for the yank-lure shape to engage. One yank is routine (a buggy release
+// pulled); a run is the mass-yank an attacker performs to make the payload the
+// only "non-yanked" option cargo will offer (OPU-26).
+const YankLureMinRun = 2
+
+// IsYanked reports whether a specific version is yanked, and whether the version
+// was found in the history at all (so a caller can tell "live" from "unknown").
+func (h *ReleaseHistory) IsYanked(version string) (yanked, known bool) {
+	if h == nil {
+		return false, false
+	}
+	for _, r := range h.Releases {
+		if r.Version == version {
+			return r.Yanked, true
+		}
+	}
+	return false, false
+}
+
+// YankLureShape reports the yank-lure end-state: the crate's highest SEMVER
+// version is LIVE (not yanked) and is immediately preceded, in semver order, by a
+// contiguous run of >= YankLureMinRun yanked versions. It returns the live newest
+// version and the run length. Ordering is by semver, not publish time, because
+// cargo's "select a non-yanked version" nudge resolves by version, not by when a
+// release happened to be indexed (0.3.10 outranks 0.3.9, which a lexical sort
+// gets wrong). This is the substrate of VC-012 (OPU-26).
+func (h *ReleaseHistory) YankLureShape() (newest string, run int, ok bool) {
+	if h == nil {
+		return "", 0, false
+	}
+	rs := append([]Release(nil), h.Releases...)
+	sort.Slice(rs, func(i, j int) bool {
+		return semver.Parse(rs[i].Version).Compare(semver.Parse(rs[j].Version)) < 0
+	})
+	if len(rs) < YankLureMinRun+1 {
+		return "", 0, false
+	}
+	top := rs[len(rs)-1]
+	if top.Yanked {
+		return "", 0, false // the payload version stays live; a yanked newest is not the lure
+	}
+	for i := len(rs) - 2; i >= 0; i-- {
+		if !rs[i].Yanked {
+			break
+		}
+		run++
+	}
+	if run >= YankLureMinRun {
+		return top.Version, run, true
+	}
+	return "", 0, false
 }
 
 // Sort orders releases oldest to newest.

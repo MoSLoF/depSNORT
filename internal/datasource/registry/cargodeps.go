@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,6 +50,37 @@ type CargoRequirement struct {
 	Name     string
 	Req      string // raw crates.io requirement, e.g. "^0.2" or ">=1.0, <2.0"
 	Optional bool
+	// Kind is the crates.io dependency kind: "normal" or "build" (dev is dropped
+	// upstream). A build dependency runs at compile time (build.rs) — the vector
+	// the yank-lure attack introduced (proc-macro1 as a NEW build-dep), so VC-012
+	// diffs build-deps specifically (OPU-26).
+	Kind string
+}
+
+// IntroducedBuildDeps returns the names of BUILD dependencies present in newest
+// but not in baseline — the "new build-dep vs the last-good release" tell of a
+// yank-lure (arrayref 0.3.10 added proc-macro1 as a build dep 0.3.9 never had).
+// Normal-kind deps are ignored: a new build-time dependency is the compile-time
+// code-execution vector, and adding one is far rarer and more suspicious than a
+// new normal dependency. Deterministic order (D-13).
+func IntroducedBuildDeps(baseline, newest []CargoRequirement) []string {
+	had := map[string]bool{}
+	for _, d := range baseline {
+		if d.Kind == "build" {
+			had[d.Name] = true
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, d := range newest {
+		if d.Kind != "build" || had[d.Name] || seen[d.Name] {
+			continue
+		}
+		seen[d.Name] = true
+		out = append(out, d.Name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Requirements returns each coordinate's dependencies WITH their requirements,
@@ -122,7 +154,11 @@ func parseCargoDeps(raw []byte) ([]CargoRequirement, int, error) {
 		if d.CrateID == "" || d.Kind == "dev" {
 			continue
 		}
-		reqs = append(reqs, CargoRequirement{Name: d.CrateID, Req: d.Req, Optional: d.Optional})
+		kind := d.Kind
+		if kind == "" {
+			kind = "normal" // crates.io omits kind for plain deps
+		}
+		reqs = append(reqs, CargoRequirement{Name: d.CrateID, Req: d.Req, Optional: d.Optional, Kind: kind})
 	}
 	return reqs, 0, nil
 }

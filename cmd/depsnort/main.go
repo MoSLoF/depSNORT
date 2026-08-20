@@ -447,6 +447,53 @@ func prefetchAdvisories(g *graph.Graph, src *osv.Client) (map[string][]datasourc
 	return byNode, entries, err
 }
 
+// enrichYankLure fetches the live-newest version's dependencies for cargo crates
+// showing the yank-lure shape (pinned to a yanked version beneath a live newest
+// atop a yanked run) and records, on the node, the BUILD dependencies that newest
+// version introduces versus the pinned version — the arrayref tell (0.3.10 added
+// proc-macro1 as a build dep). VC-012 reads the attribute to corroborate the shape
+// (OPU-26 Increment 2). Only the flagged (rare) crates are fetched; the live-newest
+// is not in the resolved graph, so this is a targeted enrichment, not a walk.
+func enrichYankLure(g *graph.Graph, deps *registry.CargoDepsClient, releases map[string]*datasource.ReleaseHistory) emit.DataSourceCoverage {
+	cov := emit.DataSourceCoverage{Name: "cargo-yanklure"}
+	if len(releases) == 0 || deps == nil {
+		return cov
+	}
+	for _, n := range g.SortedNodes() {
+		if n.Kind != graph.KindPackage || n.Ecosystem != "cargo" {
+			continue
+		}
+		h := releases[n.ID]
+		if h == nil {
+			continue
+		}
+		if yanked, known := h.IsYanked(n.Version); !known || !yanked {
+			continue
+		}
+		newest, _, ok := h.YankLureShape()
+		if !ok {
+			continue
+		}
+		base := datasource.Coord{Ecosystem: "cargo", Name: n.Name, Version: n.Version}
+		newC := datasource.Coord{Ecosystem: "cargo", Name: n.Name, Version: newest}
+		reqs, err := deps.Requirements(context.Background(), []datasource.Coord{base, newC})
+		if err != nil && cov.Error == "" {
+			cov.Error = err.Error()
+		}
+		introduced := registry.IntroducedBuildDeps(reqs[base.Key()], reqs[newC.Key()])
+		if len(introduced) == 0 {
+			continue
+		}
+		if n.Attr == nil {
+			n.Attr = map[string]string{}
+		}
+		n.Attr["yanklure.newest"] = newest
+		n.Attr["yanklure.introduced_build_deps"] = strings.Join(introduced, ",")
+	}
+	cov.Stats = deps.Stats
+	return cov
+}
+
 // reconstructPyPIDepth targets only PyPI roots whose lockfile format left
 // them fully flat (graph.AttrFlatResolution == "pypi"): it fetches
 // requires_dist for the union of their pinned coordinates and calls
@@ -924,6 +971,22 @@ func cmdScan(args []string) int {
 			info.DataSources = append(info.DataSources, cov)
 		}
 		ctx.Releases = allReleases
+
+		// Yank-lure enrichment (OPU-26 Inc.2): for cargo crates pinned to a yanked
+		// version beneath a live-newest lure, fetch the live-newest's dependencies and
+		// record the build-deps it introduces, so VC-012 can corroborate the shape
+		// with the arrayref tell. Reuses the cargo-deps cache and the -offline gate;
+		// only the flagged crates are fetched, so a non-cargo scan does nothing.
+		cargoLureDeps := registry.NewCargoDeps(datasource.NewCache(filepath.Join(*regCacheDir, "cargo-deps"), 24*time.Hour), *offline)
+		if lureCov := enrichYankLure(g, cargoLureDeps, ctx.Releases); lureCov.Stats.Queried > 0 || lureCov.Error != "" {
+			if lureCov.Error != "" {
+				fmt.Fprintf(os.Stderr, "depsnort: warning: %s coverage degraded: %v\n", lureCov.Name, lureCov.Error)
+			}
+			if lureCov.Error != "" || lureCov.Stats.Gaps > 0 {
+				dataSourceGaps = append(dataSourceGaps, lureCov.Name)
+			}
+			info.DataSources = append(info.DataSources, lureCov)
+		}
 
 		// PyPI real transitive-depth reconstruction: a post-merge stage, same
 		// tier as the release-history prefetch above, gated by the same
