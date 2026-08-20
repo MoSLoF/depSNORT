@@ -48,6 +48,7 @@ import (
 	"ihbv.io/depsnort/internal/emit"
 	"ihbv.io/depsnort/internal/expand"
 	"ihbv.io/depsnort/internal/graph"
+	"ihbv.io/depsnort/internal/installsurface"
 	"ihbv.io/depsnort/internal/verdict"
 )
 
@@ -451,10 +452,13 @@ func prefetchAdvisories(g *graph.Graph, src *osv.Client) (map[string][]datasourc
 // showing the yank-lure shape (pinned to a yanked version beneath a live newest
 // atop a yanked run) and records, on the node, the BUILD dependencies that newest
 // version introduces versus the pinned version — the arrayref tell (0.3.10 added
-// proc-macro1 as a build dep). VC-012 reads the attribute to corroborate the shape
-// (OPU-26 Increment 2). Only the flagged (rare) crates are fetched; the live-newest
-// is not in the resolved graph, so this is a targeted enrichment, not a walk.
-func enrichYankLure(g *graph.Graph, deps *registry.CargoDepsClient, releases map[string]*datasource.ReleaseHistory) emit.DataSourceCoverage {
+// proc-macro1 as a build dep). When a crate-source client is supplied (Increment 3),
+// it also fetches each introduced build-dep's build.rs and records which are
+// HOSTILE (network + exec/obfuscation — the compile-time payload). VC-012 reads
+// the attributes to corroborate and escalate the shape (OPU-26). Only the flagged
+// (rare) crates are fetched; the live-newest is not in the resolved graph, so this
+// is a targeted enrichment, not a walk.
+func enrichYankLure(g *graph.Graph, deps *registry.CargoDepsClient, src *registry.CrateSourceClient, releases map[string]*datasource.ReleaseHistory) emit.DataSourceCoverage {
 	cov := emit.DataSourceCoverage{Name: "cargo-yanklure"}
 	if len(releases) == 0 || deps == nil {
 		return cov
@@ -480,7 +484,8 @@ func enrichYankLure(g *graph.Graph, deps *registry.CargoDepsClient, releases map
 		if err != nil && cov.Error == "" {
 			cov.Error = err.Error()
 		}
-		introduced := registry.IntroducedBuildDeps(reqs[base.Key()], reqs[newC.Key()])
+		newestReqs := reqs[newC.Key()]
+		introduced := registry.IntroducedBuildDeps(reqs[base.Key()], newestReqs)
 		if len(introduced) == 0 {
 			continue
 		}
@@ -489,9 +494,64 @@ func enrichYankLure(g *graph.Graph, deps *registry.CargoDepsClient, releases map
 		}
 		n.Attr["yanklure.newest"] = newest
 		n.Attr["yanklure.introduced_build_deps"] = strings.Join(introduced, ",")
+
+		// Increment 3: fetch each introduced build-dep's build.rs and record which
+		// are hostile — the compile-time payload the yank funnels a consumer toward.
+		if src == nil {
+			continue
+		}
+		reqOf := map[string]string{}
+		for _, r := range newestReqs {
+			reqOf[r.Name] = r.Req
+		}
+		var hostile []string
+		for _, dep := range introduced {
+			buildRS, _, found, ferr := src.ResolveBuildRS(context.Background(), dep, reqOf[dep])
+			if ferr != nil {
+				if cov.Error == "" {
+					cov.Error = ferr.Error()
+				}
+				continue
+			}
+			if found && hostileBuildRS(string(buildRS)) {
+				hostile = append(hostile, dep)
+			}
+		}
+		if len(hostile) > 0 {
+			n.Attr["yanklure.hostile_build_deps"] = strings.Join(hostile, ",")
+		}
 	}
 	cov.Stats = deps.Stats
+	if src != nil {
+		cov.Stats.Queried += src.Stats.Queried
+		cov.Stats.Gaps += src.Stats.Gaps
+	}
 	return cov
+}
+
+// hostileBuildRS reports whether a build.rs statically exhibits the compile-time
+// payload shape: a download-and-run cradle, or network egress paired with decode-
+// obfuscation or named-credential access. It reuses the capability analysis VC-002
+// runs on install hooks (installsurface.AnalyzeRust), applied to the introduced
+// build-dep's own source (OPU-26 Increment 3). Reading the script's TEXT is static
+// analysis, not execution (D-04).
+//
+// CapExec is deliberately NOT a trigger: AnalyzeRust marks every build.rs CapExec
+// because a build script executes by definition, so "network + exec" would flag a
+// perfectly ordinary build that fetches a prebuilt binary and invokes a compiler.
+// The signal is network paired with the things a legitimate build has no reason to
+// do — decode a blob, read credentials — or a fetch-and-run cradle outright.
+func hostileBuildRS(src string) bool {
+	caps := map[installsurface.Capability]bool{}
+	for _, h := range installsurface.AnalyzeRust(src).Hooks {
+		for _, c := range h.Caps {
+			caps[c] = true
+		}
+	}
+	if caps[installsurface.CapCradle] {
+		return true
+	}
+	return caps[installsurface.CapNetwork] && (caps[installsurface.CapObfuscation] || caps[installsurface.CapCredentials])
 }
 
 // reconstructPyPIDepth targets only PyPI roots whose lockfile format left
@@ -978,7 +1038,8 @@ func cmdScan(args []string) int {
 		// with the arrayref tell. Reuses the cargo-deps cache and the -offline gate;
 		// only the flagged crates are fetched, so a non-cargo scan does nothing.
 		cargoLureDeps := registry.NewCargoDeps(datasource.NewCache(filepath.Join(*regCacheDir, "cargo-deps"), 24*time.Hour), *offline)
-		if lureCov := enrichYankLure(g, cargoLureDeps, ctx.Releases); lureCov.Stats.Queried > 0 || lureCov.Error != "" {
+		cargoLureSrc := registry.NewCrateSource(datasource.NewCache(filepath.Join(*regCacheDir, "cargo-source"), 24*time.Hour), *offline)
+		if lureCov := enrichYankLure(g, cargoLureDeps, cargoLureSrc, ctx.Releases); lureCov.Stats.Queried > 0 || lureCov.Error != "" {
 			if lureCov.Error != "" {
 				fmt.Fprintf(os.Stderr, "depsnort: warning: %s coverage degraded: %v\n", lureCov.Name, lureCov.Error)
 			}

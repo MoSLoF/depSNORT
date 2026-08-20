@@ -237,7 +237,7 @@ var (
 	}
 
 	// base64/hex decode idioms, matched structurally rather than by substring.
-	decodeRe = regexp.MustCompile(`(?i)(Buffer\.from\s*\([^)]*['"]base64['"]|from_?base64|b64decode|['"]hex['"]\s*\)|toString\s*\(\s*['"]utf-?8['"]\s*\)|base64\.b64decode|base64\.decodebytes)`)
+	decodeRe = regexp.MustCompile(`(?i)(Buffer\.from\s*\([^)]*['"]base64['"]|from_?base64|b64decode|['"]hex['"]\s*\)|toString\s*\(\s*['"]utf-?8['"]\s*\)|base64\.b64decode|base64\.decodebytes|base64::decode|base64::engine|general_purpose::[A-Za-z_]+\.decode)`)
 
 	// A long unbroken base64-ish run — the classic embedded blob.
 	blobRe = regexp.MustCompile(`[A-Za-z0-9+/=]{160,}`)
