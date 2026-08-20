@@ -2,13 +2,11 @@ package builtin
 
 import (
 	"fmt"
-	"sort"
+	"strings"
 
 	"ihbv.io/depsnort/internal/check"
-	"ihbv.io/depsnort/internal/datasource"
 	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
-	"ihbv.io/depsnort/internal/semver"
 )
 
 // YankLure (VC-012) reports a resolved dependency pinned to a version the
@@ -54,11 +52,10 @@ func (YankLure) Meta() check.Meta {
 	}
 }
 
-// yankLureMinRun is how many contiguous yanked versions must sit beneath the live
-// newest for the lure shape to engage. One yank is routine (a buggy release
-// pulled); a run is the mass-yank an attacker performs to make the payload the
-// only "non-yanked" option cargo will offer.
-const yankLureMinRun = 2
+// attrIntroducedBuildDeps is the node attribute the yank-lure enrichment stage
+// writes (comma-joined): the BUILD dependencies the crate's live-newest version
+// introduces versus the pinned version. VC-012 reads it to corroborate the shape.
+const attrIntroducedBuildDeps = "yanklure.introduced_build_deps"
 
 // Run implements check.Check.
 func (YankLure) Run(ctx *check.Context) []finding.Finding {
@@ -75,16 +72,7 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 			continue
 		}
 		// The anchor: is the PINNED version yanked?
-		pinnedYanked := false
-		found := false
-		for _, r := range h.Releases {
-			if r.Version == n.Version {
-				pinnedYanked = r.Yanked
-				found = true
-				break
-			}
-		}
-		if !found || !pinnedYanked {
+		if yanked, known := h.IsYanked(n.Version); !known || !yanked {
 			continue
 		}
 
@@ -95,7 +83,7 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 		evidence := fmt.Sprintf("%s@%s is yanked on the registry (the maintainer withdrew it); a fresh resolution would not select it", n.Name, n.Version)
 		remediation := "move off the yanked version deliberately — but inspect the target before upgrading (see below if a yank-lure shape is present)"
 
-		if newest, run, ok := yankLureEndState(h); ok {
+		if newest, run, ok := h.YankLureShape(); ok {
 			sev = finding.SevHigh
 			gate = finding.GateEligible
 			conf = 0.7
@@ -104,6 +92,28 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 				"the yank-lure shape (cf. arrayref/proc-macro1, 2026-08-20): cargo nudges a yanked-version consumer toward the newest non-yanked release, which is exactly where an account-takeover attacker plants the payload",
 				n.Name, n.Version, newest, run)
 			remediation = fmt.Sprintf("do NOT blindly upgrade to %s: inspect its introduced dependencies and build.rs first — the yanked run below it is the lure, and the live newest is the version to audit", newest)
+
+			// Increment-2 corroboration: the enrichment stage recorded the BUILD
+			// dependencies the live-newest introduces vs the pinned version. A new
+			// build-dep is the arrayref tell; a new build-dep that is a typosquat of a
+			// popular crate (proc-macro1 vs proc-macro2) is the signature — escalate.
+			if introduced := splitAttr(n.Attr[attrIntroducedBuildDeps]); len(introduced) > 0 {
+				conf = 0.8
+				evidence += fmt.Sprintf("; %s introduces build-dependenc%s not in %s: %s",
+					newest, plural(len(introduced), "y", "ies"), n.Version, strings.Join(introduced, ", "))
+				var squats []string
+				for _, dep := range introduced {
+					if orig, ok := cargoTyposquatNeighbor(dep); ok {
+						squats = append(squats, fmt.Sprintf("%s~%s", dep, orig))
+					}
+				}
+				if len(squats) > 0 {
+					sev = finding.SevCritical
+					conf = 0.9
+					evidence += fmt.Sprintf("; introduced build-dep is a TYPOSQUAT of a popular crate: %s", strings.Join(squats, ", "))
+					remediation = fmt.Sprintf("treat %s as a live supply-chain compromise: the live newest introduces a typosquatted build dependency that runs at compile time — do not upgrade, and report the crate", n.Name)
+				}
+			}
 		}
 
 		out = append(out, finding.Finding{
@@ -122,32 +132,46 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 	return out
 }
 
-// yankLureEndState reports the yank-lure shape: the crate's highest SEMVER version
-// is LIVE (not yanked) and is immediately preceded, in semver order, by a
-// contiguous run of >= yankLureMinRun yanked versions. It returns the live newest
-// version and the run length. Ordering is by semver, not publish time, because
-// cargo's "select a non-yanked version" nudge resolves by version, not by when a
-// release happened to be indexed.
-func yankLureEndState(h *datasource.ReleaseHistory) (newest string, run int, ok bool) {
-	rs := append([]datasource.Release(nil), h.Releases...)
-	sort.Slice(rs, func(i, j int) bool {
-		return semver.Parse(rs[i].Version).Compare(semver.Parse(rs[j].Version)) < 0
-	})
-	if len(rs) < yankLureMinRun+1 {
-		return "", 0, false
+// splitAttr splits a comma-joined node attribute into its non-empty parts.
+func splitAttr(v string) []string {
+	if v == "" {
+		return nil
 	}
-	top := rs[len(rs)-1]
-	if top.Yanked {
-		return "", 0, false // the payload version stays live; a yanked newest is not the lure
-	}
-	for i := len(rs) - 2; i >= 0; i-- {
-		if !rs[i].Yanked {
-			break
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
-		run++
 	}
-	if run >= yankLureMinRun {
-		return top.Version, run, true
+	return out
+}
+
+// cargoTyposquatTargets is a focused list of high-reach crates that a build-time
+// dependency name is scored against — deliberately small and build-relevant
+// (proc-macro / derive / sys-crate territory, where a compile-time typosquat like
+// proc-macro1 -> proc-macro2 does its work), not a general popularity corpus. It is
+// used only by VC-012's introduced-build-dep check; the general typosquat corpus
+// (VC-006) does not yet cover cargo, and widening it is its own calibration.
+var cargoTyposquatTargets = []string{
+	"proc-macro2", "syn", "quote", "serde", "serde_derive", "serde_json",
+	"libc", "cc", "cxx", "bindgen", "pkg-config", "cmake", "autocfg",
+	"tokio", "futures", "async-trait", "once_cell", "lazy_static",
+	"anyhow", "thiserror", "log", "tracing", "rand", "regex", "bytes", "clap",
+}
+
+// cargoTyposquatNeighbor reports whether an introduced build-dependency name is a
+// distance-1 near-miss of a known high-reach crate (and not that crate itself) —
+// the proc-macro1 / proc-macro2 shape. Distance 1 only: a build-dep name one edit
+// from a popular crate is the compile-time typosquat vector; wider distances are
+// left to a fuller cargo corpus.
+func cargoTyposquatNeighbor(name string) (target string, ok bool) {
+	for _, p := range cargoTyposquatTargets {
+		if name == p {
+			return "", false // it IS the popular crate
+		}
+		if osaDistanceBounded(name, p, 1) == 1 {
+			return p, true
+		}
 	}
-	return "", 0, false
+	return "", false
 }

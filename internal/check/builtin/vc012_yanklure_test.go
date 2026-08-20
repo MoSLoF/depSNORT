@@ -152,7 +152,90 @@ func TestYankLure_SemverOrdering(t *testing.T) {
 		yankRel{"0.3.2", false}, yankRel{"0.3.9", true}, yankRel{"0.3.10", false})
 	// 0.3.2 live, 0.3.9 yanked, 0.3.10 live — run below the live newest is just
 	// 0.3.9 (len 1), so NOT a lure (needs >=2). Proves ordering AND the run gate.
-	if _, run, ok := yankLureEndState(h); ok {
+	if _, run, ok := h.YankLureShape(); ok {
 		t.Errorf("single yanked below newest is not a lure (run=%d), lexical-sort bug would misread this", run)
+	}
+}
+
+// setNodeAttr sets an attribute on the single node of a cargoNodeGraph, mimicking
+// what the enrichYankLure orchestration stage writes.
+func setNodeAttr(g *graph.Graph, id, k, v string) {
+	n := g.Get(id)
+	if n.Attr == nil {
+		n.Attr = map[string]string{}
+	}
+	n.Attr[k] = v
+}
+
+// Increment 2: the full arrayref signature. Yank-lure shape PLUS the live-newest
+// introduces a build-dep that is a typosquat of a popular crate (proc-macro1 vs
+// proc-macro2) => CRITICAL, and the evidence names the impersonated crate.
+func TestYankLure_Critical_TyposquatBuildDep(t *testing.T) {
+	g, id := cargoNodeGraph("arrayref", "0.3.9")
+	setNodeAttr(g, id, "yanklure.introduced_build_deps", "proc-macro1")
+	h := yankHistory("arrayref",
+		yankRel{"0.3.7", true}, yankRel{"0.3.8", true}, yankRel{"0.3.9", true},
+		yankRel{"0.3.10", false})
+	fs := runYankLure(g, id, h)
+	if len(fs) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(fs))
+	}
+	if fs[0].Severity != finding.SevCritical {
+		t.Errorf("severity = %q, want critical (typosquatted introduced build-dep)", fs[0].Severity)
+	}
+	if !strings.Contains(fs[0].Evidence, "proc-macro1") || !strings.Contains(fs[0].Evidence, "proc-macro2") {
+		t.Errorf("evidence should name proc-macro1~proc-macro2: %q", fs[0].Evidence)
+	}
+}
+
+// A legit new build-dep (cc — a popular crate, not a typosquat) added by the
+// live-newest keeps the finding at HIGH (the lure shape's level), not critical.
+// This is the sketch's hard negative: "new build-dep" alone is not the attack.
+func TestYankLure_High_LegitNewBuildDep(t *testing.T) {
+	g, id := cargoNodeGraph("widget", "0.4.8")
+	setNodeAttr(g, id, "yanklure.introduced_build_deps", "cc")
+	h := yankHistory("widget",
+		yankRel{"0.4.6", true}, yankRel{"0.4.7", true}, yankRel{"0.4.8", true},
+		yankRel{"0.5.0", false})
+	fs := runYankLure(g, id, h)
+	if len(fs) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(fs))
+	}
+	if fs[0].Severity != finding.SevHigh {
+		t.Errorf("severity = %q, want high (a legit popular build-dep is not a typosquat)", fs[0].Severity)
+	}
+	if !strings.Contains(fs[0].Evidence, "cc") {
+		t.Errorf("evidence should still note the introduced build-dep cc: %q", fs[0].Evidence)
+	}
+}
+
+// Lure shape with no enrichment attribute (offline, or no introduced build-dep):
+// Increment-1 behavior is unchanged — high, not critical.
+func TestYankLure_High_NoIntroducedDeps(t *testing.T) {
+	g, id := cargoNodeGraph("arrayref", "0.3.9")
+	h := yankHistory("arrayref",
+		yankRel{"0.3.8", true}, yankRel{"0.3.9", true}, yankRel{"0.3.10", false})
+	fs := runYankLure(g, id, h)
+	if len(fs) != 1 || fs[0].Severity != finding.SevHigh {
+		t.Fatalf("want 1 high finding without enrichment, got %d (sev %v)", len(fs), func() finding.Severity {
+			if len(fs) > 0 {
+				return fs[0].Severity
+			}
+			return ""
+		}())
+	}
+}
+
+// The typosquat neighbour helper: distance-1 near-misses hit, exact members and
+// distant names miss.
+func TestCargoTyposquatNeighbor(t *testing.T) {
+	if orig, ok := cargoTyposquatNeighbor("proc-macro1"); !ok || orig != "proc-macro2" {
+		t.Errorf("proc-macro1 => (%q,%v), want (proc-macro2,true)", orig, ok)
+	}
+	if _, ok := cargoTyposquatNeighbor("proc-macro2"); ok {
+		t.Error("proc-macro2 IS the popular crate, must not be its own typosquat")
+	}
+	if _, ok := cargoTyposquatNeighbor("totally-unrelated-crate"); ok {
+		t.Error("a distant name must not be flagged")
 	}
 }

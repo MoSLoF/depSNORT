@@ -2961,3 +2961,53 @@ Process: the yank field was proven against the real crates.io API (libc carries 
 genuinely-yanked versions in the same `/versions` response), and the check against
 the arrayref shape plus negatives (single legit yank stays advisory, live pins stay
 quiet, non-cargo ecosystems are ignored, semver ordering is not lexical).
+
+## D-82 — OPU-26 (Increment 2): yank-lure live-newest enrichment — introduced build-dep + typosquat
+
+Increment 1 (D-81) anchored VC-012 on the concrete pinned-to-yanked fact and flagged
+the lure shape, but noted its real discriminators live in the live-newest version —
+the one cargo nudges you toward, which is NOT in the resolved graph. This increment
+reaches that version and adds the arrayref signature: the live-newest introduced a
+NEW BUILD dependency that is a TYPOSQUAT of a popular crate (proc-macro1 vs
+proc-macro2).
+
+Substrate. crates.io tags each dependency with a kind; the cargo deps client already
+fetched it but flattened build and normal together. CargoRequirement now carries
+Kind, and IntroducedBuildDeps(baseline, newest) returns the build-deps present in
+newest but not baseline — normal-kind additions ignored, because a new build-time
+dependency (compile-time code execution) is the rare, suspicious event, not a new
+normal dependency. The yank-lure shape detection moved onto ReleaseHistory
+(YankLureShape / IsYanked) so the enrichment stage and the check share one
+implementation.
+
+Enrichment (orchestration, not the check). A targeted stage fetches the live-newest's
+dependencies for ONLY the crates VC-012 would flag (pinned-to-yanked + lure shape) —
+a handful of coordinates, not a walk — and records the introduced build-deps on the
+node (yanklure.introduced_build_deps). It reuses the cargo-deps cache and the -offline
+gate; a non-cargo scan does nothing, and the coverage line is emitted only when it
+actually queried. The live-newest is deliberately NOT added to the resolved graph:
+depsnort reports what the real build resolves to (D-77), and the lure target is a
+version the project has not adopted — so it is enrichment for a finding, not a node.
+
+Interpretation (the check). When the lure fires and the node carries introduced
+build-deps, VC-012 names them and raises confidence; when one is a distance-1
+near-miss of a high-reach crate (a focused, build-relevant cargo target list — NOT
+the general VC-006 corpus, which does not yet cover cargo and is its own calibration),
+it escalates to CRITICAL and names the impersonated crate. A legit new build-dep the
+live-newest adds — cc, bindgen, a real popular crate — is a corpus MEMBER, not a
+typosquat, so it stays at the lure shape's HIGH, not critical: "new build-dep" alone
+is never the finding (the sketch's hard negative). The escalation is purely additive
+specificity over Increment 1 — it adds no new false-positive surface, only a
+critical tier for the exact attack shape.
+
+Deferred to a later increment: the introduced dep's build.rs hostility (network +
+tls-bypass/exec) needs the crate tarball, heavier machinery than metadata; and a
+downloads-based "introduced dep is near-zero-reach" corroborator. The typosquat tell
+is the highest-signal, lowest-cost half and is what this increment ships.
+
+Process: CargoRequirement.Kind proven against the real crates.io /dependencies
+endpoint (libsqlite3-sys carries build deps bindgen/cc/pkg-config/… tagged kind:build);
+IntroducedBuildDeps and the escalation proven by unit tests — arrayref's
+proc-macro1 => critical, a legit cc addition stays high, no enrichment stays high —
+with the typosquat gate shown to have teeth by mutation (disabling it drops the
+critical tier while the high/legit cases stay green).
