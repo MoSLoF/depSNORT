@@ -360,6 +360,17 @@ func encodeNamespace(ns string) string {
 			b.WriteString("%40")
 		case '%':
 			b.WriteString("%25")
+		case '?':
+			// "?" opens the qualifier section and "#" the subpath — both structural
+			// once qualifiers/subpath parsing landed, so a namespace containing one
+			// MUST encode it for the same reason encodeSegment does: an unencoded
+			// "#" renders `pkg:t/#/name`, whose re-parse strips everything from the
+			// "#" as a subpath and leaves an empty name, breaking round-trip
+			// identity (found by FuzzParse: `pkg:A/%23/0`). "/" stays literal here
+			// because a namespace may legitimately span several "/"-joined segments.
+			b.WriteString("%3F")
+		case '#':
+			b.WriteString("%23")
 		default:
 			b.WriteByte(ns[i])
 		}
