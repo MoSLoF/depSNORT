@@ -239,3 +239,25 @@ func TestCargoTyposquatNeighbor(t *testing.T) {
 		t.Error("a distant name must not be flagged")
 	}
 }
+
+// Increment 3: an introduced build-dep whose build.rs is hostile escalates to
+// CRITICAL even when its NAME is not a typosquat — the build.rs is the payload
+// itself, not a similarity heuristic.
+func TestYankLure_Critical_HostileBuildRS(t *testing.T) {
+	g, id := cargoNodeGraph("arrayref", "0.3.9")
+	setNodeAttr(g, id, "yanklure.introduced_build_deps", "helper-utils") // not a typosquat
+	setNodeAttr(g, id, "yanklure.hostile_build_deps", "helper-utils")
+	h := yankHistory("arrayref",
+		yankRel{"0.3.7", true}, yankRel{"0.3.8", true}, yankRel{"0.3.9", true},
+		yankRel{"0.3.10", false})
+	fs := runYankLure(g, id, h)
+	if len(fs) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(fs))
+	}
+	if fs[0].Severity != finding.SevCritical {
+		t.Errorf("severity = %q, want critical (hostile build.rs)", fs[0].Severity)
+	}
+	if !strings.Contains(fs[0].Evidence, "HOSTILE build.rs") {
+		t.Errorf("evidence should call out the hostile build.rs: %q", fs[0].Evidence)
+	}
+}

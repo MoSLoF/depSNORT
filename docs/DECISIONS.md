@@ -3011,3 +3011,53 @@ IntroducedBuildDeps and the escalation proven by unit tests — arrayref's
 proc-macro1 => critical, a legit cc addition stays high, no enrichment stays high —
 with the typosquat gate shown to have teeth by mutation (disabling it drops the
 critical tier while the high/legit cases stay green).
+
+## D-83 — OPU-26 (Increment 3): yank-lure build.rs payload — fetch the introduced dep's source
+
+Increments 1-2 caught the yank-lure shape and its typosquatted introduced build-dep.
+This increment reaches the payload itself: the introduced build-dep's build.rs, the
+code that runs at compile time on the machine that upgrades onto the lure.
+
+CrateSourceClient (new). It resolves the introduced build-dep's requirement to the
+highest non-yanked published version, downloads that version's .crate from
+static.crates.io, VERIFIES it against the SHA-256 crates.io publishes (fails closed
+on mismatch or an absent digest), gunzips and untars it, and extracts the top-level
+build.rs. Mirrors the PyPI sdist fetcher's safety: host-allowlisted to
+static.crates.io, https-only, redirects refused, a 50 MB download cap and a 2 MB
+per-file cap, and tar path-traversal refused. Reading a build script's TEXT is
+static analysis, not execution (D-04).
+
+Enrichment. For each introduced build-dep of a flagged crate (already rare), the
+enrichment stage fetches its build.rs and records the ones that are hostile on the
+node (yanklure.hostile_build_deps). Only the flagged crates are fetched.
+
+Hostility, and the CapExec trap. A build.rs is hostile when it is a download-and-run
+cradle, or pairs network egress with decode-obfuscation or named-credential access.
+CapExec is deliberately NOT a trigger: installsurface.AnalyzeRust marks EVERY build.rs
+CapExec because a build script executes by definition, so "network + exec" would flag
+an ordinary build that fetches a prebuilt binary and invokes a compiler. The signal is
+network paired with what a legitimate build has no reason to do — decode a blob, read
+credentials — or a cradle outright. This was caught by a test: the first definition
+false-positived on a plain prebuilt-fetch build.rs.
+
+Analyzer gap closed on the way. The obfuscation detection recognized from_base64 and
+b64decode but not the real Rust idiom base64::decode / general_purpose::…​.decode, so
+the actual arrayref payload shape would have slipped through. Added those to the
+structural decode regex — a general installsurface improvement (VC-002 benefits too),
+proven not to disturb the OPU-19 frozen coverage table.
+
+VC-012 escalation. A hostile introduced build.rs escalates the finding to CRITICAL and
+fires even when the dep's name is NOT a typosquat — the build.rs is the payload, not a
+name-similarity heuristic. The typosquat tell (Increment 2) and the build.rs tell
+(here) are independent critical triggers; together they are the full arrayref signature.
+
+Process: the fetch/verify/extract pipeline proven against the real static.crates.io
+(cc-1.0.83's .crate SHA-256 matches crates.io's published checksum exactly) and by unit
+tests with canned .crate archives (extraction, checksum-mismatch fails closed, yanked
+skipped); the hostility gate by table test (cradle and network+decode fire; exec-only,
+network-only, network+ambient-exec do not) shown to have teeth by mutation. gofmt/vet
+clean, go test -race ./... green (33 packages).
+
+The OPU-26 composite is now complete: Signal 1 (yank-lure shape), 2 (new build-dep),
+3 (typosquat), 4 (hostile build.rs). The temporal snapshot-diff path remains the one
+optional, unbuilt piece.

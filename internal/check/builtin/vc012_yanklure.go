@@ -57,6 +57,10 @@ func (YankLure) Meta() check.Meta {
 // introduces versus the pinned version. VC-012 reads it to corroborate the shape.
 const attrIntroducedBuildDeps = "yanklure.introduced_build_deps"
 
+// attrHostileBuildDeps is the subset of the introduced build-deps whose own
+// build.rs statically exhibits the compile-time payload shape (Increment 3).
+const attrHostileBuildDeps = "yanklure.hostile_build_deps"
+
 // Run implements check.Check.
 func (YankLure) Run(ctx *check.Context) []finding.Finding {
 	if len(ctx.Releases) == 0 {
@@ -112,6 +116,16 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 					conf = 0.9
 					evidence += fmt.Sprintf("; introduced build-dep is a TYPOSQUAT of a popular crate: %s", strings.Join(squats, ", "))
 					remediation = fmt.Sprintf("treat %s as a live supply-chain compromise: the live newest introduces a typosquatted build dependency that runs at compile time — do not upgrade, and report the crate", n.Name)
+				}
+				// Increment 3: the introduced build-dep's own build.rs statically exhibits
+				// the compile-time payload shape (network + exec/obfuscation). This is the
+				// payload itself, not a name-similarity heuristic — critical, and it fires
+				// even when the dep's name is NOT a typosquat.
+				if hostile := splitAttr(n.Attr[attrHostileBuildDeps]); len(hostile) > 0 {
+					sev = finding.SevCritical
+					conf = 0.95
+					evidence += fmt.Sprintf("; introduced build-dep ships a HOSTILE build.rs (network + exec/obfuscation): %s", strings.Join(hostile, ", "))
+					remediation = fmt.Sprintf("do NOT upgrade %s: the version cargo nudges toward pulls a build dependency whose build.rs runs network + code-execution at compile time — treat as an active compromise and report the crate", n.Name)
 				}
 			}
 		}
