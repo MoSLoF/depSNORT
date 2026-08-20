@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"ihbv.io/depsnort/internal/graph"
@@ -30,6 +31,17 @@ import (
 )
 
 const goModName = "go.mod"
+
+// AttrGoDirective is the root-node attribute holding a Go main module's `go`
+// directive (e.g. "1.25"), set by the adapter and read by the report layer to
+// decide the module-graph-pruning disclosure (OPU-15).
+const AttrGoDirective = "gomod.go"
+
+// HasPrunedModuleGraph reports whether a main module's `go` directive triggers
+// Go 1.17+ module-graph pruning. depsnort resolves the UNPRUNED graph, so such a
+// module's Go closure is a deliberate over-approximation, disclosed in the report
+// until static pruning lands (OPU-15).
+func HasPrunedModuleGraph(goDirective string) bool { return goDirectiveAtLeast(goDirective, 1, 17) }
 
 // Adapter implements ecosystem.Adapter for Go modules.
 type Adapter struct{}
@@ -99,6 +111,12 @@ func parseGoMod(path string, raw []byte) (*graph.Graph, error) {
 	if root.Attr == nil {
 		root.Attr = map[string]string{}
 	}
+	// Record the `go` directive: a go 1.17+ main module has a PRUNED module graph,
+	// so its expanded closure is a deliberate over-approximation, disclosed at the
+	// report level (OPU-15) until static pruning lands.
+	if gd := goDirective(raw); gd != "" {
+		root.Attr[AttrGoDirective] = gd
+	}
 
 	if len(requires) == 0 {
 		return g, nil
@@ -164,6 +182,43 @@ func scanGoMod(raw []byte) (module string, requires []require) {
 	}
 	sort.Slice(requires, func(i, j int) bool { return requires[i].module < requires[j].module })
 	return module, requires
+}
+
+// goDirective returns the `go` directive version of a go.mod (e.g. "1.25"), or
+// "" if absent. It is the switch for module-graph pruning: Go 1.17+ prunes the
+// graph, so a go 1.17+ main module's resolved closure is a deliberate
+// over-approximation until static pruning lands (OPU-15).
+func goDirective(raw []byte) string {
+	sc := bufio.NewScanner(bytes.NewReader(raw))
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if rest, ok := strings.CutPrefix(line, "go "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
+}
+
+// goDirectiveAtLeast reports whether a `go` directive string (e.g. "1.25",
+// "1.21.0") is >= major.minor. Malformed or absent directives report false, so a
+// module of unknown vintage is treated as pre-1.17 (the conservative, unpruned
+// path — never wrongly prune).
+func goDirectiveAtLeast(directive string, major, minor int) bool {
+	directive = strings.TrimSpace(directive)
+	if directive == "" {
+		return false
+	}
+	parts := strings.SplitN(directive, ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	maj, err1 := strconv.Atoi(parts[0])
+	min, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return maj > major || (maj == major && min >= minor)
 }
 
 // parseRequireLine reads "module vX.Y.Z" or "module vX.Y.Z // indirect".

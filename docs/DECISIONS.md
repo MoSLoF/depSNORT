@@ -2486,7 +2486,7 @@ resolved its full transitive tree as 7 asserted nodes with concrete
 MVS-selected versions, each attributed to go-proxy — the exact null-delta the
 run-delta flagged, now closed.
 
-## D-72 — OPU-14: Go MVS reads the full module graph, not selected versions only
+## D-73 — OPU-14: Go MVS reads the full module graph, not selected versions only
 
 OPU-13's Go asserted resolver computed MVS by reading the go.mod of the SELECTED
 version of each module only. Classic (pre-1.17) MVS reads the go.mod of EVERY
@@ -2519,3 +2519,48 @@ direction: the selected version is the one that could carry a vulnerability, and
 you never want to evaluate a version lower than a real build resolves. Exact
 parity with pruned builds, if ever required, would gate pruning on the main
 module's go directive — but never at the cost of re-introducing under-selection.
+
+## D-74 — OPU-15: a go 1.17+ Go closure is disclosed as unpruned (interim mitigation)
+
+D-73's MVS is unpruned pre-1.17 selection. Go 1.17 changed module resolution:
+for a main module that itself declares `go 1.17+`, Go PRUNES the module graph —
+it reads the full transitive requirements only of dependencies that are
+themselves pre-1.17, and only the immediate requirements of `go 1.17+`
+dependencies. depSNORT walks the full, unpruned graph, so for a `go 1.17+` main
+its Go closure over-approximates the real build: extra modules, and shared
+modules at extra versions. Measured on opensnitch/daemon (`go 1.25.0`): 384
+resolved gomod nodes against `go list -m all`'s 64-module build list, with
+golang.org/x/net at 8 versions and x/sys at 11. The advisory/typosquat checks
+then run over versions that are in no real build.
+
+The correct fix is static module-graph pruning (reproduce Go 1.17's pruned graph
+from the `go` directives, no `go` execution), which is a feature, not a
+one-liner — the OPU-15 hand-off empirically disproved both obvious shortcuts
+against the `go list -m all` oracle: treating the go.mod require block as the
+closed build list under-selects (opensnitch records 21 requires vs the real 64),
+and collapsing the unpruned graph to the global max per module over-selects
+(cloud.google.com/go → v0.112.1 where Go resolves v0.26.0, a deep requirement
+Go's pruned graph never reads). Neither the floor nor the ceiling reproduces the
+build list; only pruning does. That feature ships as its own oracle-proven cycle.
+
+This decision is the interim mitigation that ships first: an over-approximation
+presented as the build is the same over-claim OPU-11/12 fought, and silent is the
+trap. So a `go 1.17+` main is DISCLOSED, exactly the way D-70 discloses a
+presumed-only closure. The adapter records the main module's `go` directive on
+the root node (gomod.AttrGoDirective); when transitive expansion runs over a root
+whose directive is `>= 1.17` (gomod.HasPrunedModuleGraph), the report emits a
+`gomod-graph` coverage note — in JSON and on stderr — stating that the Go closure
+is unpruned and its gomod findings need build-list confirmation (`go list -m all`)
+until pruning lands. Pre-1.17 mains (shellz, go 1.16) stay silent: pruning does
+not apply and D-73's MVS is already exact. The disclosure is gated on expansion
+because the over-approximation is a property of the expanded closure — the flat
+go.mod list alone under-approximates (the pruned roots), so `-no-registry`
+scans, which never expand, correctly emit nothing. The note is removed once
+static pruning (the OPU-15 feature) lands and the closure matches the oracle.
+
+Process: per the OPU-15 hand-off's standing rule, no resolver/parser change ships
+as "fixed" without a patch-and-prove against ground truth, and a proposed fix is
+not proven until the oracle agrees. This mitigation makes no resolution claim to
+prove — it discloses that the existing claim is an over-approximation — so it
+ships now; the pruning feature that changes resolution is held for its own
+oracle-proven cycle.
