@@ -78,23 +78,42 @@ func (r *Resolver) Resolve(ctx context.Context, ecosystem, name, version string)
 		return expand.ResolvedGraph{}, false, nil
 	}
 
-	// MVS fixpoint: selected[modulePath] = the highest version any reachable
+	// MVS selection: selected[modulePath] = the highest version any reachable
 	// module requires. A module path carries its own major-version suffix
 	// (foo vs foo/v2), so those are distinct keys by construction.
+	//
+	// Build the FULL module graph (OPU-14): read the go.mod of every
+	// module@version that appears ANYWHERE, not only the version finally selected.
+	// A superseded lower version can carry a HIGHER requirement for a third
+	// module, and classic (pre-1.17) MVS counts it — reading only selected
+	// versions undershoots that third module. Proven on shellz:
+	// cloud.google.com/go@v0.52.0 (superseded by v0.54.0, which drops the
+	// requirement) is the only requirer of google.golang.org/appengine@v1.6.5, so
+	// a selected-only read picked v1.5.0 and the tool would evaluate the wrong
+	// artifact for advisories. Reading superseded versions is the correct,
+	// conservative direction for a scanner: never evaluate a version LOWER than a
+	// real build resolves.
+	type coord struct{ mod, ver string }
 	selected := map[string]string{name: version}
-	for changed := true; changed; {
-		changed = false
-		for mod, ver := range snapshot(selected) {
-			reqs, ok := fetch(mod, ver)
-			if !ok {
-				continue
+	graphSeen := map[coord]bool{{name, version}: true}
+	work := []coord{{name, version}}
+	for len(work) > 0 {
+		c := work[len(work)-1]
+		work = work[:len(work)-1]
+		reqs, ok := fetch(c.mod, c.ver)
+		if !ok {
+			continue
+		}
+		for _, req := range reqs {
+			if cur, exists := selected[req.module]; !exists || goVersionLess(cur, req.version) {
+				selected[req.module] = req.version
 			}
-			for _, req := range reqs {
-				cur, exists := selected[req.module]
-				if !exists || goVersionLess(cur, req.version) {
-					selected[req.module] = req.version
-					changed = true
-				}
+			// Enqueue THIS exact version — its go.mod is read even when the module
+			// is selected higher elsewhere, which is the whole point.
+			rc := coord{req.module, req.version}
+			if !graphSeen[rc] {
+				graphSeen[rc] = true
+				work = append(work, rc)
 			}
 		}
 	}
@@ -139,15 +158,6 @@ func (r *Resolver) Resolve(ctx context.Context, ecosystem, name, version string)
 		}
 	}
 	return expand.ResolvedGraph{Nodes: nodes, Edges: edges}, true, nil
-}
-
-// snapshot copies the selected map so the fixpoint can mutate it while iterating.
-func snapshot(m map[string]string) map[string]string {
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
 }
 
 // goVersionLess reports whether a < b under Go's version ordering. semver.Parse

@@ -2485,3 +2485,37 @@ Verified live against proxy.golang.org: a one-require go.mod (logrus v1.9.0)
 resolved its full transitive tree as 7 asserted nodes with concrete
 MVS-selected versions, each attributed to go-proxy — the exact null-delta the
 run-delta flagged, now closed.
+
+## D-72 — OPU-14: Go MVS reads the full module graph, not selected versions only
+
+OPU-13's Go asserted resolver computed MVS by reading the go.mod of the SELECTED
+version of each module only. Classic (pre-1.17) MVS reads the go.mod of EVERY
+version that appears in the module graph, including versions later superseded by
+a higher selection. A superseded lower version can carry a HIGHER requirement
+for a third module, and that requirement still counts in Go's build list — so a
+selected-only read undershoots that third module's selected version.
+
+This is not cosmetic: depSNORT runs its advisory/typosquat checks on the SELECTED
+version of each node, so a mis-selected transitive version means evaluating the
+wrong artifact — missing a CVE that affects the version a real build uses, or
+flagging one that does not apply. Proven on shellz: MVS diverged from
+`go list -m all` on exactly one module, google.golang.org/appengine (v1.5.0 vs
+Go's v1.6.5). The only requirers of appengine@v1.6.5 are cloud.google.com/go@v0.52.0
+and cloud.google.com/go/storage@v1.5.0 — BOTH superseded (by v0.54.0 / v1.6.0,
+which drop the requirement). The old fixpoint re-read only the selected version
+after a bump, so it never saw the v1.6.5 requirement Go retains.
+
+The fix replaces the selected-only fixpoint with a full-module-graph worklist:
+read the go.mod of every module@version encountered (superseded or not, keyed by
+the exact coordinate), taking the max version per module across all of them.
+Edges are still drawn at the selected versions (the resolved build graph). After
+the fix, shellz matches `go list -m all` 139/139 (was 133/134).
+
+This is unpruned pre-1.17 MVS. Go 1.17+ prunes the graph for a main module that
+itself declares go 1.17+, so for such a module Go could select a LOWER version
+than the full graph — i.e. this can theoretically OVER-include, never
+UNDER-include. For a security scanner that is the correct, conservative
+direction: the selected version is the one that could carry a vulnerability, and
+you never want to evaluate a version lower than a real build resolves. Exact
+parity with pruned builds, if ever required, would gate pruning on the main
+module's go directive — but never at the cost of re-introducing under-selection.
