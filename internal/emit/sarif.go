@@ -188,6 +188,11 @@ func (SARIF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo)
 		if f.Remediation != "" {
 			props["remediation"] = f.Remediation
 		}
+		// The root→node dependency chain answers "why is this package here?" for a
+		// deep transitive finding (OPU-12 D-3).
+		if len(f.DepPath) > 1 {
+			props["dep_path"] = strings.Join(f.DepPath, " → ")
+		}
 		// When the finding's subject is a node whose version this tool presumed
 		// rather than observed (D-44), say so as a property. A code-scanning
 		// dashboard can then deprioritize it: the finding is real, but the

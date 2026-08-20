@@ -345,6 +345,11 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 			if f.Remediation != "" {
 				d.wrapped("Remediation: "+f.Remediation, fontRegular, 8.5, colMuted, 8, 10.5)
 			}
+			// Root→node dependency chain: why this (often deep, transitive) package
+			// is present at all (OPU-12 D-3).
+			if len(f.DepPath) > 1 {
+				d.wrapped("Path: "+strings.Join(f.DepPath, " > "), fontRegular, 8.5, colMuted, 8, 10.5)
+			}
 			d.gap(5)
 		}
 		if n := omitted[finding.GateAdvisory]; n > 0 {

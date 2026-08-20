@@ -1034,6 +1034,16 @@ func cmdScan(args []string) int {
 	cov.FailedProjects = resolveFailures
 	cov.Complete = !cov.Incomplete() && len(cov.FlatEcosystems) == 0
 
+	// Attach each finding's root→node dependency path BEFORE the verdict, so every
+	// downstream copy (res.Findings and per-node graph.Node.Findings) carries it.
+	// A deep transitive finding's first question is "why is this package here?" —
+	// the chain answers it (OPU-12 D-3).
+	for i := range findings {
+		if p := g.PathToNode(findings[i].NodeID); len(p) > 1 {
+			findings[i].DepPath = p
+		}
+	}
+
 	res := verdict.EvaluateWithCoverage(g, findings, cov, verdict.Policy{
 		FailOnEligible:   *failEligible,
 		FailOnIncomplete: *failIncomplete,

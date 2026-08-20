@@ -249,6 +249,65 @@ func (g *Graph) SortedEdges() []Edge {
 	return out
 }
 
+// PathToNode returns the shortest dependency path from a root to target — the
+// chain of node IDs [root, …, target] — following depends-on edges, or nil if
+// target is unreachable from any root (or is itself a root, which has no path
+// TO cross). It answers a deep finding's first question: "why is this package
+// even here?" (OPU-12 D-3). Multi-source BFS from all roots gives the globally
+// shortest chain; sorted adjacency and root order make it deterministic (D-09).
+func (g *Graph) PathToNode(target string) []string {
+	if target == "" || g.Nodes[target] == nil {
+		return nil
+	}
+	// Adjacency over depends-on edges only, sorted for determinism.
+	adj := map[string][]string{}
+	for _, e := range g.SortedEdges() {
+		if e.Type == EdgeDependsOn {
+			adj[e.From] = append(adj[e.From], e.To)
+		}
+	}
+	roots := append([]string(nil), g.Roots...)
+	sort.Strings(roots)
+
+	prev := map[string]string{}
+	seen := map[string]bool{}
+	var queue []string
+	for _, r := range roots {
+		if g.Nodes[r] == nil || seen[r] {
+			continue
+		}
+		if r == target {
+			return []string{target}
+		}
+		seen[r] = true
+		queue = append(queue, r)
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, next := range adj[cur] {
+			if seen[next] {
+				continue
+			}
+			seen[next] = true
+			prev[next] = cur
+			if next == target {
+				// Reconstruct root → … → target.
+				chain := []string{next}
+				for at := cur; at != ""; at = prev[at] {
+					chain = append(chain, at)
+				}
+				for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+					chain[i], chain[j] = chain[j], chain[i]
+				}
+				return chain
+			}
+			queue = append(queue, next)
+		}
+	}
+	return nil
+}
+
 // Orphans returns package nodes that are neither a root nor the target of any
 // depends-on edge.
 //
