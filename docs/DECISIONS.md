@@ -3362,3 +3362,55 @@ install` / `uv tool install` — pre-existing pkg-install gaps, orthogonal to th
 change; and Go still has no install-surface extraction at all (no lifecycle-script manifest —
 it would need go-generate / cgo / -ldflags / build-tag-init analysis), a subsystem flagged as
 candidate OPU-28, not a Part-E gap.
+
+## D-91 — OPU-28 (Increment 1): Go install-surface — the go:generate build directive
+
+Go was the one covered ecosystem with NO install-surface extraction (the OPU-27 Part-E §8
+gap): it has resolution, expansion, OSV, and the temporal axis, but the VC-002 family never
+saw a Go "hook", because Go runs no package code at `go get` or `go build` by design — it has
+no lifecycle-script manifest. This begins the subsystem that gives Go its first VC-002
+coverage.
+
+Increment 1 extracts the `//go:generate` directive. It is Go's closest analog to a lifecycle
+script: an arbitrary command shipped in the package. Its trigger is deliberately weaker than an
+npm postinstall — a directive runs only when a developer invokes `go generate`, never at
+`go build`/`go get` — and the finding is honest about that. But `go generate ./...` is a
+routine dev/CI step, so a hostile directive in a dependency is weaponizable, and it is the
+strongest "arbitrary command in a package" shape Go offers.
+
+Design:
+
+- **installsurface.AnalyzeGo(sources)** extracts `//go:generate <command>` directives
+  (line-anchored: Go requires no space after `//`, so a `// go:generate …` comment or a
+  `"//go:generate …"` string literal is NOT a directive) and classifies each command through
+  the shared scanCaps engine. A directive is recorded ONLY if it carries a capability, so a
+  benign local generator (`mockgen`, `stringer`, `go run ./internal/gen`) is silent and adds no
+  graph node — the run-vs-fetch discipline applied to codegen, and what keeps the addition from
+  taxing every Go module that uses go:generate. A `curl | bash` directive is a cradle
+  (VC-002f), a `wget` fetch is network (VC-002b), a `curl -H "$NPM_TOKEN"` exfil composes to
+  VC-002d. No new capability, no new check ID — it reuses the whole VC-002 family. Multiple
+  directives in one file get indexed unique hook names so they do not collide to one node.
+
+- **gomod.ExtractInstallSurface** (the adapter finally implementing InstallSurfaceExtractor,
+  auto-dispatched by the interface assertion in main) walks the ROOT module's own .go files
+  through securefs (containment + size caps), bounded at maxGoFiles, skipping the dirs Go itself
+  ignores (vendor/, testdata/, '.'/'_'-prefixed). Symlinked directories are not followed (an
+  os.DirEntry symlink reports IsDir()==false), so there is no traversal cycle and no escape.
+  Hooks attribute to the root gomod node — the clone-and-assess-a-module workflow.
+
+Proof: AnalyzeGo unit tests (cradle/network/exfil positives; mockgen/stringer/go-run-local and
+the space-after-`//` / prose negatives; multi-directive unique naming) and end-to-end wiring
+tests through the real gomod adapter into the VC-002 family (curl|bash → VC-002f block,
+NPM_TOKEN exfil → VC-002d block, ordinary generate silent, a vendored directive out of scope
+while the root's fires). Each guard mutation-proven: allowing a space after `//`, dropping the
+capability gate, and un-skipping vendor/ each flip a case. Real-world oracle: a scan of
+depSNORT's own 251 .go files — where `//go:generate` appears only inside strings and comments —
+yields zero hooks, confirming the line anchor does not false-positive on real code.
+gofmt/vet clean, go test -race ./... green.
+
+Deferred to later OPU-28 increments (documented, not silent): per-dependency attribution from
+vendor/ and the module cache; cgo `#cgo CFLAGS/LDFLAGS` flag injection (`-fplugin=`, linker-flag
+abuse — build-time exec at `go build`, the stronger-trigger vector, needing tight flag
+discipline since bare cgo is ubiquitous); build-tag-gated `init()` evasion (runtime); and
+`go run <remote>@<version>` as a Go package runner (an npx analog). The Go blank column is now
+opened, not closed.

