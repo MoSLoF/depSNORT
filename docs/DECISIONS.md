@@ -3176,3 +3176,58 @@ retract-lure YankLureShape; the VC-012 Go finding proven high with retract vocab
 no build/install-hook wording. Proven against a live oracle: github.com/prometheus/common
 v1.20.99's real 37-entry retract block — every listed version reads retracted, every
 unlisted one does not. gofmt/vet clean, go test -race ./... green.
+
+## D-87 — OPU-27: install-surface coverage for package runners, manager installs, git-hook persistence
+
+Origin: a live-fire assessment of the MoSLoF/meshclaw fork exercised the install-surface
+analyzer against a populated dependency tree (17 hook nodes) and exposed three install-time
+behaviors the VC-002 pattern set scored as inert — each a real code-execution or network
+reach at a consumer's install time:
+
+- **Package runner** (`npx` / `bunx`, and `pnpm`/`yarn`/`bun dlx`|`x`): fetch-and-execute a
+  registry package in one step. `@meshtastic/core`'s `preinstall: npx only-allow pnpm` (and
+  two siblings) scored a bare VC-002a "a hook exists" note. Now CapNetwork + CapExec →
+  VC-002b. Unlike `curl | sh` this is the package manager's own resolution path, so it is
+  NOT CapCradle.
+- **Package-manager install** (`npm`/`pnpm`/`yarn`/`bun install|i|ci|add`, `pip`/`gem`/
+  `cargo`/`go install`, `poetry add`, `uv pip install|add`): pulls third-party code from a
+  registry during the hook. smart-buffer/socks' `prepublish: npm install -g typescript &&
+  npm run build` scored exec-only (incidental). Now CapNetwork; any exec is scored
+  independently by the exec markers.
+- **Git-hook-path manipulation** (`core.hooksPath` redirect, direct `.git/hooks/` write):
+  arranges code to auto-run on a future VCS event. Was invisible. Folded into
+  persistenceMarkers → CapFilesystem + a persistence marker → VC-002g, exactly like cron /
+  systemd / $PROFILE (OPU-19). No new capability, no new check ID.
+
+All three are structural regexes in scanCaps, matching the existing cradle/obfuscated-scheme
+pattern — text matched, never run (D-04). Capabilities route to the existing VC-002 checks.
+
+The discipline is load-bearing, and its guards are proven by mutation (each flips a test):
+
+- **Offline suppression.** `npx --no-install` / `--offline` / `--prefer-offline` resolve a
+  local bin only — pkgRunnerOfflineRe suppresses the network capability. `pnpm exec` /
+  `yarn exec` (run an already-installed bin) are excluded from the runner pattern entirely.
+- **Install vs. run.** pkgInstallRe matches only `install|i|ci|add` subcommands. `npm run
+  <script>` does not fetch and is never matched.
+- **Husky exclusion.** Bare `husky` / `husky install` is deliberately NOT a persistence
+  marker: it is the most common npm prepare script, runs only in a dev/git checkout (never a
+  consumer's tarball install), and listing it would reintroduce exactly the warning tax the
+  OPU-19 persistence-vs-benign split removed. Only the explicit `core.hooksPath` redirect and
+  direct `.git/hooks/` writes trip VC-002g.
+
+Proof: opu27_test.go asserts the quiet cases (node-gyp-build native compile, `npm run build`,
+husky, offline runners, `pnpm exec`) as hard as the positives — a coverage patch that cannot
+prove its own restraint is a regression waiting to happen. Each discipline guard shown to
+have teeth by mutation (dropped offline guard, `run` added to the install subcommands, husky
+added to the persistence set — all flip a negative). The OPU-19 frozen probe table is
+unchanged (none of its snippets carry the new trigger strings). Validated against a live
+oracle — the real published manifests fetched from registry.npmjs.org: `@meshtastic/core`'s
+npx guard reads network+exec end-to-end through Analyze, smart-buffer/socks' npm-install
+prepublish reads network, and node-gyp-build/`npm run build` stay quiet. gofmt/vet clean, go
+test -race ./... green (33 packages).
+
+Deferred (proposed, not built): Part D — a data-driven allowlist of known-benign runner
+targets (`only-allow`, well-known generators) to downgrade guard-clause noise, mirroring the
+husky exclusion; and a separate hardening pass on the incidental `& ` exec marker (PowerShell
+call-operator matching shell `&&`). Both left pending a call on whether the noise justifies
+the maintenance surface.

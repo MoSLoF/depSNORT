@@ -296,6 +296,14 @@ var (
 		"crontab", "systemd", "systemctl", "launchctl", "launchd", "startup",
 		// PowerShell / .NET
 		"$PROFILE", "Microsoft.PowerShell",
+		// VCS-event auto-execution (OPU-27): an install hook that redirects the
+		// git hook path or writes into a .git/hooks dir is arranging code to run
+		// on a future git event. DELIBERATELY these two explicit shapes only —
+		// bare `husky` / `husky install` is NOT listed, because it is the most
+		// common prepare script in the ecosystem, runs only in a dev/git checkout
+		// (never for a consumer's tarball install), and listing it would be the
+		// warning tax the persistence-vs-benign split exists to avoid (OPU-19).
+		"core.hooksPath", ".git/hooks/", ".git\\hooks\\",
 	}
 
 	// installWriteMarkers are ordinary filesystem writes an install legitimately
@@ -320,6 +328,36 @@ var (
 	// IMDS is reaching for cloud credentials, so a match elevates to CapCredentials
 	// — VC-002c, or VC-002d with egress — not a bland VC-002b network note.
 	imdsRe = regexp.MustCompile(`(?i)169\.254\.169\.254|metadata\.google\.internal|metadata\.azure\.com|/latest/meta-data/`)
+
+	// pkgRunnerRe recognizes package RUNNERS that fetch-and-execute a package
+	// from a registry in one step: npx/bunx, and the `dlx`/`x` subcommands of
+	// pnpm/yarn/bun (OPU-27). Unlike `curl | sh`, this is not a shell cradle —
+	// it is the package manager's own resolution path — so it is CapNetwork +
+	// CapExec (elevates to VC-002b), NOT CapCradle. The distinction matters:
+	// `postinstall: npx evil-pkg` is remote code execution at the CONSUMER's
+	// install time, scored today as a bare VC-002a hook. `pnpm exec` / `yarn
+	// exec` (run an ALREADY-installed local bin) are deliberately excluded — no
+	// fetch — as is `npx --no-install`/`--offline`.
+	pkgRunnerRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(=` + "`" + `])(?:npx|bunx)\s+(?:--?\w[\w-]*\s+)*[@\w]|(?:pnpm|yarn|bun)\s+(?:dlx|x)\s`)
+
+	// pkgRunnerOfflineRe suppresses pkgRunnerRe when the runner is explicitly
+	// pinned to not fetch. `npx --no-install foo` / `npx --offline foo` resolve
+	// only a local bin, so the network capability does not apply.
+	pkgRunnerOfflineRe = regexp.MustCompile(`(?i)(?:npx|bunx)\s+(?:--?\w[\w-]*\s+)*(?:--no-install|--offline|--prefer-offline)\b`)
+
+	// pkgInstallRe recognizes an install hook invoking a package MANAGER to
+	// install code from a registry (OPU-27). A hook that runs `npm install -g
+	// <x>`, `pip install <x>`, `gem install <x>`, `cargo install <x>` fetches and
+	// runs third-party code at the consumer's install time — a real network reach
+	// the current markers miss (smart-buffer/socks `npm install -g typescript`
+	// scored exec-only). `npm run <script>` is NOT matched (no fetch); only the
+	// install/add/ci subcommands are. This is CapNetwork; any exec is scored
+	// separately by the exec markers.
+	pkgInstallRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(])(?:` +
+		`(?:npm|pnpm|yarn|bun)\s+(?:install|i|ci|add)\b` +
+		`|pip[0-9.]*\s+install\b|python[0-9.]*\s+-m\s+pip\s+install\b` +
+		`|gem\s+install\b|cargo\s+install\b|go\s+install\b|poetry\s+add\b|uv\s+(?:pip\s+install|add)\b` +
+		`)`)
 )
 
 // IsPersistenceMarker reports whether an install-surface evidence marker names a
@@ -412,6 +450,19 @@ func scanCaps(text string) ([]Capability, []string) {
 	// cmd delayed expansion: /v:on enables !var! for evasion
 	if delayedExpansionRe.MatchString(text) {
 		add(CapObfuscation, "cmd-delayed-expansion")
+	}
+	// Package RUNNER (npx / pnpm dlx / yarn dlx / bunx): fetch-and-execute a
+	// registry package in one step — network + exec, at the consumer's install
+	// time (OPU-27). Suppressed when explicitly pinned offline / --no-install.
+	if m := pkgRunnerRe.FindString(text); m != "" && !pkgRunnerOfflineRe.MatchString(text) {
+		add(CapNetwork, "pkg-runner:"+strings.TrimSpace(m))
+		add(CapExec, "pkg-runner:"+strings.TrimSpace(m))
+	}
+	// Package MANAGER install (npm/pnpm/yarn/bun install|add|ci, pip/gem/cargo/go
+	// install, ...): fetches third-party code from a registry at install time
+	// (OPU-27). Network only; exec, if present, is scored by the exec markers.
+	if m := pkgInstallRe.FindString(text); m != "" {
+		add(CapNetwork, "pkg-install:"+strings.TrimSpace(m))
 	}
 	return caps, dedupe(ev)
 }
