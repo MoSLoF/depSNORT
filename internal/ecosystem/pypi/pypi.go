@@ -93,6 +93,12 @@ func inputPath(path string) (file, kind string) {
 		if p := filepath.Join(path, pdmLockName); fileExists(p) {
 			return p, "pdm"
 		}
+		// pylock.toml is the PEP 751 standard, tool-agnostic resolved lockfile;
+		// it carries edges when the locker records them, so it ranks with the
+		// other fully-resolved TOML lockfiles, above the flat Pipfile.lock.
+		if p := filepath.Join(path, pylockName); fileExists(p) {
+			return p, "pylock"
+		}
 		// Pipfile.lock is a true lockfile; prefer it over requirements.txt.
 		if p := filepath.Join(path, pipfileLockName); fileExists(p) {
 			return p, "pipfile"
@@ -131,6 +137,8 @@ func inputPath(path string) (file, kind string) {
 		return path, "poetry"
 	case base == pdmLockName:
 		return path, "pdm"
+	case isPylockFile(base):
+		return path, "pylock"
 	case base == pipfileLockName:
 		return path, "pipfile"
 	case base == pyprojectName:
@@ -153,6 +161,19 @@ func inputPath(path string) (file, kind string) {
 func fileExists(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && !info.IsDir()
+}
+
+// isPylockFile reports whether a filename is a PEP 751 lock file: the canonical
+// "pylock.toml" or a named variant matching r"^pylock\.([^.]+)\.toml$".
+func isPylockFile(name string) bool {
+	if name == pylockName {
+		return true
+	}
+	if !strings.HasPrefix(name, "pylock.") || !strings.HasSuffix(name, ".toml") {
+		return false
+	}
+	mid := strings.TrimSuffix(strings.TrimPrefix(name, "pylock."), ".toml")
+	return mid != "" && !strings.Contains(mid, ".")
 }
 
 // isRequirementsFile reports whether a filename is a pip requirements file by
@@ -209,6 +230,8 @@ func (a *Adapter) Resolve(path string) (*graph.Graph, error) {
 		return parsePoetryLock(path, raw)
 	case "pdm":
 		return parsePdmLock(path, raw)
+	case "pylock":
+		return parsePylock(path, raw)
 	case "pipfile":
 		return parsePipfileLock(path, raw)
 	case "pyproject":

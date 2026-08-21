@@ -3753,3 +3753,48 @@ Proof: analyzer tests (entry-exec fires; pure-data entry silent; bundled ELF sib
 CapExec; `nativeExecutableKind` across elf/pe/mach-o/js/short) and check tests (VC-002j fires on the
 composition, silent without the bundled binary, silent on a plain lifecycle exec hook). The registry
 drift guard requires VC-002j's registration. Full suite green (33/0), go vet silent, gofmt clean.
+
+## D-100 — OPU-29 (Increment 2): pylock.toml (PEP 751) — the standardized PyPI lockfile
+
+Builds the forward case D-97 deferred ("pylock.toml — same cheap path, implement on request once a real
+lock is in hand"). pylock.toml is the standardized, tool-agnostic resolved lockfile approved in PEP 751
+and maintained as a PyPA spec; uv, pipenv, pdm, and mousebender emit it, so a project locked with it was
+previously unreadable on its richest input (fell back to the pyproject manifest). This adds Tier 4 of the
+PyPI TOML-lockfile family alongside uv.lock / poetry.lock / pdm.lock — a line scanner over the constrained
+TOML subset (D-10 forbids a third-party parser), reusing the uv reader's inline-table primitives and
+poetry.lock's synthesized-root shape.
+
+Three properties of PEP 751 shape the reader:
+
+- **No root project.** The format records no project entry, so the root is synthesized and attached to the
+  in-degree-zero packages (the effective direct set), disclosed via `pypi.direct_attribution =
+  in-degree-zero` (the poetry/pdm shape).
+- **Edges are OPTIONAL.** `[[packages.dependencies]]` is defined as purely informational (installers MUST
+  NOT use it) and most tools omit it today. When present, the real transitive tree is built with real
+  depths. When absent for EVERY package there is nothing to reconstruct, so the reader falls back to flat
+  resolution and DISCLOSES it (`AttrFlatResolution`, D-24) exactly as Pipfile.lock does — presumed depth,
+  never silently invented. When edges exist the penalty is intentionally NOT set.
+- **Many source shapes.** Provenance may be an index (registry), or a vcs / directory / archive / sdist /
+  wheels reference; these collapse to one `(class, ref)` by specificity: vcs→git, directory→path,
+  archive→url, index→registry, then a bare sdist/wheel url→url.
+
+Detection: recognized as a directory input (ranked with the fully-resolved TOML lockfiles, above the flat
+Pipfile.lock), as a direct file, and as a named variant matching `^pylock\.([^.]+)\.toml$` (e.g.
+`pylock.dev.toml`) per the spec's file-name rule.
+
+Honest limits (documented, disclosed — not hidden): multi-marker duplicate packages use a last-wins name
+map (poetry's simplification; a genuinely forked graph resolves to the last entry); edges are only as good
+as the locker wrote them (flat-resolution disclosed when absent); `attestation-identities` / `tool` tables
+are read past this pass; a version-less source-tree entry has no pinned identity and is skipped for node
+creation and disclosed on its dependers (sibling convention).
+
+Proof: six new tests — canonical PEP 751 example (cattrs→attrs edge, attrs at depth ≥2 transitive,
+cattrs/numpy direct, NO flat penalty); edgeless lock (flat-resolution disclosed, all direct, inline sdist
+url extracted cleanly without sweeping trailing hashes); source classification across registry/git/path/
+url; empty-packages error; format-mismatch disclosed; filename detection incl. named variants and
+negatives. Full suite green (33/0), go vet silent, gofmt clean. D-10 (stdlib line scanner) and D-24
+(flat-resolution disclosure) honored.
+
+This closes the pylock.toml forward case; of D-97's deferred list only `bun.lock` (JSONC; `bun.lockb`
+binary) and `Pipfile` (manifest, not a lock) remain, both low-payoff, plus the no-adapter formats
+(flake.lock / conan.lock / deno.lock / pom.xml) which are separate adapter work.
