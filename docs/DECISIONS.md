@@ -3589,3 +3589,37 @@ green.
 This closes the OPU-28 register. Go's install-surface coverage now spans all three execution
 phases (on-demand generate, build-time cgo, runtime init) and the go-run remote runner, at the
 root AND across the dependency tree — the blank column is fully filled.
+
+## D-96 — OPU-28 (Increment 2 follow-up): cgo directives in a line-comment preamble
+
+A live-fire assessment (MoSLoF/meshclaw, companion handoff OPU27handoff_4) surfaced a gap in the
+Increment-2 cgo detector (D-92, VC-002h): `cgoDirectiveRe` matched a `#cgo` directive only when it
+began the line, i.e. the block-comment preamble form
+
+```go
+/*
+#cgo LDFLAGS: -fplugin=/tmp/evil.so
+*/
+import "C"
+```
+
+Go accepts the preamble equally as line comments, where the directive line begins with `//`:
+
+```go
+// #cgo LDFLAGS: -fplugin=/tmp/evil.so
+import "C"
+```
+
+The old regex `(?m)^[ \t]*#cgo\b[^\n]*` did not match the `// #cgo …` form, so a plugin-load (or
+any other) build-flag injection written that way scored **zero** — a real evasion, not a benign
+edge. The fix adds an optional comment prefix: `(?m)^[ \t]*(?://[ \t]*)?#cgo\b[^\n]*`. It is a
+recognition widening only; the discipline is unchanged — the `import "C"` gate (`cgoImportRe`) and
+the dangerous-flag requirement (`cgoInjectionReasons`) still decide whether a directive is
+recorded, so a benign `// #cgo LDFLAGS: -lssl` stays silent exactly as its block-comment cousin
+does. A real cgo directive always begins its comment line, so anchoring to `^[ \t]*(?://…)?` (not a
+trailing `code // #cgo`) is correct.
+
+Proof: the cgo injection table gains a `line-comment` positive (`// #cgo …-fplugin…` → CapExec +
+cgo-inject marker) and a `benign line-comment` negative (`// #cgo LDFLAGS: -L… -lssl` stays quiet).
+Mutation-proven: reverting the regex to the block-only form makes the line-comment positive fail
+with an empty surface — the exact zero-score the assessment observed. Full suite green (33/0).
