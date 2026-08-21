@@ -2,6 +2,7 @@ package pypi
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -43,6 +44,19 @@ func (a *Adapter) resolveBuildBackend(ctx context.Context, g *graph.Graph, consu
 
 	name, version, pinned, _ := pep508.Split(matched)
 	if !pinned {
+		// A standard, unpinned build backend (setuptools / hatchling /
+		// poetry-core / pdm-backend / flit / maturin / ...) is the universal,
+		// benign case: nearly every package declares one and few pin it to a
+		// concrete version. Counting each as an unresolved coverage gap makes
+		// almost every scan read "incomplete" for no actionable reason —
+		// especially now that lockfile readers expose the full transitive
+		// closure (OPU-29). Record a KNOWN backend as a disclosed-but-non-gating
+		// fact instead, and reserve the coverage gate for UNKNOWN backends,
+		// whose unresolvability is a genuine signal (Decision: OPU-29).
+		if installsurface.IsKnownBuildBackend(backend) {
+			addKnownBackend(consumer, name)
+			return
+		}
 		addUnresolved(consumer, name)
 		return
 	}
@@ -85,6 +99,31 @@ func (a *Adapter) resolveBuildBackend(ctx context.Context, g *graph.Graph, consu
 	if len(surface.Hooks) > 0 {
 		addPySurfaceToGraph(g, backendNode, surface)
 	}
+}
+
+// addKnownBackend records a standard, unpinned PEP 517 build backend as a
+// disclosed-but-non-gating fact on the consumer (attr "pypi.build_backend"),
+// deliberately kept OUT of graph.AttrUnresolved so it does not degrade coverage.
+// This mirrors the pypi.marker_excluded convention: the situation is surfaced,
+// not silently dropped, but it does not read as a real gap. The names are kept
+// sorted and de-duplicated so the attr is deterministic (D-09/D-13).
+func addKnownBackend(n *graph.Node, name string) {
+	if n.Attr == nil {
+		n.Attr = map[string]string{}
+	}
+	set := map[string]bool{}
+	if existing := n.Attr["pypi.build_backend"]; existing != "" {
+		for _, s := range strings.Split(existing, ",") {
+			set[s] = true
+		}
+	}
+	set[name] = true
+	names := make([]string, 0, len(set))
+	for s := range set {
+		names = append(names, s)
+	}
+	sort.Strings(names)
+	n.Attr["pypi.build_backend"] = strings.Join(names, ",")
 }
 
 // addUnresolved reuses graph.AttrUnresolved/AttrUnresolvedCount — the same

@@ -79,6 +79,20 @@ func inputPath(path string) (file, kind string) {
 		return "", ""
 	}
 	if info.IsDir() {
+		// uv.lock is a fully-resolved lockfile that expresses inter-package
+		// edges — the richest PyPI input there is. Prefer it over everything
+		// below (a manifest, a flat lockfile, or a requirements list).
+		if p := filepath.Join(path, uvLockName); fileExists(p) {
+			return p, "uv"
+		}
+		// poetry.lock is likewise a fully-resolved TOML lockfile with edges;
+		// prefer it over the flat Pipfile.lock and the pyproject manifest.
+		if p := filepath.Join(path, poetryLockName); fileExists(p) {
+			return p, "poetry"
+		}
+		if p := filepath.Join(path, pdmLockName); fileExists(p) {
+			return p, "pdm"
+		}
 		// Pipfile.lock is a true lockfile; prefer it over requirements.txt.
 		if p := filepath.Join(path, pipfileLockName); fileExists(p) {
 			return p, "pipfile"
@@ -111,6 +125,12 @@ func inputPath(path string) (file, kind string) {
 		return "", ""
 	}
 	switch base := filepath.Base(path); {
+	case base == uvLockName:
+		return path, "uv"
+	case base == poetryLockName:
+		return path, "poetry"
+	case base == pdmLockName:
+		return path, "pdm"
 	case base == pipfileLockName:
 		return path, "pipfile"
 	case base == pyprojectName:
@@ -183,6 +203,12 @@ func (a *Adapter) Resolve(path string) (*graph.Graph, error) {
 		return nil, fmt.Errorf("pypi: reading %s: %w", file, err)
 	}
 	switch kind {
+	case "uv":
+		return parseUvLock(path, raw)
+	case "poetry":
+		return parsePoetryLock(path, raw)
+	case "pdm":
+		return parsePdmLock(path, raw)
 	case "pipfile":
 		return parsePipfileLock(path, raw)
 	case "pyproject":

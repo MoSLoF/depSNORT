@@ -53,7 +53,7 @@ func lockPath(path string) string {
 
 // Detect implements ecosystem.Adapter.
 func (*Adapter) Detect(path string) bool {
-	return lockPath(path) != "" || yarnLockPath(path) != "" || manifestPath(path) != ""
+	return lockPath(path) != "" || pnpmLockPath(path) != "" || yarnLockPath(path) != "" || manifestPath(path) != ""
 }
 
 // lockfile is the subset of package-lock.json we parse.
@@ -102,6 +102,14 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 			return nil, fmt.Errorf("npm: reading lockfile: %w", err)
 		}
 		return parseLock(raw)
+	}
+	// pnpm-lock.yaml is a resolved graph; prefer it over the bare manifest.
+	if pp := pnpmLockPath(path); pp != "" {
+		raw, err := os.ReadFile(pp)
+		if err != nil {
+			return nil, fmt.Errorf("npm: reading pnpm-lock.yaml: %w", err)
+		}
+		return parsePnpmLock(pp, raw)
 	}
 	// A yarn.lock is a resolved tree too; prefer it over the bare manifest so a
 	// yarn project reports its pinned versions rather than presumed ones.
