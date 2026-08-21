@@ -346,24 +346,36 @@ var (
 	imdsRe = regexp.MustCompile(`(?i)169\.254\.169\.254|metadata\.google\.internal|metadata\.azure\.com|/latest/meta-data/`)
 
 	// runnerTargetRe recognizes package RUNNERS that fetch-and-execute a package
-	// from a registry in one step — npx/bunx and the `dlx`/`x` subcommands of
-	// pnpm/yarn/bun (OPU-27) — AND captures the target package name (group 1), so
-	// each invocation can be judged individually (Part D). Unlike `curl | sh`,
-	// this is not a shell cradle — it is the package manager's own resolution
-	// path — so a scored invocation is CapNetwork + CapExec (elevates to VC-002b),
-	// NOT CapCradle. `postinstall: npx evil-pkg` is remote code execution at the
-	// CONSUMER's install time, scored today as a bare VC-002a hook. `pnpm exec` /
-	// `yarn exec` (run an ALREADY-installed local bin) match neither branch — no
-	// fetch. A trailing `@version` is not captured (the `@` is outside the target
-	// character class), so `only-allow@2` yields target "only-allow".
-	runnerTargetRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(=` + "`" + `])(?:npx|bunx|(?:pnpm|yarn|bun)\s+(?:dlx|x))\s+(?:--?\w[\w-]*\s+)*(@?[\w][\w.-]*(?:/[\w.-]+)?)`)
+	// from a registry in one step, across ecosystems (OPU-27 + Part E), and
+	// captures the target package name (group 1) so each invocation can be judged
+	// individually (Part D):
+	//
+	//	JS     npx, bunx, pnpm/yarn/bun dlx|x
+	//	Python pipx run, uvx, uv tool run
+	//	Ruby   gem exec (RubyGems 3.5+)
+	//	.NET   dnx (the .NET 10 tool runner)
+	//
+	// Unlike `curl | sh`, this is not a shell cradle — it is the package manager's
+	// own resolution path — so a scored invocation is CapNetwork + CapExec
+	// (elevates to VC-002b), NOT CapCradle. The forms that run an ALREADY-installed
+	// bin (`pnpm exec`, `yarn exec`, `bundle exec`, `dotnet tool run`, `composer
+	// exec`, `poetry run`, `python -m`) match no branch — no fetch, no capability.
+	// The prefix class includes the quote characters `'"` so a runner invoked from
+	// a shell string inside setup.py / extconf.rb (`os.system('pipx run evil')`,
+	// backtick `gem exec evil`) is caught, not only a bare command; the quote must
+	// ABUT the keyword, which selects command-strings over prose that merely
+	// mentions a runner. A trailing `@version` is not captured (`@` is outside the
+	// target class), so `only-allow@2` yields target "only-allow".
+	runnerTargetRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(='"` + "`" + `])(?:npx|bunx|uvx|dnx|(?:pnpm|yarn|bun)\s+(?:dlx|x)|pipx\s+run|uv\s+tool\s+run|gem\s+exec)\s+(?:--?\w[\w-]*\s+)*(@?[\w][\w.-]*(?:/[\w.-]+)?)`)
 
 	// pkgRunnerOfflineRe suppresses a runner invocation that is explicitly pinned
-	// to not fetch. `npx --no-install foo` / `npx --offline foo` resolve only a
-	// local bin, so the network capability does not apply. It is tested against
-	// each invocation's own matched substring (not the whole hook), so an offline
-	// runner cannot suppress a second, network-reaching runner in the same hook.
-	pkgRunnerOfflineRe = regexp.MustCompile(`(?i)(?:npx|bunx|dlx|x)\s+(?:--?\w[\w-]*\s+)*(?:--no-install|--offline|--prefer-offline)\b`)
+	// to not fetch. `npx --no-install foo` / `npx --offline foo`, and `uvx
+	// --offline` / `uv tool run --offline` (Part E), resolve only a local bin, so
+	// the network capability does not apply. `pipx run` has no offline flag. It is
+	// tested against each invocation's own matched substring (not the whole hook),
+	// so an offline runner cannot suppress a second, network-reaching runner in the
+	// same hook.
+	pkgRunnerOfflineRe = regexp.MustCompile(`(?i)(?:npx|bunx|dlx|x|uvx|uv\s+tool\s+run)\s+(?:--?\w[\w-]*\s+)*(?:--no-install|--offline|--prefer-offline)\b`)
 
 	// benignRunnerTargets is a curated, exact-match allowlist of runner target
 	// packages that are known-benign guard clauses — they gate WHICH package
@@ -387,8 +399,12 @@ var (
 	// the current markers miss (smart-buffer/socks `npm install -g typescript`
 	// scored exec-only). `npm run <script>` is NOT matched (no fetch); only the
 	// install/add/ci subcommands are. This is CapNetwork; any exec is scored
-	// separately by the exec markers.
-	pkgInstallRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(])(?:` +
+	// separately by the exec markers. The prefix class carries the quote characters
+	// `'"` (Part E) so an install invoked from a shell string inside setup.py /
+	// extconf.rb (`os.system('pip install evil')`) is caught, not only a bare
+	// command — the same boundary the non-npm analyzers need to fire, and the same
+	// word-boundary precision (`xpip install` still does not match).
+	pkgInstallRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(='"` + "`" + `])(?:` +
 		`(?:npm|pnpm|yarn|bun)\s+(?:install|i|ci|add)\b` +
 		`|pip[0-9.]*\s+install\b|python[0-9.]*\s+-m\s+pip\s+install\b` +
 		`|gem\s+install\b|cargo\s+install\b|go\s+install\b|poetry\s+add\b|uv\s+(?:pip\s+install|add)\b` +

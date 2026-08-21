@@ -3309,3 +3309,56 @@ target to any character reintroduces the original `&&` bug — both flip a negat
 frozen probe table and the esbuild regression (whose CapExec comes from child_process, not the
 removed marker) are unchanged. gofmt/vet clean, go test -race ./... green (33 packages). This
 clears the last OPU-27 deferred item.
+
+## D-90 — OPU-27 Part E: package runners across every ecosystem (+ the quote-prefix boundary fix)
+
+OPU-27 shipped pkg-runner coverage for JS only (npx/bunx/dlx). The other ecosystems have
+equivalent fetch-and-execute-a-package runners an install hook can abuse identically — a
+setup.py that shells `pipx run <attacker>`, an extconf.rb that runs `gem exec <attacker>`.
+Part E extends the runner detector to them at parity with npx, closing the one asymmetry in
+the OPU-27 matrix (pkg-install and git-hook persistence already reach all ecosystems).
+
+Runners added (fetch + run → CapNetwork + CapExec → VC-002b, composing to VC-002d with a
+credential half): Python `pipx run` / `uvx` / `uv tool run`; Ruby `gem exec`; .NET `dnx`. The
+run-an-already-installed-bin forms are excluded (no fetch, no capability): `pnpm exec`, `yarn
+exec`, `bundle exec`, `dotnet tool run`, `composer exec`, `poetry run`, `python -m`. Offline
+suppression extended to `uvx --offline` / `uv tool run --offline` (`pipx run` has no offline
+flag). Evidence labels stay accurate: `gem exec` is `pkg-runner`, `gem install` is
+`pkg-install` — both reach the network, different shapes.
+
+Two implementation decisions:
+
+- **Unified, not a parallel regex.** The Part-E spec proposed a separate `pkgRunnerXRe` block.
+  Instead the non-npm runners were folded into the existing `runnerTargetRe` (the Part-D
+  capturing runner regex), so they inherit — for free — per-invocation judgement (a benign or
+  offline runner cannot launder a hostile one in the same hook), the offline suppression, and
+  the benign-runner allowlist (which stays npm-only, since no non-npm guard clause is on it). A
+  separate whole-text block would have reintroduced the very laundering gap Part D closed.
+
+- **The quote-prefix boundary fix.** A probe of the merged code found the runner and install
+  detectors did NOT fire on the realistic non-npm shape: a runner invoked from a shell string
+  inside setup.py / extconf.rb (`os.system('pipx run evil')`) — the prefix guard `[\s;&|(]`
+  admitted no quote character, so the keyword abutting an opening quote never matched. This is
+  the boundary bug the OPU-27 handoff/validation record describe fixing, which never landed in
+  the applied patch. The quote characters `'"` are added to the prefix class of BOTH
+  `runnerTargetRe` and `pkgInstallRe`. The quote must ABUT the keyword, which selects
+  command-strings (`'pip install …'`) over prose that merely mentions one (`"Please run pip
+  install"`, already matched via the space boundary), and word-boundary precision is preserved
+  (`xpip install` still does not match). This is consistent with the tool's existing acceptance
+  of substring network markers (curl/wget), and is what lets pkg-install/pkg-runner fire
+  through the Python and Ruby analyzers, not only npm command strings.
+
+Proof: opu27_xeco_test.go routes positives through the REAL AnalyzePython / AnalyzeRuby /
+AnalyzeDotNet (pipx run / uvx / uv tool run via os.system in setup.py, gem exec bare and
+backtick in extconf.rb, dnx in install.ps1 → network+exec), asserts the excludes stay off the
+network axis, and proves the VC-002d exfil substrate (gem exec fetch + ~/.aws/credentials read
+→ network+credentials on one hook). Each guard shown to have teeth by mutation: dropping `gem
+exec` from the runner set, dropping the quote characters from the prefix, and dropping `uv tool
+run` from the offline set each flip a case. The OPU-19 frozen probe table and the esbuild
+regression are unchanged. gofmt/vet clean, go test -race ./... green (33 packages).
+
+Out of scope, tracked honestly: pkgInstallRe does not match `dotnet tool install` / `pipx
+install` / `uv tool install` — pre-existing pkg-install gaps, orthogonal to this runner-scoped
+change; and Go still has no install-surface extraction at all (no lifecycle-script manifest —
+it would need go-generate / cgo / -ldflags / build-tag-init analysis), a subsystem flagged as
+candidate OPU-28, not a Part-E gap.
