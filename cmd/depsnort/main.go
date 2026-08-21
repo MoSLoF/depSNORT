@@ -458,13 +458,13 @@ func prefetchAdvisories(g *graph.Graph, src *osv.Client) (map[string][]datasourc
 // the attributes to corroborate and escalate the shape (OPU-26). Only the flagged
 // (rare) crates are fetched; the live-newest is not in the resolved graph, so this
 // is a targeted enrichment, not a walk.
-func enrichYankLure(g *graph.Graph, deps *registry.CargoDepsClient, src *registry.CrateSourceClient, releases map[string]*datasource.ReleaseHistory) emit.DataSourceCoverage {
-	cov := emit.DataSourceCoverage{Name: "cargo-yanklure"}
-	if len(releases) == 0 || deps == nil {
+func enrichYankLure(g *graph.Graph, deps *registry.CargoDepsClient, src *registry.CrateSourceClient, sdist *pypi.SdistFetcher, releases map[string]*datasource.ReleaseHistory) emit.DataSourceCoverage {
+	cov := emit.DataSourceCoverage{Name: "yanklure"}
+	if len(releases) == 0 {
 		return cov
 	}
 	for _, n := range g.SortedNodes() {
-		if n.Kind != graph.KindPackage || n.Ecosystem != "cargo" {
+		if n.Kind != graph.KindPackage || (n.Ecosystem != "cargo" && n.Ecosystem != "pypi") {
 			continue
 		}
 		h := releases[n.ID]
@@ -478,55 +478,99 @@ func enrichYankLure(g *graph.Graph, deps *registry.CargoDepsClient, src *registr
 		if !ok {
 			continue
 		}
-		base := datasource.Coord{Ecosystem: "cargo", Name: n.Name, Version: n.Version}
-		newC := datasource.Coord{Ecosystem: "cargo", Name: n.Name, Version: newest}
-		reqs, err := deps.Requirements(context.Background(), []datasource.Coord{base, newC})
-		if err != nil && cov.Error == "" {
-			cov.Error = err.Error()
-		}
-		newestReqs := reqs[newC.Key()]
-		introduced := registry.IntroducedBuildDeps(reqs[base.Key()], newestReqs)
-		if len(introduced) == 0 {
-			continue
-		}
-		if n.Attr == nil {
-			n.Attr = map[string]string{}
-		}
-		n.Attr["yanklure.newest"] = newest
-		n.Attr["yanklure.introduced_build_deps"] = strings.Join(introduced, ",")
-
-		// Increment 3: fetch each introduced build-dep's build.rs and record which
-		// are hostile — the compile-time payload the yank funnels a consumer toward.
-		if src == nil {
-			continue
-		}
-		reqOf := map[string]string{}
-		for _, r := range newestReqs {
-			reqOf[r.Name] = r.Req
-		}
-		var hostile []string
-		for _, dep := range introduced {
-			buildRS, _, found, ferr := src.ResolveBuildRS(context.Background(), dep, reqOf[dep])
-			if ferr != nil {
-				if cov.Error == "" {
-					cov.Error = ferr.Error()
-				}
-				continue
-			}
-			if found && hostileBuildRS(string(buildRS)) {
-				hostile = append(hostile, dep)
-			}
-		}
-		if len(hostile) > 0 {
-			n.Attr["yanklure.hostile_build_deps"] = strings.Join(hostile, ",")
+		switch n.Ecosystem {
+		case "cargo":
+			enrichCargoYankLure(n, newest, deps, src, &cov)
+		case "pypi":
+			enrichPyPIYankLure(n, newest, sdist, &cov)
 		}
 	}
-	cov.Stats = deps.Stats
+	if deps != nil {
+		cov.Stats.Queried += deps.Stats.Queried
+		cov.Stats.Gaps += deps.Stats.Gaps
+	}
 	if src != nil {
 		cov.Stats.Queried += src.Stats.Queried
 		cov.Stats.Gaps += src.Stats.Gaps
 	}
 	return cov
+}
+
+// enrichCargoYankLure records, on a flagged cargo crate, the BUILD dependencies its
+// live-newest introduces vs the pinned version (Increment 2) and which of them ship
+// a hostile build.rs (Increment 3).
+func enrichCargoYankLure(n *graph.Node, newest string, deps *registry.CargoDepsClient, src *registry.CrateSourceClient, cov *emit.DataSourceCoverage) {
+	if deps == nil {
+		return
+	}
+	base := datasource.Coord{Ecosystem: "cargo", Name: n.Name, Version: n.Version}
+	newC := datasource.Coord{Ecosystem: "cargo", Name: n.Name, Version: newest}
+	reqs, err := deps.Requirements(context.Background(), []datasource.Coord{base, newC})
+	if err != nil && cov.Error == "" {
+		cov.Error = err.Error()
+	}
+	newestReqs := reqs[newC.Key()]
+	introduced := registry.IntroducedBuildDeps(reqs[base.Key()], newestReqs)
+	if len(introduced) == 0 {
+		return
+	}
+	if n.Attr == nil {
+		n.Attr = map[string]string{}
+	}
+	n.Attr["yanklure.newest"] = newest
+	n.Attr["yanklure.introduced_build_deps"] = strings.Join(introduced, ",")
+
+	if src == nil {
+		return
+	}
+	reqOf := map[string]string{}
+	for _, r := range newestReqs {
+		reqOf[r.Name] = r.Req
+	}
+	var hostile []string
+	for _, dep := range introduced {
+		buildRS, _, found, ferr := src.ResolveBuildRS(context.Background(), dep, reqOf[dep])
+		if ferr != nil {
+			if cov.Error == "" {
+				cov.Error = ferr.Error()
+			}
+			continue
+		}
+		if found && hostileBuildRS(string(buildRS)) {
+			hostile = append(hostile, dep)
+		}
+	}
+	if len(hostile) > 0 {
+		n.Attr["yanklure.hostile_build_deps"] = strings.Join(hostile, ",")
+	}
+}
+
+// enrichPyPIYankLure records, on a flagged PyPI package, whether the live-newest's
+// own setup.py is hostile at install time — the direct PyPI payload analogue of the
+// cargo build.rs case (Increment 5). Unlike cargo, the payload is usually the
+// package's OWN setup.py in the malicious release, not a new dependency, so this
+// analyzes the newest version's setup.py directly.
+func enrichPyPIYankLure(n *graph.Node, newest string, sdist *pypi.SdistFetcher, cov *emit.DataSourceCoverage) {
+	if sdist == nil {
+		return
+	}
+	cov.Stats.Queried++
+	setupPy, found, err := sdist.SetupPySource(context.Background(), n.Name, newest)
+	if err != nil {
+		cov.Stats.Gaps++
+		if cov.Error == "" {
+			cov.Error = err.Error()
+		}
+		return
+	}
+	if !found || !hostileSetupPy(setupPy) {
+		return
+	}
+	if n.Attr == nil {
+		n.Attr = map[string]string{}
+	}
+	n.Attr["yanklure.newest"] = newest
+	n.Attr["yanklure.hostile_newest"] = newest
 }
 
 // hostileBuildRS reports whether a build.rs statically exhibits the compile-time
@@ -542,8 +586,22 @@ func enrichYankLure(g *graph.Graph, deps *registry.CargoDepsClient, src *registr
 // The signal is network paired with the things a legitimate build has no reason to
 // do — decode a blob, read credentials — or a fetch-and-run cradle outright.
 func hostileBuildRS(src string) bool {
+	return hostileInstallCaps(installsurface.AnalyzeRust(src))
+}
+
+// hostileSetupPy is the PyPI analogue (Increment 5): the live-newest's own setup.py
+// runs the install-time payload shape. Uses the same gate as hostileBuildRS.
+func hostileSetupPy(src string) bool {
+	return hostileInstallCaps(installsurface.AnalyzePython(src, "", nil))
+}
+
+// hostileInstallCaps applies the payload gate to an analyzed install surface (a
+// build.rs or a setup.py): a download-and-run cradle, or network egress paired with
+// decode-obfuscation or named-credential access. CapExec is excluded for the reason
+// above — both AnalyzeRust and AnalyzePython mark an install hook CapExec ambiently.
+func hostileInstallCaps(surface installsurface.Surface) bool {
 	caps := map[installsurface.Capability]bool{}
-	for _, h := range installsurface.AnalyzeRust(src).Hooks {
+	for _, h := range surface.Hooks {
 		for _, c := range h.Caps {
 			caps[c] = true
 		}
@@ -1039,7 +1097,8 @@ func cmdScan(args []string) int {
 		// only the flagged crates are fetched, so a non-cargo scan does nothing.
 		cargoLureDeps := registry.NewCargoDeps(datasource.NewCache(filepath.Join(*regCacheDir, "cargo-deps"), 24*time.Hour), *offline)
 		cargoLureSrc := registry.NewCrateSource(datasource.NewCache(filepath.Join(*regCacheDir, "cargo-source"), 24*time.Hour), *offline)
-		if lureCov := enrichYankLure(g, cargoLureDeps, cargoLureSrc, ctx.Releases); lureCov.Stats.Queried > 0 || lureCov.Error != "" {
+		pypiLureSdist := pypi.NewSdistFetcher(datasource.NewCache(filepath.Join(*regCacheDir, "pypi-sdist"), 24*time.Hour), *offline)
+		if lureCov := enrichYankLure(g, cargoLureDeps, cargoLureSrc, pypiLureSdist, ctx.Releases); lureCov.Stats.Queried > 0 || lureCov.Error != "" {
 			if lureCov.Error != "" {
 				fmt.Fprintf(os.Stderr, "depsnort: warning: %s coverage degraded: %v\n", lureCov.Name, lureCov.Error)
 			}

@@ -289,3 +289,27 @@ func TestYankLure_Critical_HostileBuildRS(t *testing.T) {
 		t.Errorf("evidence should call out the hostile build.rs: %q", fs[0].Evidence)
 	}
 }
+
+// Increment 5: a PyPI yank-lure whose live-newest's own setup.py is hostile
+// escalates to CRITICAL — the malicious release ships the payload in its own
+// install hook, independent of any dependency diff.
+func TestYankLure_Critical_PyPIHostileSetupPy(t *testing.T) {
+	g := graph.New()
+	id := "pkg:pypi/soup@1.2.3"
+	g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "pypi", Name: "soup", Version: "1.2.3",
+		Attr: map[string]string{"yanklure.hostile_newest": "1.2.4"}})
+	h := &datasource.ReleaseHistory{Package: "soup", Ecosystem: "pypi", Releases: []datasource.Release{
+		{Version: "1.2.1", Yanked: true}, {Version: "1.2.2", Yanked: true}, {Version: "1.2.3", Yanked: true},
+		{Version: "1.2.4", Yanked: false},
+	}}
+	fs := runYankLure(g, id, h)
+	if len(fs) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(fs))
+	}
+	if fs[0].Severity != finding.SevCritical {
+		t.Errorf("severity = %q, want critical (hostile live-newest setup.py)", fs[0].Severity)
+	}
+	if !strings.Contains(fs[0].Evidence, "setup.py") {
+		t.Errorf("evidence should call out the hostile setup.py: %q", fs[0].Evidence)
+	}
+}

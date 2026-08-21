@@ -224,6 +224,23 @@ func (f *SdistFetcher) Fetch(ctx context.Context, name, version string) (*sdistF
 	return &files, nil
 }
 
+// SetupPySource returns a package version's setup.py text, or found=false when the
+// version ships no analyzable setup.py (wheel-only, or a pyproject-only build). It
+// is the yank-lure enrichment's read of the live-newest's install-time payload
+// (OPU-26 Increment 5): a maintainer-account takeover ships a malicious setup.py in
+// the newest release, and pip runs it at install. Reading the script's TEXT is
+// static analysis, not execution (D-04); the fetch is digest-verified upstream.
+func (f *SdistFetcher) SetupPySource(ctx context.Context, name, version string) (setupPy string, found bool, err error) {
+	files, err := f.Fetch(ctx, name, version)
+	if err != nil {
+		return "", false, err
+	}
+	if files == nil || files.SetupPy == "" {
+		return "", false, nil
+	}
+	return files.SetupPy, true, nil
+}
+
 // pypiVersionInfo is the subset of the PyPI JSON API response we need.
 type pypiVersionInfo struct {
 	URLs []pypiURL `json:"urls"`

@@ -3097,3 +3097,42 @@ Process: the yanked parse proven against real PyPI JSON and a unit test (all-fil
 -yanked is yanked, one-live-file is not); the check by a pypi shape test (fires high
 with pip/setup.py wording) and a repointed scope guard (npm — an ecosystem with no
 yanked flag — stays quiet). gofmt/vet clean, go test -race ./... green (33 packages).
+
+## D-85 — OPU-26 (Increment 5): PyPI yank-lure payload — the live-newest's setup.py
+
+Increment 4 gave PyPI the yank-lure SHAPE; this gives it the payload half. Unlike
+cargo — where the payload rides an INTRODUCED build-dependency's build.rs — a
+malicious PyPI release usually ships the payload in its OWN setup.py, run by pip at
+install. So the PyPI enrichment analyzes the live-newest version's setup.py directly,
+rather than diffing dependencies.
+
+Fetch. SdistFetcher already downloads and extracts a package version's setup.py
+(digest-verified, host-allowlisted, size-capped — the machinery Increment 3 mirrored
+for crates). A new exported SetupPySource(name, version) returns just the live-newest's
+setup.py text; no new fetcher, no new network surface.
+
+Enrichment restructured. enrichYankLure is now a dispatcher over the two yank-data
+ecosystems: cargo keeps the introduced-build-dep + build.rs path (Increments 2-3);
+pypi runs enrichPyPIYankLure, which fetches the live-newest's setup.py and, when it is
+hostile, records yanklure.hostile_newest. Only flagged (rare) packages are fetched,
+and the live-newest is NOT added to the resolved graph — it is enrichment for a
+finding, the version the project has not adopted (D-77).
+
+Hostility is shared. hostileBuildRS and the new hostileSetupPy both delegate to
+hostileInstallCaps over an analyzed surface (AnalyzeRust / AnalyzePython): a cradle,
+or network paired with decode-obfuscation or named-credential access. CapExec stays
+excluded for both — AnalyzePython marks a setup.py CapExec ambiently (setup.py
+executes by definition), the same trap the cargo build.rs analysis hit; the gate keys
+on network + the things a legitimate install has no reason to do.
+
+VC-012 escalation. A hostile live-newest setup.py escalates the PyPI finding to
+CRITICAL on its own, independent of any dependency diff, with pip/setup.py wording via
+yankLureRegistry. It is a separate trigger from the cargo introduced-build-dep tells,
+which a PyPI node never carries.
+
+Process: hostileSetupPy proven by table test (creds+net and decode+net fire; a plain
+setup and a prebuilt-wheel fetch do not), sharing the CapExec-trap discipline; the
+PyPI escalation by a VC-012 test shown to have teeth by mutation. gofmt/vet clean, go
+test -race ./... green (33 packages). The yank-lure composite is now complete for both
+supporting ecosystems — cargo (build.rs, via an introduced dep) and PyPI (setup.py, in
+the release itself).
