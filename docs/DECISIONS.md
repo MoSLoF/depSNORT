@@ -3676,3 +3676,35 @@ only because the ecosystem adapter is absent — separate adapter work, not this
 Proof: five new tests — `TestParse{UvLock,PoetryLock,PdmLock,PnpmLock}` and
 `TestKnownBackendIsNonGating`; full suite green (33/0), `-race` clean, `go vet` silent, gofmt no
 diffs. The handoff validated each reader on a real target (getsploit/uv, poetry, pdm, vite/pnpm).
+
+## D-98 — OPU-30: build-backend exact-match remediation (prefix-match trust bypass)
+
+An OPU-29 erratum: `IsKnownBuildBackend` used `strings.HasPrefix(backend, known)`, so any backend
+name STARTING WITH a known one was trusted — `hatchling.build_evil`, `hatchling.build.evil_submodule`,
+`setuptools.build_meta_pwn`. That predicate is shared by two decisions: whether `analyzeBuildBackend`
+fires the non-standard-backend hook, AND (via the D-97/OPU-29 gate) whether an unpinned backend counts
+as a coverage gap. A malicious backend with a known prefix suppressed BOTH — it executed at build time
+yet was invisible on every axis. A single predicate fix closes both.
+
+**The fix.** A PEP 517 build-backend is `module` or `module:object`. The matcher strips the `:object`
+suffix and matches the MODULE part EXACTLY against `knownBuildBackends` (which already holds full
+module paths like `hatchling.build`, `setuptools.build_meta`, so exact-match does not break legit
+backends). `hatchling.build_evil` / `.evil_submodule` / `setuptools.build_meta_pwn` no longer match;
+`setuptools.build_meta:__legacy__` still does (module known). The object suffix on a genuinely known
+module is not a naming vector — the executing code lives in the known module — so stripping it is safe.
+
+**Second change.** The non-gating disclosure (`pypi.build_backend`) now records the real backend
+MODULE reference (`hatchling.build`) instead of the sanitized requires-entry package name
+(`hatchling`), so a future watch/drift rule sees the value that actually executes at build time.
+
+Proof: `TestIsKnownBuildBackendExactMatch` locks the boundary — the known set (incl. the
+`:__legacy__` object-suffix form) must trust, five prefix spoofs must flag. Mutation-proven: reverting
+to `HasPrefix` fails all five spoofs. No OPU-29 regression — legit backends still match exactly and
+stay non-gating; the three OPU-29 targets (getsploit 0 / poetry 5 / pdm 1 unresolved) are unchanged.
+Full suite green (33/0), go vet silent, gofmt clean.
+
+Deferred (not in this increment): build-backend baseline/drift on the drift axis (VC-010/11) — a
+backend swap between a baselined version and its update is the real defense for the sleeper class, now
+feasible because the disclosure carries the real backend reference. And periodic review of the
+known-list, which is now the trust boundary (adding an entry is a one-line low-risk change; loosening
+the match is not).

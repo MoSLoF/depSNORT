@@ -1470,8 +1470,21 @@ func analyzeBuildBackend(tomlSource string, hasSetupPy bool, requires []string) 
 // IsKnownBuildBackend reports whether backend is one of the standard Python
 // packaging ecosystem's PEP 517 build backends.
 func IsKnownBuildBackend(backend string) bool {
+	// A PEP 517 build-backend is `module` or `module:object`. Match the MODULE
+	// part EXACTLY against the known set. The prior HasPrefix match let an
+	// attacker name a malicious backend with a known prefix — `hatchling.build_evil`
+	// or `hatchling.build.evil_submodule` — and be trusted, suppressing both the
+	// non-standard-backend hook and (via the OPU-29 gate) the coverage signal, so
+	// the backend executed at build time yet was invisible on every axis (OPU-30).
+	// The object suffix on a KNOWN module is not a naming vector: the executing
+	// code lives in the known module, so it is stripped before matching.
+	module := backend
+	if i := strings.IndexByte(module, ':'); i >= 0 {
+		module = module[:i]
+	}
+	module = strings.TrimSpace(module)
 	for _, known := range knownBuildBackends {
-		if strings.HasPrefix(backend, known) {
+		if module == known {
 			return true
 		}
 	}
