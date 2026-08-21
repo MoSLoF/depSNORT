@@ -1421,6 +1421,7 @@ var knownBuildBackends = []string{
 	"pdm.backend",
 	"mesonpy",
 	"whey",
+	"uv_build", // Astral's uv build backend (uv-managed projects); OPU-29
 }
 
 // analyzeBuildBackend checks pyproject.toml for non-standard build backends.

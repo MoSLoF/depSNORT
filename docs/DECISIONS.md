@@ -3623,3 +3623,56 @@ Proof: the cgo injection table gains a `line-comment` positive (`// #cgo …-fpl
 cgo-inject marker) and a `benign line-comment` negative (`// #cgo LDFLAGS: -L… -lssl` stays quiet).
 Mutation-proven: reverting the regex to the block-only form makes the line-comment positive fail
 with an empty surface — the exact zero-score the assessment observed. Full suite green (33/0).
+
+## D-97 — OPU-29: lockfile coverage for uv / poetry / pdm (PyPI) and pnpm (npm), + build-backend gate fix
+
+Dogfooding depSNORT against a `uv`-locked project exposed that it could not read `uv.lock`: it fell
+back to the pyproject manifest and returned a clean-looking but blind verdict over a mostly-guessed
+graph. This adds a lockfile reader wherever the ecosystem adapter already exists — the cheap
+reader-into-existing-adapter path, no new ecosystems — closing the sibling gaps for the resolved
+lockfiles depSNORT did not yet parse, plus a coverage-semantics fix.
+
+**Register ID.** The handoff proposed "OPU-27", but OPU-27 (install-surface package runners /
+manager installs / git-hook persistence) and OPU-28 (Go install-surface) are already filed. This
+work is filed as **OPU-29** and all in-code register references use that ID; the pre-existing
+OPU-27 install-surface references are untouched.
+
+**Four readers, all hand-rolled line scanners (D-10 — no third-party TOML/YAML parser), following
+the in-tree `cargo` precedent that already hand-scans `Cargo.lock`:**
+
+- **uv.lock** (pypi, TOML) — fully-resolved graph with per-package `dependencies`, so the transitive
+  closure becomes observed fact, not presumption. Reads the editable `.` project as the subject; no
+  D-24 flat-resolution penalty.
+- **poetry.lock** (pypi, TOML) — synthesizes a root (the lock has none), `[package.dependencies]`
+  sub-tables drive edges, group-based section tags, git-source provenance disclosed.
+- **pdm.lock** (pypi, TOML) — PEP 508 dependency strings parsed via the existing `internal/pep508`
+  helper; seeded the shared dependency-cycle attachment fix.
+- **pnpm-lock.yaml** (npm, YAML) — an indentation-aware scanner over `importers` / `packages` /
+  `snapshots`. Peer suffixes (`(react@18.0.0)`) are stripped to reconcile edge targets to bare
+  nodes, collapsing peer-variants of one version onto a single node (a documented, disclosed
+  simplification). lockfileVersion 9.x targeted; other versions best-effort + disclosed on the root.
+
+A shared `attachUnrooted` pass guarantees every locked package is reachable from the (synthesized,
+where needed) root, so a marker-gated dep (e.g. `tomli`, pulled only on `python_version < 3.11`) or a
+peer/optional-stranded component never floats detached. Real edges give real BFS depths.
+
+**Build-backend gate fix (cross-cutting).** Once the readers exposed full observed graphs, the
+build-backend axis flagged nearly every package as carrying an unresolved backend, because
+`build-system.requires` is almost always unpinned (`requires = ["hatchling"]`) — making almost every
+scan read "incomplete" for a universal, benign reason. Fix: in `resolveBuildBackend`, a KNOWN
+standard unpinned backend is recorded as a disclosed-but-non-gating fact (`pypi.build_backend`,
+sorted + de-duplicated, kept out of `graph.AttrUnresolved`) instead of a coverage gap; the gate is
+reserved for UNKNOWN backends, whose unresolvability is genuine signal. Behavior is unchanged for
+unknown backends and for pinned `requires` (still resolved to a fetchable node). `uv_build` (Astral's
+backend) is added to the known-backend set. Locked by `TestKnownBackendIsNonGating`.
+
+Open decisions from the handoff, resolved here: synthesized-root attribution uses the in-degree-zero
+heuristic as lock-only truth (no sibling-pyproject cross-reference); pnpm uses the bare-version node
+model (peer-variant collapse accepted). Forward cases deliberately NOT built (documented, no
+validation sample or low payoff): `pylock.toml` (PEP 751), `bun.lock` (JSONC; `bun.lockb` binary),
+`Pipfile` (manifest, not a lock). `flake.lock` / `conan.lock` / `deno.lock` / `pom.xml` are unparsed
+only because the ecosystem adapter is absent — separate adapter work, not this item.
+
+Proof: five new tests — `TestParse{UvLock,PoetryLock,PdmLock,PnpmLock}` and
+`TestKnownBackendIsNonGating`; full suite green (33/0), `-race` clean, `go vet` silent, gofmt no
+diffs. The handoff validated each reader on a real target (getsploit/uv, poetry, pdm, vite/pnpm).
