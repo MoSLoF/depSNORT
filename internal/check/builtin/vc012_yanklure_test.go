@@ -105,19 +105,47 @@ func TestYankLure_Quiet_LivePinNoYank(t *testing.T) {
 	}
 }
 
-// Scope guard with teeth: yank data is only trustworthy on cargo, where the
-// registry supplies it. A non-cargo node whose history carries Yanked=true (which
-// no real non-cargo source sets, but a test can) must be ignored — reading an
-// always-false flag elsewhere as "live" would be a silent miss dressed as clean.
-func TestYankLure_Quiet_NonCargoEcosystem(t *testing.T) {
+// Scope guard with teeth: yank data is only trustworthy where the registry
+// supplies it (cargo, pypi). An ecosystem WITHOUT a per-version yanked flag (npm
+// here) whose history carries Yanked=true — which no real npm source sets, but a
+// test can — must be ignored; reading an always-false flag there as "live" would
+// be a silent miss dressed as clean.
+func TestYankLure_Quiet_UnscopedEcosystem(t *testing.T) {
 	g := graph.New()
-	id := "pkg:pypi/lure@1.0.0"
-	g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "pypi", Name: "lure", Version: "1.0.0"})
-	h := &datasource.ReleaseHistory{Package: "lure", Ecosystem: "pypi", Releases: []datasource.Release{
+	id := "pkg:npm/lure@1.0.0"
+	g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "npm", Name: "lure", Version: "1.0.0"})
+	h := &datasource.ReleaseHistory{Package: "lure", Ecosystem: "npm", Releases: []datasource.Release{
 		{Version: "1.0.0", Yanked: true}, {Version: "1.0.1", Yanked: true}, {Version: "1.0.2", Yanked: false},
 	}}
 	if fs := runYankLure(g, id, h); len(fs) != 0 {
-		t.Errorf("VC-012 must ignore non-cargo ecosystems (yank data untrustworthy there), got %d", len(fs))
+		t.Errorf("VC-012 must ignore ecosystems without a yanked flag (npm), got %d", len(fs))
+	}
+}
+
+// PyPI (PEP 592 yank) gets the same shape detection as cargo (OPU-26 Increment 4):
+// pinned to a yanked release beneath a live newest atop a yanked run => high, with
+// pip/setup.py in the wording rather than cargo/build.rs.
+func TestYankLure_FiresHigh_PyPIShape(t *testing.T) {
+	g := graph.New()
+	id := "pkg:pypi/soup@1.2.3"
+	g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "pypi", Name: "soup", Version: "1.2.3"})
+	h := &datasource.ReleaseHistory{Package: "soup", Ecosystem: "pypi", Releases: []datasource.Release{
+		{Version: "1.2.1", Yanked: true}, {Version: "1.2.2", Yanked: true}, {Version: "1.2.3", Yanked: true},
+		{Version: "1.2.4", Yanked: false}, // live newest — the lure target
+	}}
+	fs := runYankLure(g, id, h)
+	if len(fs) != 1 {
+		t.Fatalf("want 1 finding for the pypi yank-lure shape, got %d", len(fs))
+	}
+	f := fs[0]
+	if f.Severity != finding.SevHigh || f.GateClass != finding.GateEligible {
+		t.Errorf("severity/gate = %q/%q, want high/gate-eligible", f.Severity, f.GateClass)
+	}
+	if !strings.Contains(f.Evidence, "pip nudges") {
+		t.Errorf("evidence should say pip (not cargo): %q", f.Evidence)
+	}
+	if !strings.Contains(f.Remediation, "setup.py") {
+		t.Errorf("remediation should reference setup.py (not build.rs): %q", f.Remediation)
 	}
 }
 

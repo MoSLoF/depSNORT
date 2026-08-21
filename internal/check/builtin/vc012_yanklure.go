@@ -48,7 +48,7 @@ func (YankLure) Meta() check.Meta {
 		DefaultSeverity: finding.SevMedium,
 		DefaultGate:     finding.GateAdvisory,
 		Description:     "dependency pinned to a yanked version; elevated on the yank-lure shape",
-		DataDeps:        []string{"cargo-registry"},
+		DataDeps:        []string{"cargo-registry", "pypi-registry"},
 	}
 }
 
@@ -61,6 +61,25 @@ const attrIntroducedBuildDeps = "yanklure.introduced_build_deps"
 // build.rs statically exhibits the compile-time payload shape (Increment 3).
 const attrHostileBuildDeps = "yanklure.hostile_build_deps"
 
+// yankLureRegistry returns the installer name and the install-time hook file for an
+// ecosystem whose registry supplies a per-version yanked flag, and ok = whether
+// VC-012 should evaluate it. cargo (yank) and PyPI (PEP 592 yank) both make a
+// yanked version un-selectable in a fresh resolution while keeping it installable
+// when exactly pinned — the shape the lure exploits. Elsewhere Release.Yanked is
+// always false and means "unknown", so the check does not run: reading it as "live"
+// would be a silent miss dressed as clean (D-24). The introduced-dependency
+// corroborators (Increments 2-3) are cargo-only for now; a PyPI node simply gets the
+// shape finding, without them.
+func yankLureRegistry(ecosystem string) (installer, hook string, ok bool) {
+	switch ecosystem {
+	case "cargo":
+		return "cargo", "build.rs", true
+	case "pypi":
+		return "pip", "setup.py", true
+	}
+	return "", "", false
+}
+
 // Run implements check.Check.
 func (YankLure) Run(ctx *check.Context) []finding.Finding {
 	if len(ctx.Releases) == 0 {
@@ -68,7 +87,8 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 	}
 	var out []finding.Finding
 	for _, n := range ctx.Graph.SortedNodes() {
-		if n.Kind != graph.KindPackage || n.Ecosystem != "cargo" {
+		installer, hook, evaluable := yankLureRegistry(n.Ecosystem)
+		if n.Kind != graph.KindPackage || !evaluable {
 			continue // yank data is only trustworthy where the registry supplies it
 		}
 		h := ctx.Releases[n.ID]
@@ -92,10 +112,10 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 			gate = finding.GateEligible
 			conf = 0.7
 			title = fmt.Sprintf("yank-lure: pinned to yanked %s beneath a live newest %s", n.Version, newest)
-			evidence = fmt.Sprintf("%s@%s is yanked, and the crate's highest live version %s sits atop a contiguous run of %d yanked versions — "+
-				"the yank-lure shape (cf. arrayref/proc-macro1, 2026-08-20): cargo nudges a yanked-version consumer toward the newest non-yanked release, which is exactly where an account-takeover attacker plants the payload",
-				n.Name, n.Version, newest, run)
-			remediation = fmt.Sprintf("do NOT blindly upgrade to %s: inspect its introduced dependencies and build.rs first — the yanked run below it is the lure, and the live newest is the version to audit", newest)
+			evidence = fmt.Sprintf("%s@%s is yanked, and the package's highest live version %s sits atop a contiguous run of %d yanked versions — "+
+				"the yank-lure shape (cf. arrayref/proc-macro1, 2026-08-20): %s nudges a yanked-version consumer toward the newest non-yanked release, which is exactly where an account-takeover attacker plants the payload",
+				n.Name, n.Version, newest, run, installer)
+			remediation = fmt.Sprintf("do NOT blindly upgrade to %s: inspect its introduced dependencies and %s first — the yanked run below it is the lure, and the live newest is the version to audit", newest, hook)
 
 			// Increment-2 corroboration: the enrichment stage recorded the BUILD
 			// dependencies the live-newest introduces vs the pinned version. A new
