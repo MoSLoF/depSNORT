@@ -3798,3 +3798,46 @@ negatives. Full suite green (33/0), go vet silent, gofmt clean. D-10 (stdlib lin
 This closes the pylock.toml forward case; of D-97's deferred list only `bun.lock` (JSONC; `bun.lockb`
 binary) and `Pipfile` (manifest, not a lock) remain, both low-payoff, plus the no-adapter formats
 (flake.lock / conan.lock / deno.lock / pom.xml) which are separate adapter work.
+
+## D-101 — OPU-29 (Increment 3): bun.lock — Bun's text lockfile (npm ecosystem)
+
+Builds a D-97 deferred forward case. bun.lock is the text lockfile Bun writes (default since Bun 1.2,
+replacing the binary bun.lockb, which depSNORT cannot read and only disclosed as a gap). It is fully
+resolved: a `workspaces` table gives the root project's direct dependencies and a `packages` table carries
+one entry per resolved package with its own dependency set — so, like package-lock.json, the transitive
+closure is observed fact, not presumption. The npm adapter now claims bun.lock in Detect and resolves it to
+a real npm graph (pinned versions, provenance, edges), preferred over the bare package.json manifest.
+
+**JSONC, not JSON.** bun.lock permits trailing commas and comments, which Go's encoding/json rejects.
+Rather than hand-scan nested JSON, a small STRING-AWARE sanitizer (`stripJSONC`) removes line/block comments
+and trailing commas — preserving a `//` or `,` inside a string value — and then the stdlib parser reads it.
+encoding/json is stdlib, so this honors D-10 (no third-party parser) while being far more robust than a
+hand-rolled nested-JSON reader. This is the family's first use of the strip-JSONC-then-stdlib approach
+(the TOML/YAML readers are line scanners because Go ships no parser for those; it does ship JSON).
+
+**Descriptor + metadata.** Each `packages` entry is a heterogeneous tuple `[name@version, registry,
+{meta}, hash]`. `splitBunDescriptor` parses the name/version (scoped `@scope/pkg@1.2.3`, `npm:` aliases,
+git/workspace refs all handled); the metadata object is the first tuple element that is a JSON object, and
+its dependency maps become edges. `bunSource` maps the descriptor version to a provenance class: github:/
+git+ → git, workspace:/file:/link: → path, http(s): → url, plain semver / npm-alias → registry. A
+dependency's OWN devDependencies are not edged (npm/bun install semantics, matching resolveV2); the root
+workspace's devDependencies ARE direct (the root project installs them).
+
+**gap.go.** bun.lock is added to `adapterHandledLocks` so the pure gap classifier stays honest — bun.lock
+ends in `.lock`, and without this the catch-all would mislabel a claimed-and-scanned lockfile as an unknown
+gap.
+
+Honest limits (documented): multi-version duplicates use a last-wins name map (a package pinned at two
+versions resolves edges to the last; the common flat case is unaffected, mirroring poetry's
+simplification); exotic descriptors (aliases, nested workspace paths) are best-effort — provenance still
+classifies and identity still resolves.
+
+Proof: a fixture with a comment, trailing commas, a scoped name, a devDependency, a git descriptor, and a
+transitive chain scans to 7 nodes / 6 edges — react → loose-envify → js-tokens at real depths 1/2/3,
+typescript (devDependency) correctly direct, @scope/util parsed, registry vs git sources classified. Four
+unit tests (parse, stripJSONC in-string preservation, descriptor splitting, source mapping); full suite
+green (33/0), -race clean, go vet silent, gofmt clean. D-04 (parse only, no execution) and D-10 preserved.
+
+Of D-97's deferred list, only Pipfile (pipenv's manifest, not a lock) now remains among the in-adapter
+readers; the four no-adapter formats (flake.lock / conan.lock / deno.lock / pom.xml) are separate
+new-ecosystem work.

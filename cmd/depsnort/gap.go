@@ -114,6 +114,7 @@ var adapterHandledLocks = map[string]bool{
 	"Gemfile.lock":  true, // gem
 	"Pipfile.lock":  true, // pypi
 	"paket.lock":    true, // nuget (OPU-17)
+	"bun.lock":      true, // npm (text lockfile; parsed by parseBunLock)
 }
 
 // unreadManifest names one recognized-but-unresolved manifest and the ecosystem
