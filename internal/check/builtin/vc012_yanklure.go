@@ -61,6 +61,11 @@ const attrIntroducedBuildDeps = "yanklure.introduced_build_deps"
 // build.rs statically exhibits the compile-time payload shape (Increment 3).
 const attrHostileBuildDeps = "yanklure.hostile_build_deps"
 
+// attrHostileNewest holds the live-newest version whose OWN install hook (setup.py)
+// is hostile — the PyPI payload analogue, where the malicious release ships the
+// payload in its own setup.py rather than in an introduced dependency (Increment 5).
+const attrHostileNewest = "yanklure.hostile_newest"
+
 // yankLureRegistry returns the installer name and the install-time hook file for an
 // ecosystem whose registry supplies a per-version yanked flag, and ok = whether
 // VC-012 should evaluate it. cargo (yank) and PyPI (PEP 592 yank) both make a
@@ -147,6 +152,17 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 					evidence += fmt.Sprintf("; introduced build-dep ships a HOSTILE build.rs (network + exec/obfuscation): %s", strings.Join(hostile, ", "))
 					remediation = fmt.Sprintf("do NOT upgrade %s: the version cargo nudges toward pulls a build dependency whose build.rs runs network + code-execution at compile time — treat as an active compromise and report the crate", n.Name)
 				}
+			}
+
+			// Increment 5 (PyPI payload): the live-newest's OWN install hook is hostile.
+			// Unlike cargo — where the payload rides an introduced build-dep — a malicious
+			// PyPI release usually ships the payload in its own setup.py, run by pip at
+			// install. This escalates to CRITICAL on its own, independent of any dep diff.
+			if hn := n.Attr[attrHostileNewest]; hn != "" {
+				sev = finding.SevCritical
+				conf = 0.95
+				evidence += fmt.Sprintf("; the live newest %s ships a HOSTILE %s (network + exec/obfuscation at install time)", hn, hook)
+				remediation = fmt.Sprintf("do NOT upgrade %s: the version %s nudges toward runs network + code-execution in its %s at install — treat as an active compromise and report the package", n.Name, installer, hook)
 			}
 		}
 
