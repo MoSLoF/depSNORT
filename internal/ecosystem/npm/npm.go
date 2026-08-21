@@ -53,7 +53,7 @@ func lockPath(path string) string {
 
 // Detect implements ecosystem.Adapter.
 func (*Adapter) Detect(path string) bool {
-	return lockPath(path) != "" || pnpmLockPath(path) != "" || yarnLockPath(path) != "" || manifestPath(path) != ""
+	return lockPath(path) != "" || pnpmLockPath(path) != "" || yarnLockPath(path) != "" || bunLockPath(path) != "" || manifestPath(path) != ""
 }
 
 // lockfile is the subset of package-lock.json we parse.
@@ -119,6 +119,15 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 			return nil, fmt.Errorf("npm: reading yarn.lock: %w", err)
 		}
 		return g, nil
+	}
+	// bun.lock is a resolved graph (workspaces + per-package deps); prefer it
+	// over the bare manifest so a bun project reports pinned versions.
+	if bp := bunLockPath(path); bp != "" {
+		raw, err := os.ReadFile(bp)
+		if err != nil {
+			return nil, fmt.Errorf("npm: reading bun.lock: %w", err)
+		}
+		return parseBunLock(raw)
 	}
 	// No lockfile: fall back to the package.json manifest, whose declared deps
 	// transitive expansion will presume versions for (D-44 / D-45).
