@@ -3275,3 +3275,37 @@ smart-buffer/socks' npm-install prepublish (Part B, untouched) still reaches the
 OPU-19 frozen probe table is unchanged. gofmt/vet clean, go test -race ./... green (33
 packages). This closes the OPU-27 Part D item; the incidental `& ` exec-marker hardening
 remains the one deferred follow-up.
+
+## D-89 — OPU-27 follow-up: precise PowerShell call-operator marker (drop the incidental && → exec)
+
+The exec-marker set carried `"& "` (ampersand-space) as a plain substring for the PowerShell
+CALL operator. But `"& "` is a substring of the shell logical-AND `"&& "` and of a trailing
+background `"& "`, both ubiquitous in benign hooks — so `npm install -g typescript && npm run
+build` (smart-buffer/socks) and every other `a && b` script picked up an incidental CapExec it
+never earned. Noted as out of scope in OPU-27; this is the hardening pass.
+
+The bare substring is replaced by psCallOperatorRe, which matches the call operator
+structurally: a single `&` — not the second `&` of `&&` (the leading `(?:^|[^&])` rules that
+out) — followed by an invocation target that is a quote, a scriptblock `{`, or a variable `$`
+(`& "C:\p.exe"`, `& {…}`, `& $payload`, and the no-space `&"p.exe"`/`&$payload` forms). Shell
+`&&` and a background `&` before a BAREWORD no longer match; a bare `& word` is deliberately
+left unmatched because it is ambiguous with shell backgrounding, and the dangerous PowerShell
+shapes are the quoted/scriptblock/variable invocations (covered here) or the iex /
+Start-Process markers that remain. An ampersand before a quote or variable is treated as an
+invocation in either the shell-background or PS-call reading, so it stays scored — the fix
+targets `&&` and bareword-background, not command invocation.
+
+This removes the spurious CapExec from the smart-buffer/socks hook: it is now CapNetwork only
+(the Part B install fetch), which is the correct reading — the `&&` was never execution. Real
+PowerShell payloads keep their CapExec: the NuGet install.ps1 path already appends CapExec
+unconditionally (AnalyzeDotNet), and `iex`/`Start-Process`/LOLBin markers are untouched.
+
+Proof: a table test asserts the call-operator positives (quoted path, scriptblock, variable,
+no-space forms) score exec, and the negatives (`&&` chains, background `&` before a bareword,
+`&&` directly before a quote) stay quiet — including the exact smart-buffer/socks hook, which
+keeps CapNetwork and loses the incidental CapExec. Each regex guard is proven by mutation:
+dropping the `(?:^|[^&])` anchor launders `&&`-before-a-quote, and broadening the invocation
+target to any character reintroduces the original `&&` bug — both flip a negative. The OPU-19
+frozen probe table and the esbuild regression (whose CapExec comes from child_process, not the
+removed marker) are unchanged. gofmt/vet clean, go test -race ./... green (33 packages). This
+clears the last OPU-27 deferred item.
