@@ -768,6 +768,35 @@ var GoInstallHookNames = []string{
 // own line.
 var goGenerateRe = regexp.MustCompile(`(?m)^[ \t]*//go:generate[ \t]+(.+?)[ \t]*$`)
 
+var (
+	// cgoImportRe reports that a file actually enables cgo — the `import "C"` line,
+	// standalone or inside an import group. Only such files have live `#cgo`
+	// directives; requiring it keeps a stray `#cgo`-shaped comment or string in a
+	// non-cgo file from being read as a build flag.
+	cgoImportRe = regexp.MustCompile(`(?m)^[ \t]*(?:import[ \t]+)?"C"[ \t]*(?:$|//)`)
+
+	// cgoDirectiveRe matches a single `#cgo …` preamble directive line (e.g.
+	// `#cgo CFLAGS: -O2`, `#cgo linux LDFLAGS: -ldl`, `#cgo pkg-config: gtk+-3.0`).
+	cgoDirectiveRe = regexp.MustCompile(`(?m)^[ \t]*#cgo\b[^\n]*`)
+
+	// The dangerous-flag detectors. A `#cgo` directive normally carries only inert
+	// compiler/linker flags (-I, -L, -l, -D, -std=, -Wall, pkg-config names). These
+	// match the shapes that instead arrange CODE EXECUTION at `go build` time, none
+	// of which a legitimate published module ships:
+	//   - a compiler/LLVM plugin load (runs attacker code inside the compiler)
+	cgoPluginRe = regexp.MustCompile(`(?i)-fplugin\b|-Xclang\b|(?:^|[ \t])-load\b`)
+	//   - a GCC specs-file override (redirects the whole compilation)
+	cgoSpecsRe = regexp.MustCompile(`(?i)-specs=`)
+	//   - a -B tool-search-path redirect (runs the attacker's as/ld instead)
+	cgoToolDirRe = regexp.MustCompile(`(?:^|[ \t])-B[ =/]`)
+	//   - an @file response file (smuggles otherwise-rejected flags)
+	cgoResponseRe = regexp.MustCompile(`(?:^|[ \t,])@[^ \t]`)
+	//   - a shell metacharacter (command injection into the build). Note `${SRCDIR}`
+	//     — the legitimate cgo source-dir variable — uses `${…}`, NOT `$(`, so it is
+	//     deliberately not matched.
+	cgoShellRe = regexp.MustCompile("[;|`]|\\$\\(")
+)
+
 // AnalyzeGo builds the install surface from a Go module's source files (OPU-28).
 // sources maps a file path (used only to label the hook) to that .go file's text.
 //
@@ -792,7 +821,8 @@ func AnalyzeGo(sources map[string]string) Surface {
 	sort.Strings(files) // deterministic hook order (D-09 byte-reproducibility)
 
 	for _, file := range files {
-		directives := goGenerateRe.FindAllStringSubmatch(sources[file], -1)
+		src := sources[file]
+		directives := goGenerateRe.FindAllStringSubmatch(src, -1)
 		for i, m := range directives {
 			cmd := strings.TrimSpace(m[1])
 			if cmd == "" {
@@ -823,8 +853,79 @@ func AnalyzeGo(sources map[string]string) Surface {
 			}
 			s.Hooks = append(s.Hooks, h)
 		}
+
+		// cgo `#cgo` flag injection (OPU-28 Increment 2): a build directive that
+		// arranges code execution at `go build`. Only examined in files that enable
+		// cgo, and only the DANGEROUS flag shapes — a directive of ordinary flags is
+		// silent, keeping the check off the very common benign cgo package.
+		if h, ok := analyzeCgoDirectives(file, src); ok {
+			s.Hooks = append(s.Hooks, h)
+		}
 	}
 	return s
+}
+
+// analyzeCgoDirectives inspects a cgo file's `#cgo` preamble directives and, when
+// any carries a code-execution flag shape (plugin load, tool-search redirect,
+// specs override, response file, or shell metacharacter), returns a hook recording
+// it as CapExec with `cgo-inject:<reason>` markers that VC-002h gates on. A file
+// with no `import "C"`, or whose directives are ordinary compiler/linker flags,
+// returns ok=false.
+func analyzeCgoDirectives(file, src string) (Hook, bool) {
+	if !cgoImportRe.MatchString(src) {
+		return Hook{}, false
+	}
+	var reasons, offending []string
+	for _, line := range cgoDirectiveRe.FindAllString(src, -1) {
+		found := cgoInjectionReasons(line)
+		if len(found) > 0 {
+			reasons = append(reasons, found...)
+			offending = append(offending, strings.TrimSpace(line))
+		}
+	}
+	if len(reasons) == 0 {
+		return Hook{}, false
+	}
+	ev := []string{"cgo"}
+	for _, r := range dedupe(reasons) {
+		ev = append(ev, "cgo-inject:"+r)
+	}
+	return Hook{
+		Name:     "cgo:" + file,
+		Command:  truncateStr(strings.Join(offending, " ; "), 400),
+		Caps:     []Capability{CapExec},
+		Evidence: ev,
+	}, true
+}
+
+// cgoInjectionReasons returns the code-execution flag shapes present in one `#cgo`
+// directive line, as stable reason words (comma-free, so they survive the
+// comma-joined evidence encoding VC-002h re-splits).
+func cgoInjectionReasons(line string) []string {
+	var out []string
+	if cgoPluginRe.MatchString(line) {
+		out = append(out, "plugin")
+	}
+	if cgoSpecsRe.MatchString(line) {
+		out = append(out, "specs")
+	}
+	if cgoToolDirRe.MatchString(line) {
+		out = append(out, "tool-redirect")
+	}
+	if cgoResponseRe.MatchString(line) {
+		out = append(out, "response-file")
+	}
+	if cgoShellRe.MatchString(line) {
+		out = append(out, "shell")
+	}
+	return out
+}
+
+// IsCgoInjectionMarker reports whether an install-surface evidence marker names a
+// cgo build-flag code-execution shape (OPU-28). VC-002h gates on it, the same way
+// VC-002g gates on IsPersistenceMarker.
+func IsCgoInjectionMarker(marker string) bool {
+	return strings.HasPrefix(marker, "cgo-inject:")
 }
 
 // ---- PHP/Composer analysis --------------------------------------------------

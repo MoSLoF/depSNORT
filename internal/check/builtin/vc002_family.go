@@ -346,6 +346,69 @@ func (HookPersistence) Run(ctx *check.Context) []finding.Finding {
 	return out
 }
 
+// ---- VC-002h: build-flag code-execution injection -------------------------
+
+// HookBuildFlagInjection (VC-002h) reports a build directive that injects a
+// compiler/linker flag arranging CODE EXECUTION at build time — a cgo `#cgo`
+// directive carrying a compiler/LLVM plugin load, a `-B` tool-search redirect, a
+// GCC `-specs=` override, an `@file` response file, or a shell metacharacter
+// (OPU-28 Increment 2). Unlike an ordinary install hook, this fires at `go build`
+// itself.
+//
+// It gates on the cgo-injection subset of CapExec only (installsurface.
+// IsCgoInjectionMarker). A cgo package with ordinary flags (-I/-L/-l/-D/pkg-config)
+// carries no such marker and stays silent — the precision that keeps it off the
+// very common benign cgo package. It is high/gate-eligible rather than a block:
+// modern `go build` already rejects most such flags through its own cgo flag
+// allowlist, so the finding flags a suspicious, review-worthy shape (older
+// toolchains, CGO_*_ALLOW misconfig, or allowlist bypasses remain exposed) rather
+// than asserting a guaranteed-live exploit.
+type HookBuildFlagInjection struct{}
+
+func (HookBuildFlagInjection) Meta() check.Meta {
+	return check.Meta{
+		ID: "VC-002h", Axis: finding.AxisKnownCompromise,
+		DefaultSeverity: finding.SevHigh, DefaultGate: finding.GateEligible,
+		Description: "build directive injects a code-loading compiler/linker flag",
+	}
+}
+
+func (HookBuildFlagInjection) Run(ctx *check.Context) []finding.Finding {
+	var out []finding.Finding
+	for _, v := range collectHooks(ctx.Graph) {
+		if !v.Caps["exec"] {
+			continue
+		}
+		var hits []string
+		seen := map[string]bool{}
+		for _, ev := range v.Evidence {
+			for _, part := range strings.Split(ev, ",") {
+				part = strings.TrimSpace(part)
+				if installsurface.IsCgoInjectionMarker(part) && !seen[part] {
+					seen[part] = true
+					hits = append(hits, strings.TrimPrefix(part, "cgo-inject:"))
+				}
+			}
+		}
+		if len(hits) == 0 {
+			continue
+		}
+		sort.Strings(hits)
+		out = append(out, finding.Finding{
+			CheckID: "VC-002h", Axis: finding.AxisKnownCompromise,
+			Severity: finding.SevHigh, GateClass: finding.GateEligible,
+			Confidence: 0.6, NodeID: v.Pkg.ID,
+			Title: fmt.Sprintf("build directive (%s) injects a code-loading flag", v.Hook.Name),
+			Evidence: fmt.Sprintf("a #cgo directive carries a build-time code-execution flag shape (%s); "+
+				"modern `go build` rejects most such flags via its cgo flag allowlist, but a published module has no legitimate reason to ship one",
+				strings.Join(hits, ", ")),
+			Remediation: "inspect the #cgo directive: a compiler-plugin load, tool-search redirect, specs override, " +
+				"response file, or shell metacharacter in a build flag is an attempt at build-time code execution — do not build until reviewed",
+		})
+	}
+	return out
+}
+
 func dedupeStrings(in []string) []string {
 	seen := map[string]bool{}
 	var out []string

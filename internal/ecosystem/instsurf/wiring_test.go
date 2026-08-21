@@ -34,11 +34,12 @@ func runVC002(g *graph.Graph) map[string]int {
 	ctx := &check.Context{Graph: g}
 	counts := map[string]int{}
 	for _, c := range []check.Check{
-		builtin.HookNetwork{},        // VC-002b
-		builtin.HookCredentials{},    // VC-002c
-		builtin.HookExfilCapable{},   // VC-002d (block)
-		builtin.HookObfuscated{},     // VC-002e
-		builtin.HookDownloadCradle{}, // VC-002f (block)
+		builtin.HookNetwork{},            // VC-002b
+		builtin.HookCredentials{},        // VC-002c
+		builtin.HookExfilCapable{},       // VC-002d (block)
+		builtin.HookObfuscated{},         // VC-002e
+		builtin.HookDownloadCradle{},     // VC-002f (block)
+		builtin.HookBuildFlagInjection{}, // VC-002h (gate-eligible)
 	} {
 		for _, f := range c.Run(ctx) {
 			counts[f.CheckID]++
@@ -222,5 +223,35 @@ func TestGoGenerateVendorSkippedRootScanned(t *testing.T) {
 	}
 	if c := runVC002(g2); c["VC-002f"] < 1 {
 		t.Errorf("a root-module go:generate cradle must BLOCK (VC-002f); got %v", c)
+	}
+}
+
+// A cgo #cgo directive that loads a compiler plugin arranges code execution at
+// `go build` and must fire VC-002h, end-to-end through the gomod adapter; an
+// ordinary cgo file stays silent.
+func TestGoCgoFlagInjectionFires(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module evil.example/m\n\ngo 1.21\n")
+	write(t, filepath.Join(dir, "bridge.go"),
+		"package m\n\n/*\n#cgo CFLAGS: -fplugin=/tmp/evil.so\n*/\nimport \"C\"\n")
+	g := rootedGraph("gomod", "evil.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir, g); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g); c["VC-002h"] < 1 {
+		t.Errorf("a #cgo -fplugin directive must fire VC-002h; got %v", c)
+	}
+
+	// An ordinary cgo file (the common benign case) stays silent.
+	dir2 := t.TempDir()
+	write(t, filepath.Join(dir2, "go.mod"), "module honest.example/m\n\ngo 1.21\n")
+	write(t, filepath.Join(dir2, "bridge.go"),
+		"package m\n\n/*\n#cgo pkg-config: sqlite3\n#cgo LDFLAGS: -lsqlite3\n*/\nimport \"C\"\n")
+	g2 := rootedGraph("gomod", "honest.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir2, g2); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g2); len(c) != 0 {
+		t.Errorf("an ordinary cgo file must fire no VC-002 finding; got %v", c)
 	}
 }

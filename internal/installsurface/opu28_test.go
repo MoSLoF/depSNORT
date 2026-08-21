@@ -52,6 +52,63 @@ func TestAnalyzeGo_GoGenerate(t *testing.T) {
 	}
 }
 
+// TestAnalyzeGo_CgoFlagInjection covers OPU-28 Increment 2: a #cgo directive
+// carrying a build-time code-execution flag shape is surfaced as CapExec with a
+// cgo-inject marker, while an ordinary cgo directive (the common benign case) and
+// a #cgo-shaped comment in a non-cgo file stay silent.
+func TestAnalyzeGo_CgoFlagInjection(t *testing.T) {
+	inject := map[string]string{
+		"plugin":         "package p\n/*\n#cgo CFLAGS: -fplugin=/tmp/evil.so\n*/\nimport \"C\"\n",
+		"xclang-load":    "package p\n/*\n#cgo CFLAGS: -Xclang -load -Xclang /tmp/p.so\n*/\nimport \"C\"\n",
+		"specs":          "package p\n/*\n#cgo CFLAGS: -specs=/tmp/evil.specs\n*/\nimport \"C\"\n",
+		"tool-redirect":  "package p\n/*\n#cgo CFLAGS: -B/tmp/evil\n*/\nimport \"C\"\n",
+		"response-file":  "package p\n/*\n#cgo LDFLAGS: @/tmp/flags\n*/\nimport \"C\"\n",
+		"shell-metachar": "package p\n/*\n#cgo LDFLAGS: -l$(whoami)\n*/\nimport \"C\"\n",
+	}
+	for name, src := range inject {
+		s := AnalyzeGo(map[string]string{"c.go": src})
+		h, ok := goHookByName(s, "cgo:c.go")
+		if !ok || !h.HasCap(CapExec) {
+			t.Errorf("cgo %s: want a cgo hook with CapExec, surface=%+v", name, s.Hooks)
+			continue
+		}
+		var hasMarker bool
+		for _, e := range h.Evidence {
+			if IsCgoInjectionMarker(e) {
+				hasMarker = true
+			}
+		}
+		if !hasMarker {
+			t.Errorf("cgo %s: hook must carry a cgo-inject marker, evidence=%v", name, h.Evidence)
+		}
+	}
+
+	// Ordinary cgo directives (the common benign case) and a #cgo-shaped line in a
+	// file that does not import "C" must NOT be recorded.
+	for name, src := range map[string]string{
+		"benign lib flags":      "package p\n/*\n#cgo LDFLAGS: -L/usr/lib -lssl -lcrypto\n*/\nimport \"C\"\n",
+		"benign cflags":         "package p\n/*\n#cgo CFLAGS: -I/usr/include -Wall -O2 -std=c11\n*/\nimport \"C\"\n",
+		"benign pkg-config":     "package p\n/*\n#cgo pkg-config: gtk+-3.0\n*/\nimport \"C\"\n",
+		"benign SRCDIR var":     "package p\n/*\n#cgo CFLAGS: -I${SRCDIR}/include\n*/\nimport \"C\"\n",
+		"benign -Wl,-Bsymbolic": "package p\n/*\n#cgo LDFLAGS: -Wl,-Bsymbolic -Wl,-z,now\n*/\nimport \"C\"\n",
+		"no import C":           "package p\n/*\n#cgo CFLAGS: -fplugin=/tmp/evil.so\n*/\nvar x = 1\n", // line-start #cgo, but no import "C" -> not cgo
+	} {
+		if s := AnalyzeGo(map[string]string{"c.go": src}); len(s.Hooks) != 0 {
+			t.Errorf("benign/non-cgo %q must not be recorded, got %+v", name, s.Hooks)
+		}
+	}
+}
+
+// TestIsCgoInjectionMarker pins the VC-002h gate predicate.
+func TestIsCgoInjectionMarker(t *testing.T) {
+	if !IsCgoInjectionMarker("cgo-inject:plugin") {
+		t.Error("cgo-inject:plugin should be a cgo-injection marker")
+	}
+	if IsCgoInjectionMarker("cgo") || IsCgoInjectionMarker("go:generate") {
+		t.Error("plain cgo / go:generate markers are not injection markers")
+	}
+}
+
 // TestAnalyzeGo_MultipleDirectives proves multiple directives in one file get
 // UNIQUE hook names (so they do not collide to a single graph node) and that the
 // output is deterministic across files.
