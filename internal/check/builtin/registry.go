@@ -17,23 +17,24 @@ import "ihbv.io/depsnort/internal/check"
 // registry is the bug; this function removes the second registry.
 func Default() *check.Registry {
 	return check.NewRegistry(
-		MaliciousVersion{},    // VC-001
-		HookPresent{},         // VC-002a
-		HookNetwork{},         // VC-002b
-		HookCredentials{},     // VC-002c
-		HookExfilCapable{},    // VC-002d
-		HookObfuscated{},      // VC-002e
-		HookDownloadCradle{},  // VC-002f
-		HookPersistence{},     // VC-002g
-		IOCMatch{},            // VC-003
-		Dormancy{},            // VC-004
-		PatchBurst{},          // VC-005
-		Typosquat{},           // VC-006
-		DependencyConfusion{}, // VC-007
-		KnownVuln{},           // VC-008
-		UnverifiableSource{},  // VC-009
-		CapabilityDrift{},     // VC-010
-		PublisherLineage{},    // VC-011
-		YankLure{},            // VC-012
+		MaliciousVersion{},       // VC-001
+		HookPresent{},            // VC-002a
+		HookNetwork{},            // VC-002b
+		HookCredentials{},        // VC-002c
+		HookExfilCapable{},       // VC-002d
+		HookObfuscated{},         // VC-002e
+		HookDownloadCradle{},     // VC-002f
+		HookPersistence{},        // VC-002g
+		HookBuildFlagInjection{}, // VC-002h
+		IOCMatch{},               // VC-003
+		Dormancy{},               // VC-004
+		PatchBurst{},             // VC-005
+		Typosquat{},              // VC-006
+		DependencyConfusion{},    // VC-007
+		KnownVuln{},              // VC-008
+		UnverifiableSource{},     // VC-009
+		CapabilityDrift{},        // VC-010
+		PublisherLineage{},       // VC-011
+		YankLure{},               // VC-012
 	)
 }

@@ -3414,3 +3414,47 @@ abuse — build-time exec at `go build`, the stronger-trigger vector, needing ti
 discipline since bare cgo is ubiquitous); build-tag-gated `init()` evasion (runtime); and
 `go run <remote>@<version>` as a Go package runner (an npx analog). The Go blank column is now
 opened, not closed.
+
+## D-92 — OPU-28 (Increment 2): Go cgo #cgo build-flag injection (VC-002h)
+
+Increment 1 gave Go the go:generate directive — an on-demand `go generate` trigger. Increment
+2 adds the vector that fires at `go build` itself: a cgo `#cgo` directive that injects a
+compiler/linker flag arranging code execution. `#cgo CFLAGS: -fplugin=/tmp/evil.so` loads a
+compiler plugin; `-B<dir>` redirects the compiler's tool search (running the attacker's as/ld);
+`-specs=` overrides the GCC specs file; an `@file` response file smuggles otherwise-rejected
+flags; a shell metacharacter injects a command. None of these appear in a legitimate published
+module.
+
+The discipline is the whole game: bare cgo is ubiquitous (`-I`/`-L`/`-l`/`-D`/`-std=`/
+`pkg-config`), so the detector keys on the DANGEROUS flag shapes only, never cgo presence. It
+is examined only in files that actually `import "C"`, and `${SRCDIR}` — the legitimate cgo
+source-dir variable, which uses `${…}` not `$(` — is deliberately not read as a shell
+metacharacter, nor is a `-Wl,-Bsymbolic` linker flag mistaken for a `-B` tool redirect.
+
+This is the first vector in the family that does NOT map to an existing capability: a cgo flag
+injection is CapExec ALONE, and CapExec alone fires no VC-002 check (a bare hook is VC-002a, and
+the dangerous checks compose network/creds/cradle). So it gets a dedicated judge, VC-002h,
+gated exactly the way VC-002g gates persistence: on CapExec plus a marker predicate
+(installsurface.IsCgoInjectionMarker, matching `cgo-inject:<reason>`), so an ordinary cgo file
+— CapExec-free, marker-free — stays silent. It is high/gate-eligible, not a block: modern
+`go build` already rejects most such flags through its own cgo flag allowlist, so the finding
+flags a suspicious, review-worthy shape (older toolchains, CGO_*_ALLOW misconfig, and allowlist
+bypasses remain exposed) rather than asserting a guaranteed-live exploit. AnalyzeGo carries both
+Increment-1 (go:generate) and Increment-2 (cgo) extraction; the gomod adapter and the walk are
+unchanged. The check is registered in builtin.Default() (the drift guard TestDefaultRegisters-
+EveryCheck enforces registration).
+
+Proof: AnalyzeGo unit tests (plugin / -Xclang -load / -specs= / -B / @file / shell-metachar
+positives; benign lib-flags, cflags, pkg-config, `${SRCDIR}`, `-Wl,-Bsymbolic`, and a
+non-cgo-file negative) and an end-to-end wiring test through the real gomod adapter into
+VC-002h (a `-fplugin` directive fires; an ordinary `pkg-config: sqlite3` file stays silent).
+Each guard mutation-proven: dropping `-fplugin` from the plugin detector, dropping the
+`import "C"` gate, broadening the shell metacharacter set to bare `$` (which then swallows
+`${SRCDIR}`), and dropping the marker gate on VC-002h (which then fires on every CapExec hook,
+including an ordinary build.rs) each flip a case. Real-world oracle: a re-scan of depSNORT's own
+251 .go files with cgo detection active still yields zero hooks. gofmt/vet clean, go test -race
+./... green.
+
+Deferred to later OPU-28 increments (documented): per-dependency attribution from vendor/ and
+the module cache; build-tag-gated init() evasion (runtime); and `go run <remote>@<version>` as
+a Go package runner.
