@@ -3543,3 +3543,49 @@ With this, OPU-28's build-surface coverage is complete across Go's three executi
 (on-demand generate, build-time cgo, runtime init) plus the go-run remote-runner shape; the one
 remaining register item is per-dependency vendor/ and module-cache attribution (Increment 1-4
 scan the root module).
+
+## D-95 — OPU-28 (Increment 5): per-dependency vendor / module-cache attribution
+
+Increments 1-4 scanned only the ROOT module's .go files (the clone-and-assess-a-module
+workflow). This extends the Go install-surface scan to DEPENDENCIES and attributes each
+dependency's go:generate / cgo / init / go-run findings to that dependency's own graph node —
+mirroring the cargo adapter's root-then-dependency structure, so a hostile directive buried in
+a transitive Go module surfaces on the right package.
+
+A dependency's source is located in two places, checked in order:
+
+- **Vendored** — `vendor/<module-path>/`, inside the project, read through the project's
+  securefs reader (containment + size caps). Go module paths are hierarchical, so a vendored
+  SUBMODULE (`vendor/foo/bar/sub/`) physically nests inside its parent's directory
+  (`vendor/foo/bar/`); the walk skips any subdirectory that is itself another dependency's
+  vendored root, so the submodule's findings attribute to the submodule, not the parent. (The
+  module cache has no such nesting — `bar@v1` and `bar/sub@v0.1` are separate dirs — so it needs
+  no skip.)
+- **Module cache** — `$GOMODCACHE/<escaped-path>@<version>/` (GOMODCACHE, else `$GOPATH/pkg/mod`,
+  else `$HOME/go/pkg/mod`), out of project, read through a securefs reader rooted at that dir.
+  The path applies Go's case-encoding (an uppercase letter U → `!u`, so `github.com/BurntSushi/
+  toml` → `github.com/!burnt!sushi/toml`), replicated locally since goproxy's equivalent is
+  unexported.
+
+Safety: a module path or version that is not a clean, traversal-free identifier (empty, a `.`
+or `..` segment, a backslash, or a NUL) is refused before it can steer a lookup out of the cache
+or the project, and out-of-project cache reads still go through securefs containment. A
+dependency present in NEITHER location is disclosed as a coverage gap (source-unavailable), not
+skipped silently — the same honesty the cargo adapter keeps. The walk was refactored into a
+shared collectGoSourcesUnder(start, skip) so the root scan, the vendor scan, and the cache scan
+are one code path.
+
+Proof: gomod-package tests — a vendored dependency's hostile go:generate attributes to the
+dependency node and NOT the root; a module-cache dependency (with case-escaping, `github.com/
+Evil/dep` → `!evil`) is found and attributed; a vendored submodule's finding attributes to the
+submodule, not the parent whose directory contains it; cleanModuleIdent rejects traversal and
+escapeGoCasePath encodes case. Each guard mutation-proven: removing the nested-submodule skip
+makes the parent wrongly own the submodule's hook, and making the case-encoding a no-op makes an
+uppercase cache dependency invisible — both flip a test. Real-world oracle: scanning depSNORT's
+own 9 cached dependency modules (44 real .go files) through the per-dependency walk yields zero
+hooks — no false positive on real third-party Go source. gofmt/vet clean, go test -race ./...
+green.
+
+This closes the OPU-28 register. Go's install-surface coverage now spans all three execution
+phases (on-demand generate, build-time cgo, runtime init) and the go-run remote runner, at the
+root AND across the dependency tree — the blank column is fully filled.
