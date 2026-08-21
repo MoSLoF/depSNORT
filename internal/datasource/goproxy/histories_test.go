@@ -14,6 +14,7 @@ import (
 type histFake struct {
 	list  map[string][]string
 	infos map[string]string // "module@version" -> Time
+	mods  map[string]string // "module@version" -> raw go.mod text
 }
 
 func (f *histFake) Do(req *http.Request) (*http.Response, error) {
@@ -30,6 +31,13 @@ func (f *histFake) Do(req *http.Request) (*http.Response, error) {
 		ver := strings.TrimSuffix(p[i+4:], ".info")
 		if t, ok := f.infos[mod+"@"+ver]; ok {
 			body, status = `{"Version":"`+ver+`","Time":"`+t+`"}`, 200
+		}
+	} else if strings.HasSuffix(p, ".mod") {
+		i := strings.Index(p, "/@v/")
+		mod := deesc(strings.TrimPrefix(p[:i], "/"))
+		ver := strings.TrimSuffix(p[i+4:], ".mod")
+		if m, ok := f.mods[mod+"@"+ver]; ok {
+			body, status = m, 200
 		}
 	}
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
