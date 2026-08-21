@@ -47,6 +47,13 @@ func (c *Client) Histories(ctx context.Context, names []string) (map[string]*dat
 		}
 		h := &datasource.ReleaseHistory{Package: name, Ecosystem: "gomod"}
 
+		// Retractions are declared in the go.mod of the module's HIGHEST version;
+		// `go` itself reads a module's retract set from there. One extra go.mod
+		// fetch lets every release carry the withdrawal flag — the Go analogue of a
+		// crates.io yank (OPU-26 / VC-012). A missing or unparseable go.mod yields
+		// no specs (no version marked), disclosed as absence rather than an error.
+		specs := c.retractSpecs(ctx, name, versions)
+
 		// Each version's .info is fetched concurrently, but a fetch mutates no
 		// shared Client state — every goroutine writes only its own results slot
 		// (the coordfetch pattern). Stats accounting and cache writes are folded
@@ -76,13 +83,36 @@ func (c *Client) Histories(ctx context.Context, names []string) (map[string]*dat
 		for _, r := range results {
 			c.record(r.fr)
 			if r.ok {
-				h.Releases = append(h.Releases, datasource.Release{Version: r.version, Published: r.t})
+				h.Releases = append(h.Releases, datasource.Release{
+					Version:   r.version,
+					Published: r.t,
+					Yanked:    isRetracted(r.version, specs),
+				})
 			}
 		}
 		h.Sort()
 		out[name] = h
 	}
 	return out, firstErr
+}
+
+// retractSpecs fetches the go.mod of the module's highest-semver version and
+// returns its parsed retract directives. Go declares a module's retractions in
+// its latest version's go.mod, so that is the single file to read. Any fetch or
+// parse failure yields nil (no retractions) — a coverage gap, not an error. This
+// runs serially in the caller's loop (record is not concurrency-safe) before the
+// per-version .info goroutines fan out, so it introduces no data race.
+func (c *Client) retractSpecs(ctx context.Context, module string, versions []string) []retractSpec {
+	highest := highestVersion(versions)
+	if highest == "" {
+		return nil
+	}
+	fr := c.fetch(ctx, escapeModule(module)+"/@v/"+escapeVersion(highest)+".mod", "mod|"+module+"@"+highest)
+	c.record(fr)
+	if !fr.ok {
+		return nil
+	}
+	return parseRetract(fr.raw)
 }
 
 // parseInfoTime extracts the publish time from an @v/{version}.info fetch. It is

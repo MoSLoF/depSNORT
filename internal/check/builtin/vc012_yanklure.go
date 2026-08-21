@@ -31,13 +31,15 @@ import (
 //
 // # Scope
 //
-// crates.io is the only registry of the six that exposes a per-version yanked
-// flag in the metadata depsnort fetches, so a false Release.Yanked elsewhere means
-// "unknown", not "live". VC-012 therefore evaluates only cargo nodes — reading an
-// always-false flag on the other five would be a silent miss dressed as an
-// all-clear (D-24). The introduced-dependency corroborators the attack also leaves
-// (a new build-dep, a typosquat neighbor, a hostile build.rs) live in the live-newest
-// version that is not in the resolved graph, and are a later increment.
+// Three ecosystems expose a per-version withdrawal flag in the metadata depsnort
+// fetches: crates.io (yank), PyPI (PEP 592 yank), and Go (go.mod retract). On the
+// other three Release.Yanked stays false and means "unknown", not "live", so VC-012
+// evaluates only cargo, PyPI, and Go nodes — reading an always-false flag elsewhere
+// would be a silent miss dressed as an all-clear (D-24). The payload corroborators
+// the attack also leaves (a new build-dep, a typosquat neighbor, a hostile build.rs
+// or setup.py) live in the live-newest version that is not in the resolved graph;
+// they are cargo/PyPI-only, since a Go retract carries no install hook — Go module
+// code runs on import, so the Go finding is the shape advisory alone.
 type YankLure struct{}
 
 // Meta implements check.Check.
@@ -48,7 +50,7 @@ func (YankLure) Meta() check.Meta {
 		DefaultSeverity: finding.SevMedium,
 		DefaultGate:     finding.GateAdvisory,
 		Description:     "dependency pinned to a yanked version; elevated on the yank-lure shape",
-		DataDeps:        []string{"cargo-registry", "pypi-registry"},
+		DataDeps:        []string{"cargo-registry", "pypi-registry", "gomod-registry"},
 	}
 }
 
@@ -66,23 +68,42 @@ const attrHostileBuildDeps = "yanklure.hostile_build_deps"
 // payload in its own setup.py rather than in an introduced dependency (Increment 5).
 const attrHostileNewest = "yanklure.hostile_newest"
 
-// yankLureRegistry returns the installer name and the install-time hook file for an
-// ecosystem whose registry supplies a per-version yanked flag, and ok = whether
-// VC-012 should evaluate it. cargo (yank) and PyPI (PEP 592 yank) both make a
-// yanked version un-selectable in a fresh resolution while keeping it installable
-// when exactly pinned — the shape the lure exploits. Elsewhere Release.Yanked is
+// yankLureEco describes how one ecosystem words and shapes a version withdrawal,
+// so VC-012's evidence reads in that ecosystem's own terms.
+type yankLureEco struct {
+	// installer is the tool whose "select a non-withdrawn version" nudge is the lure
+	// (cargo, pip, go).
+	installer string
+	// hook is the install/build-time hook file an attacker plants the payload in
+	// (build.rs, setup.py). Empty for gomod: a Go module has no discrete install
+	// hook — its code simply runs on import — so the shape is advisory-only, with no
+	// hostile-hook escalation path in this increment.
+	hook string
+	// verb is how the registry words the withdrawal ("yanked" for cargo/PyPI,
+	// "retracted" for Go), used verbatim in the finding text.
+	verb string
+	// lure names the attack shape ("yank-lure", "retract-lure").
+	lure string
+}
+
+// yankLureRegistry returns how VC-012 should treat an ecosystem, and ok = whether it
+// evaluates it at all. cargo (yank), PyPI (PEP 592 yank), and Go (go.mod retract) all
+// make a withdrawn version un-selectable in a fresh resolution while keeping it usable
+// when already pinned — the asymmetry the lure exploits. Elsewhere Release.Yanked is
 // always false and means "unknown", so the check does not run: reading it as "live"
-// would be a silent miss dressed as clean (D-24). The introduced-dependency
-// corroborators (Increments 2-3) are cargo-only for now; a PyPI node simply gets the
-// shape finding, without them.
-func yankLureRegistry(ecosystem string) (installer, hook string, ok bool) {
+// would be a silent miss dressed as clean (D-24). The introduced-dependency and
+// hostile-hook corroborators (Increments 2-3, 5) are cargo/PyPI-only; a Go node gets
+// the shape finding alone, since a retract carries no install-hook to inspect.
+func yankLureRegistry(ecosystem string) (yankLureEco, bool) {
 	switch ecosystem {
 	case "cargo":
-		return "cargo", "build.rs", true
+		return yankLureEco{installer: "cargo", hook: "build.rs", verb: "yanked", lure: "yank-lure"}, true
 	case "pypi":
-		return "pip", "setup.py", true
+		return yankLureEco{installer: "pip", hook: "setup.py", verb: "yanked", lure: "yank-lure"}, true
+	case "gomod":
+		return yankLureEco{installer: "go", hook: "", verb: "retracted", lure: "retract-lure"}, true
 	}
-	return "", "", false
+	return yankLureEco{}, false
 }
 
 // Run implements check.Check.
@@ -92,7 +113,7 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 	}
 	var out []finding.Finding
 	for _, n := range ctx.Graph.SortedNodes() {
-		installer, hook, evaluable := yankLureRegistry(n.Ecosystem)
+		eco, evaluable := yankLureRegistry(n.Ecosystem)
 		if n.Kind != graph.KindPackage || !evaluable {
 			continue // yank data is only trustworthy where the registry supplies it
 		}
@@ -100,7 +121,7 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 		if h == nil {
 			continue
 		}
-		// The anchor: is the PINNED version yanked?
+		// The anchor: is the PINNED version withdrawn?
 		if yanked, known := h.IsYanked(n.Version); !known || !yanked {
 			continue
 		}
@@ -108,19 +129,23 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 		sev := finding.SevMedium
 		gate := finding.GateAdvisory
 		conf := 0.5
-		title := fmt.Sprintf("dependency pinned to yanked version %s", n.Version)
-		evidence := fmt.Sprintf("%s@%s is yanked on the registry (the maintainer withdrew it); a fresh resolution would not select it", n.Name, n.Version)
-		remediation := "move off the yanked version deliberately — but inspect the target before upgrading (see below if a yank-lure shape is present)"
+		title := fmt.Sprintf("dependency pinned to %s version %s", eco.verb, n.Version)
+		evidence := fmt.Sprintf("%s@%s is %s on the registry (the maintainer withdrew it); a fresh resolution would not select it", n.Name, n.Version, eco.verb)
+		remediation := fmt.Sprintf("move off the %s version deliberately — but inspect the target before upgrading (see below if a %s shape is present)", eco.verb, eco.lure)
 
 		if newest, run, ok := h.YankLureShape(); ok {
 			sev = finding.SevHigh
 			gate = finding.GateEligible
 			conf = 0.7
-			title = fmt.Sprintf("yank-lure: pinned to yanked %s beneath a live newest %s", n.Version, newest)
-			evidence = fmt.Sprintf("%s@%s is yanked, and the package's highest live version %s sits atop a contiguous run of %d yanked versions — "+
-				"the yank-lure shape (cf. arrayref/proc-macro1, 2026-08-20): %s nudges a yanked-version consumer toward the newest non-yanked release, which is exactly where an account-takeover attacker plants the payload",
-				n.Name, n.Version, newest, run, installer)
-			remediation = fmt.Sprintf("do NOT blindly upgrade to %s: inspect its introduced dependencies and %s first — the yanked run below it is the lure, and the live newest is the version to audit", newest, hook)
+			title = fmt.Sprintf("%s: pinned to %s %s beneath a live newest %s", eco.lure, eco.verb, n.Version, newest)
+			evidence = fmt.Sprintf("%s@%s is %s, and the package's highest live version %s sits atop a contiguous run of %d %s versions — "+
+				"the %s shape (cf. arrayref/proc-macro1, 2026-08-20): %s nudges a %s-version consumer toward the newest non-%s release, which is exactly where an account-takeover attacker plants the payload",
+				n.Name, n.Version, eco.verb, newest, run, eco.verb, eco.lure, eco.installer, eco.verb, eco.verb)
+			inspect := "its introduced dependencies and " + eco.hook
+			if eco.hook == "" {
+				inspect = "its code (which runs on import)"
+			}
+			remediation = fmt.Sprintf("do NOT blindly upgrade to %s: inspect %s first — the %s run below it is the lure, and the live newest is the version to audit", newest, inspect, eco.verb)
 
 			// Increment-2 corroboration: the enrichment stage recorded the BUILD
 			// dependencies the live-newest introduces vs the pinned version. A new
@@ -161,8 +186,8 @@ func (YankLure) Run(ctx *check.Context) []finding.Finding {
 			if hn := n.Attr[attrHostileNewest]; hn != "" {
 				sev = finding.SevCritical
 				conf = 0.95
-				evidence += fmt.Sprintf("; the live newest %s ships a HOSTILE %s (network + exec/obfuscation at install time)", hn, hook)
-				remediation = fmt.Sprintf("do NOT upgrade %s: the version %s nudges toward runs network + code-execution in its %s at install — treat as an active compromise and report the package", n.Name, installer, hook)
+				evidence += fmt.Sprintf("; the live newest %s ships a HOSTILE %s (network + exec/obfuscation at install time)", hn, eco.hook)
+				remediation = fmt.Sprintf("do NOT upgrade %s: the version %s nudges toward runs network + code-execution in its %s at install — treat as an active compromise and report the package", n.Name, eco.installer, eco.hook)
 			}
 		}
 

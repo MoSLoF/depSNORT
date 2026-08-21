@@ -3136,3 +3136,43 @@ PyPI escalation by a VC-012 test shown to have teeth by mutation. gofmt/vet clea
 test -race ./... green (33 packages). The yank-lure composite is now complete for both
 supporting ecosystems — cargo (build.rs, via an introduced dep) and PyPI (setup.py, in
 the release itself).
+
+## D-86 — OPU-26 (Go): retract-lure — the shape generalizes to go.mod `retract`
+
+The third registry that exposes a per-version withdrawal is Go. A module withdraws a
+release with a `retract` directive in its go.mod; `go get -u` then refuses to upgrade a
+consumer INTO a retracted version and `go list -m -u -retracted` flags one already
+pinned. That is the same asymmetry crates.io yank and PyPI PEP 592 yank have — a fresh
+resolution steers away from the withdrawn version while a go.sum carries it forward —
+so the yank-lure shape applies: a consumer pinned into a contiguous retracted run sits
+exactly where `go`'s "upgrade to a non-retracted version" nudge funnels toward the live
+newest, the version an account-takeover attacker would publish the payload as.
+
+Substrate reuse, no new signal. The Release.Yanked flag and ReleaseHistory.YankLureShape
+/ IsYanked that back cargo and PyPI already carry the whole shape; Go only needed to
+POPULATE Yanked. A new goproxy/retract.go parses `retract` directives — single version,
+inclusive `[lo, hi]` range, and parenthesised block form — stripping `//` rationale
+comments, comparing by semver (so v0.3.10 orders after v0.3.9, not lexically), and
+degrading a malformed entry to "not retracted" rather than erroring. Go reads a module's
+retractions from its HIGHEST version's go.mod, so histories.go fetches that one go.mod
+(one extra cached GET, folded in serially before the per-version .info fan-out, so the
+-race model is unchanged) and marks each release Yanked via isRetracted.
+
+Shape-only, by nature. cargo and PyPI carry a payload corroborator (a hostile build.rs
+on an introduced dep; a hostile setup.py in the release) because both have an install/
+build hook an attacker plants code in. A Go module has NO discrete install hook — its
+code simply runs on import — so there is nothing analogous to fetch-and-analyse, and the
+Go finding is the shape advisory alone (medium anchor → high lure), never escalated to
+critical. yankLureRegistry now returns a small struct ({installer, hook, verb, lure}) so
+VC-012's evidence reads in each ecosystem's own words: Go says "retracted"/"retract-lure",
+names the `go` installer, and — with an empty hook — points remediation at the module
+code that runs on import rather than a build.rs/setup.py.
+
+Process: parseRetract/isRetracted/highestVersion unit-tested (single/range/block, comment
+stripping, semver-not-lexical bounds, the `retract`-as-prefix guard) and each shown to
+have teeth by mutation (exclusive bound, verb swap, dropped guard all flip a test);
+end-to-end Histories test proves a retract block flows through to Yanked and the
+retract-lure YankLureShape; the VC-012 Go finding proven high with retract vocabulary and
+no build/install-hook wording. Proven against a live oracle: github.com/prometheus/common
+v1.20.99's real 37-entry retract block — every listed version reads retracted, every
+unlisted one does not. gofmt/vet clean, go test -race ./... green.

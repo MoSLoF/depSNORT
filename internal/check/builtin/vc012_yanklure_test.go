@@ -149,6 +149,46 @@ func TestYankLure_FiresHigh_PyPIShape(t *testing.T) {
 	}
 }
 
+// Go (go.mod retract) gets the shape detection too (OPU-26 Go increment), but in
+// its own vocabulary: "retracted"/"retract-lure", the `go` installer, and — since a
+// Go module has no install hook — a remediation that points at the code itself
+// rather than a build.rs/setup.py. Pinned to a retracted version beneath a live
+// newest atop a retracted run => high.
+func TestYankLure_FiresHigh_GomodRetractShape(t *testing.T) {
+	g := graph.New()
+	id := "pkg:golang/example.com/mod@v1.2.0"
+	g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "gomod", Name: "example.com/mod", Version: "v1.2.0"})
+	h := &datasource.ReleaseHistory{Package: "example.com/mod", Ecosystem: "gomod", Releases: []datasource.Release{
+		{Version: "v1.1.0", Yanked: true}, {Version: "v1.2.0", Yanked: true}, // pinned into the retracted run
+		{Version: "v1.3.0", Yanked: false}, // live newest — the lure target
+	}}
+	fs := runYankLure(g, id, h)
+	if len(fs) != 1 {
+		t.Fatalf("want 1 finding for the gomod retract-lure shape, got %d", len(fs))
+	}
+	f := fs[0]
+	if f.Severity != finding.SevHigh || f.GateClass != finding.GateEligible {
+		t.Errorf("severity/gate = %q/%q, want high/gate-eligible", f.Severity, f.GateClass)
+	}
+	// Vocabulary teeth: Go wording, not cargo/pypi wording.
+	if !strings.Contains(f.Title, "retract-lure") {
+		t.Errorf("title should say retract-lure (not yank-lure): %q", f.Title)
+	}
+	if !strings.Contains(f.Evidence, "retracted") || strings.Contains(f.Evidence, "yanked") {
+		t.Errorf("evidence should use 'retracted', never 'yanked': %q", f.Evidence)
+	}
+	if !strings.Contains(f.Evidence, "go nudges") {
+		t.Errorf("evidence should name the `go` installer: %q", f.Evidence)
+	}
+	// No install hook for Go: remediation points at the module code, not build.rs/setup.py.
+	if strings.Contains(f.Remediation, "build.rs") || strings.Contains(f.Remediation, "setup.py") {
+		t.Errorf("gomod remediation must not reference a build/install hook: %q", f.Remediation)
+	}
+	if !strings.Contains(f.Remediation, "runs on import") {
+		t.Errorf("gomod remediation should point at code that runs on import: %q", f.Remediation)
+	}
+}
+
 // No release history: quiet (nothing to evaluate).
 func TestYankLure_Quiet_NoHistory(t *testing.T) {
 	g, _ := cargoNodeGraph("arrayref", "0.3.9")
