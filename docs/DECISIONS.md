@@ -3841,3 +3841,34 @@ green (33/0), -race clean, go vet silent, gofmt clean. D-04 (parse only, no exec
 Of D-97's deferred list, only Pipfile (pipenv's manifest, not a lock) now remains among the in-adapter
 readers; the four no-adapter formats (flake.lock / conan.lock / deno.lock / pom.xml) are separate
 new-ecosystem work.
+
+## D-102 — OPU-29 (Increment 4): Pipfile — pipenv's manifest (pypi ecosystem)
+
+Closes the last in-adapter reader from D-97's deferred list. A Pipfile is pipenv's MANIFEST, not a
+lockfile: it declares dependencies with constraints (often `"*"`) and resolves no versions or transitive
+tree — that is `Pipfile.lock`'s job, which the pypi adapter already parses. So a Pipfile is handled exactly
+like `pyproject.toml`: it produces a root whose declared deps ride on `graph.AttrDeclaredDeps` (so
+expansion can presume a version, D-44), with the same flat-resolution disclosure a bare `requirements.txt`
+carries (`AttrFlatResolution`, D-24).
+
+Precedence and gating: reached ONLY when there is no `Pipfile.lock` in the directory (the lock is richer
+and is preferred by `inputPath`), and ONLY when the Pipfile actually declares dependencies — gated by
+`pipfileDeclaresDeps`, mirroring `pyprojectDeclaresDeps`. A Pipfile that declares none is left to the
+existing coverage-gap disclosure, unchanged. No `gap.go` change is needed: the claim/skip logic handles
+both a dep-declaring Pipfile (claimed and scanned) and a dep-less one (still a disclosed gap).
+
+Line-scanned, not TOML-parsed (D-10): only the `[packages]` and `[dev-packages]` tables are read. The TOML
+key is the package name; the value is a specifier string (`"*"`, `">=2.0"`) or an inline table
+(`{version = "...", extras = [...]}`) whose version is taken (`"*"` when a table pins none, e.g. a
+git/path dependency). Nothing is executed (D-04).
+
+Proof: a Pipfile-only project resolves to root `source=Pipfile`, all four deps across both tables (incl.
+the inline-table `flask >=2.0`) captured as declared + unresolved, `flat_resolution=pypi`; a no-deps
+Pipfile errors (stays a gap); constraint extraction covers bare/quoted/inline-table/no-version. With a
+`Pipfile.lock` present the lock wins (the manifest is not used) — the dir precedence ensures it. Three unit
+tests; full suite green (33/0), -race clean, vet/fmt clean.
+
+This exhausts D-97's in-adapter reader list (uv / poetry / pdm / pnpm / pylock / bun / Pipfile all done).
+Only the four no-adapter formats remain — flake.lock / conan.lock / deno.lock / pom.xml — each a whole new
+ecosystem adapter (Detect / Resolve / purl type / coverage plumbing / registration), not a
+reader-into-existing-adapter; they stay disclosed as coverage gaps until built.

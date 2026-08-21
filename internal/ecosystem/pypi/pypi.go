@@ -119,6 +119,11 @@ func inputPath(path string) (file, kind string) {
 		// a lockfile, so its deps are declared (name + constraint) and expansion
 		// presumes their versions. Only treated as a project root when it
 		// actually declares dependencies (checked in parsePyproject).
+		// Pipfile is pipenv's MANIFEST; reached only when there is no Pipfile.lock
+		// (checked above) and only when it declares deps, mirroring pyproject.
+		if p := filepath.Join(path, pipfileName); fileExists(p) && pipfileDeclaresDeps(p) {
+			return p, "pipfile-manifest"
+		}
 		if p := filepath.Join(path, pyprojectName); fileExists(p) && pyprojectDeclaresDeps(p) {
 			return p, "pyproject"
 		}
@@ -141,6 +146,10 @@ func inputPath(path string) (file, kind string) {
 		return path, "pylock"
 	case base == pipfileLockName:
 		return path, "pipfile"
+	case base == pipfileName:
+		if pipfileDeclaresDeps(path) {
+			return path, "pipfile-manifest"
+		}
 	case base == pyprojectName:
 		if pyprojectDeclaresDeps(path) {
 			return path, "pyproject"
@@ -234,6 +243,8 @@ func (a *Adapter) Resolve(path string) (*graph.Graph, error) {
 		return parsePylock(path, raw)
 	case "pipfile":
 		return parsePipfileLock(path, raw)
+	case "pipfile-manifest":
+		return parsePipfile(path, raw)
 	case "pyproject":
 		return parsePyproject(path, raw)
 	case "setuppy":
