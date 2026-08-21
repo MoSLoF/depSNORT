@@ -17,7 +17,7 @@ func scanHasCap(text string, c Capability) bool {
 // fetch-and-execute a registry package (npx / dlx / bunx) must be Network+Exec.
 func TestPkgRunnerNetworkExec(t *testing.T) {
 	positives := []string{
-		"npx only-allow pnpm",         // the meshclaw meshtastic hooks
+		"npx some-random-cli",         // a non-allowlisted target (cf. only-allow, Part D)
 		"npx --yes some-cli build",    // flags before the package name
 		"pnpm dlx some-generator",     // pnpm remote exec
 		"yarn dlx @scope/tool",        // yarn remote exec, scoped
@@ -48,6 +48,64 @@ func TestPkgRunnerNetworkExec(t *testing.T) {
 	for _, cmd := range []string{"pnpm exec tsc", "yarn exec eslint"} {
 		if scanHasCap(cmd, CapNetwork) {
 			t.Errorf("did not expect CapNetwork for local exec %q", cmd)
+		}
+	}
+}
+
+// scanEvidence returns the evidence markers scanCaps recorded for text.
+func scanEvidence(text string) []string {
+	_, ev := scanCaps(text)
+	return ev
+}
+
+// hasEvidence reports whether scanCaps recorded a marker equal to want for text.
+func hasEvidence(text, want string) bool {
+	for _, m := range scanEvidence(text) {
+		if m == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBenignRunnerAllowlist covers OPU-27 Part D: a runner whose target is a
+// known-benign guard clause (only-allow) is disclosed but not scored, yet a benign
+// or offline runner cannot launder a hostile one in the same hook, and a typosquat
+// of an allowlisted name still scores (exact-match discipline).
+func TestBenignRunnerAllowlist(t *testing.T) {
+	// The meshclaw case: `npx only-allow pnpm` is a package-manager guard — quiet
+	// on both capability axes, but disclosed via a benign-runner evidence marker.
+	const guard = "npx only-allow pnpm"
+	if scanHasCap(guard, CapNetwork) || scanHasCap(guard, CapExec) {
+		t.Errorf("%q (a known guard clause) must not raise network/exec", guard)
+	}
+	if !hasEvidence(guard, "benign-runner:only-allow") {
+		t.Errorf("%q should be disclosed as benign-runner:only-allow; evidence=%v", guard, scanEvidence(guard))
+	}
+	// only-allow@2 (versioned) is the same target — still benign.
+	if scanHasCap("npx only-allow@2 pnpm", CapNetwork) {
+		t.Errorf("versioned only-allow@2 should still be benign")
+	}
+
+	// A benign prefix must NOT launder a hostile runner in the same hook.
+	const laundered = "npx only-allow pnpm && npx evildoer"
+	if !scanHasCap(laundered, CapNetwork) || !scanHasCap(laundered, CapExec) {
+		t.Errorf("%q: the second runner (evildoer) must still score network+exec", laundered)
+	}
+	if !hasEvidence(laundered, "pkg-runner:evildoer") {
+		t.Errorf("%q should name the hostile target evildoer; evidence=%v", laundered, scanEvidence(laundered))
+	}
+
+	// An OFFLINE prefix must not launder a hostile runner either (per-invocation).
+	const offlineLaundered = "npx --offline safe && npx evildoer"
+	if !scanHasCap(offlineLaundered, CapNetwork) {
+		t.Errorf("%q: the second, online runner must still reach the network", offlineLaundered)
+	}
+
+	// Exact-match discipline: a typosquat of only-allow is NOT benign.
+	for _, squat := range []string{"npx only-alow pnpm", "npx only-allow-evil pnpm"} {
+		if !scanHasCap(squat, CapNetwork) || !scanHasCap(squat, CapExec) {
+			t.Errorf("typosquat %q must score network+exec (distance-0 allowlist)", squat)
 		}
 	}
 }

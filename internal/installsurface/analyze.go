@@ -329,21 +329,40 @@ var (
 	// — VC-002c, or VC-002d with egress — not a bland VC-002b network note.
 	imdsRe = regexp.MustCompile(`(?i)169\.254\.169\.254|metadata\.google\.internal|metadata\.azure\.com|/latest/meta-data/`)
 
-	// pkgRunnerRe recognizes package RUNNERS that fetch-and-execute a package
-	// from a registry in one step: npx/bunx, and the `dlx`/`x` subcommands of
-	// pnpm/yarn/bun (OPU-27). Unlike `curl | sh`, this is not a shell cradle —
-	// it is the package manager's own resolution path — so it is CapNetwork +
-	// CapExec (elevates to VC-002b), NOT CapCradle. The distinction matters:
-	// `postinstall: npx evil-pkg` is remote code execution at the CONSUMER's
-	// install time, scored today as a bare VC-002a hook. `pnpm exec` / `yarn
-	// exec` (run an ALREADY-installed local bin) are deliberately excluded — no
-	// fetch — as is `npx --no-install`/`--offline`.
-	pkgRunnerRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(=` + "`" + `])(?:npx|bunx)\s+(?:--?\w[\w-]*\s+)*[@\w]|(?:pnpm|yarn|bun)\s+(?:dlx|x)\s`)
+	// runnerTargetRe recognizes package RUNNERS that fetch-and-execute a package
+	// from a registry in one step — npx/bunx and the `dlx`/`x` subcommands of
+	// pnpm/yarn/bun (OPU-27) — AND captures the target package name (group 1), so
+	// each invocation can be judged individually (Part D). Unlike `curl | sh`,
+	// this is not a shell cradle — it is the package manager's own resolution
+	// path — so a scored invocation is CapNetwork + CapExec (elevates to VC-002b),
+	// NOT CapCradle. `postinstall: npx evil-pkg` is remote code execution at the
+	// CONSUMER's install time, scored today as a bare VC-002a hook. `pnpm exec` /
+	// `yarn exec` (run an ALREADY-installed local bin) match neither branch — no
+	// fetch. A trailing `@version` is not captured (the `@` is outside the target
+	// character class), so `only-allow@2` yields target "only-allow".
+	runnerTargetRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(=` + "`" + `])(?:npx|bunx|(?:pnpm|yarn|bun)\s+(?:dlx|x))\s+(?:--?\w[\w-]*\s+)*(@?[\w][\w.-]*(?:/[\w.-]+)?)`)
 
-	// pkgRunnerOfflineRe suppresses pkgRunnerRe when the runner is explicitly
-	// pinned to not fetch. `npx --no-install foo` / `npx --offline foo` resolve
-	// only a local bin, so the network capability does not apply.
-	pkgRunnerOfflineRe = regexp.MustCompile(`(?i)(?:npx|bunx)\s+(?:--?\w[\w-]*\s+)*(?:--no-install|--offline|--prefer-offline)\b`)
+	// pkgRunnerOfflineRe suppresses a runner invocation that is explicitly pinned
+	// to not fetch. `npx --no-install foo` / `npx --offline foo` resolve only a
+	// local bin, so the network capability does not apply. It is tested against
+	// each invocation's own matched substring (not the whole hook), so an offline
+	// runner cannot suppress a second, network-reaching runner in the same hook.
+	pkgRunnerOfflineRe = regexp.MustCompile(`(?i)(?:npx|bunx|dlx|x)\s+(?:--?\w[\w-]*\s+)*(?:--no-install|--offline|--prefer-offline)\b`)
+
+	// benignRunnerTargets is a curated, exact-match allowlist of runner target
+	// packages that are known-benign guard clauses — they gate WHICH package
+	// manager may install and contribute no payload (OPU-27 Part D). `only-allow`
+	// is the canonical one (`npx only-allow pnpm` as a preinstall): it inspects
+	// npm_config_user_agent and exits, nothing more. A runner whose every target
+	// is on this list is disclosed (a `benign-runner:` evidence marker) but raises
+	// no capability, mirroring the husky exclusion but data-driven. The match is
+	// EXACT (distance-0): a typosquat like `only-alow` is not on the list and
+	// scores normally, and the list stays deliberately tiny — a guard clause is a
+	// narrow, well-known shape, and every entry is warning-tax the tool foregoes,
+	// so growth must clear the same bar `only-allow` does.
+	benignRunnerTargets = []string{
+		"only-allow",
+	}
 
 	// pkgInstallRe recognizes an install hook invoking a package MANAGER to
 	// install code from a registry (OPU-27). A hook that runs `npm install -g
@@ -359,6 +378,19 @@ var (
 		`|gem\s+install\b|cargo\s+install\b|go\s+install\b|poetry\s+add\b|uv\s+(?:pip\s+install|add)\b` +
 		`)`)
 )
+
+// isBenignRunnerTarget reports whether a package RUNNER's target (the package it
+// fetch-and-executes) is a known-benign guard clause on the exact-match allowlist
+// (OPU-27 Part D). The comparison is case-insensitive but distance-0: a typosquat
+// of an allowlisted name is not benign.
+func isBenignRunnerTarget(name string) bool {
+	for _, b := range benignRunnerTargets {
+		if strings.EqualFold(name, b) {
+			return true
+		}
+	}
+	return false
+}
 
 // IsPersistenceMarker reports whether an install-surface evidence marker names a
 // persistence mechanism (auto-executes on boot/login) as opposed to an ordinary
@@ -452,11 +484,24 @@ func scanCaps(text string) ([]Capability, []string) {
 		add(CapObfuscation, "cmd-delayed-expansion")
 	}
 	// Package RUNNER (npx / pnpm dlx / yarn dlx / bunx): fetch-and-execute a
-	// registry package in one step — network + exec, at the consumer's install
-	// time (OPU-27). Suppressed when explicitly pinned offline / --no-install.
-	if m := pkgRunnerRe.FindString(text); m != "" && !pkgRunnerOfflineRe.MatchString(text) {
-		add(CapNetwork, "pkg-runner:"+strings.TrimSpace(m))
-		add(CapExec, "pkg-runner:"+strings.TrimSpace(m))
+	// registry package in one step — network + exec at the consumer's install
+	// time (OPU-27). Judged PER INVOCATION so a benign or offline runner cannot
+	// launder a hostile one in the same hook: each invocation that is neither
+	// explicitly offline nor a known-benign guard-clause target (Part D) scores
+	// CapNetwork + CapExec on its own target name.
+	for _, m := range runnerTargetRe.FindAllStringSubmatch(text, -1) {
+		invocation, target := m[0], m[1]
+		if pkgRunnerOfflineRe.MatchString(invocation) {
+			continue // pinned offline: resolves a local bin, no network reach
+		}
+		if isBenignRunnerTarget(target) {
+			// Disclosed but not scored: a known package-manager guard clause runs
+			// at install but carries no payload (Part D). No capability raised.
+			ev = append(ev, "benign-runner:"+target)
+			continue
+		}
+		add(CapNetwork, "pkg-runner:"+target)
+		add(CapExec, "pkg-runner:"+target)
 	}
 	// Package MANAGER install (npm/pnpm/yarn/bun install|add|ci, pip/gem/cargo/go
 	// install, ...): fetches third-party code from a registry at install time

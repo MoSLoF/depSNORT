@@ -3231,3 +3231,47 @@ targets (`only-allow`, well-known generators) to downgrade guard-clause noise, m
 husky exclusion; and a separate hardening pass on the incidental `& ` exec marker (PowerShell
 call-operator matching shell `&&`). Both left pending a call on whether the noise justifies
 the maintenance surface.
+
+## D-88 — OPU-27 Part D: data-driven benign-runner allowlist (quiet the guard-clause noise)
+
+OPU-27 Part A scored every package runner (`npx`/`dlx`/`bunx`) as CapNetwork + CapExec
+(VC-002b). Correct at the shape level — npx fetches and runs a registry package at the
+consumer's install — but on a clean tree the recurring `npx only-allow pnpm` preinstall
+guard produced a gate-eligible finding on a hook that carries no payload: `only-allow`
+inspects `npm_config_user_agent`, errors if the wrong package manager is in use, and exits.
+That is warning tax, and the persistence-vs-benign split (OPU-19) exists to avoid it.
+
+Part D is the runner analogue of the husky exclusion, but data-driven: `benignRunnerTargets`
+is a curated, exact-match allowlist of runner targets that are known-benign guard clauses.
+A runner whose target is on the list is DISCLOSED (a `benign-runner:<target>` evidence
+marker) but raises no capability, so it does not fire VC-002b. The list is seeded with
+`only-allow` alone and kept deliberately tiny — a guard clause is a narrow, well-known shape,
+and each entry is warning tax the tool foregoes, so growth must clear the same bar.
+
+Two disciplines make the suppression safe, both proven by mutation:
+
+- **Exact match, distance-0.** `isBenignRunnerTarget` compares case-insensitively but not by
+  substring or edit distance, so `only-alow` (typosquat) and `only-allow-evil` (a different
+  package that embeds the name) are NOT benign and score normally. Mutating the compare to a
+  substring test laundered the typosquat and flipped the test.
+- **Per-invocation judgement.** The runner block now iterates EVERY runner invocation in a
+  hook (runnerTargetRe captures each target) and classifies each on its own. A benign or
+  offline runner can no longer launder a hostile one in the same hook — `npx only-allow pnpm
+  && npx evildoer` still scores network+exec on `evildoer`. This also fixed a latent Part A
+  gap: the offline suppression was a whole-hook test, so `npx --offline safe && npx evildoer`
+  wrongly went quiet; it is now tested against each invocation's own substring. Regressing
+  either to whole-hook flipped a test.
+
+The change deliberately FLIPS the disposition of `npx only-allow pnpm` from Part A's
+network+exec to quiet-but-disclosed; the OPU-27 Part A test was updated accordingly (its
+generic-runner positives now use a non-allowlisted target) and a new test asserts the benign,
+laundering, offline-laundering, and typosquat cases. Findings gate on capabilities, and the
+only place install-surface evidence is ever interpreted is VC-002g's IsPersistenceMarker,
+which a `benign-runner:` marker fails — so the disclosure marker is inert to every check.
+
+Proof: validated against the real meshclaw manifest end-to-end through Analyze —
+@meshtastic/core's `npx only-allow pnpm` preinstall now yields no hook (quiet), while
+smart-buffer/socks' npm-install prepublish (Part B, untouched) still reaches the network. The
+OPU-19 frozen probe table is unchanged. gofmt/vet clean, go test -race ./... green (33
+packages). This closes the OPU-27 Part D item; the incidental `& ` exec-marker hardening
+remains the one deferred follow-up.
