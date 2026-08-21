@@ -409,6 +409,75 @@ func (HookBuildFlagInjection) Run(ctx *check.Context) []finding.Finding {
 	return out
 }
 
+// ---- VC-002i: build-constrained startup-code (init) evasion ---------------
+
+// HookConstrainedInit (VC-002i) reports a package that auto-runs code at program
+// STARTUP — an init() function or a blank-identifier var initializer — that is
+// conditionally compiled behind a build constraint (a //go:build tag or a
+// GOOS/GOARCH filename suffix) AND carries a network, download-cradle,
+// decode-obfuscation, or credential capability (OPU-28 Increment 3).
+//
+// Unlike the rest of the family this is a RUNTIME shape — it runs when the
+// consumer runs their program, not at install or build — so the extractor exposes
+// no install-hook capability for it; the facts ride evidence markers that only this
+// check reads (installsurface.IsInitEvasionMarker). The build constraint is the
+// evasion: conditionally-compiled startup code is dormant on a reviewer's platform
+// and skipped by tests/CI that run elsewhere, so a hidden runtime payload escapes
+// default-build scrutiny. Bare init() and ordinary build-tagged platform files
+// carry no such marker and stay silent. High/gate-eligible: a strong,
+// review-worthy evasion shape rather than a proven-live install-time compromise.
+type HookConstrainedInit struct{}
+
+func (HookConstrainedInit) Meta() check.Meta {
+	return check.Meta{
+		ID: "VC-002i", Axis: finding.AxisKnownCompromise,
+		DefaultSeverity: finding.SevHigh, DefaultGate: finding.GateEligible,
+		Description: "package auto-runs build-constrained startup code with a network/decode/credential capability",
+	}
+}
+
+func (HookConstrainedInit) Run(ctx *check.Context) []finding.Finding {
+	var out []finding.Finding
+	for _, v := range collectHooks(ctx.Graph) {
+		var caps, constraints []string
+		seen := map[string]bool{}
+		for _, ev := range v.Evidence {
+			for _, part := range strings.Split(ev, ",") {
+				part = strings.TrimSpace(part)
+				switch {
+				case installsurface.IsInitEvasionMarker(part):
+					if r := strings.TrimPrefix(part, "init-cap:"); !seen[r] {
+						seen[r] = true
+						caps = append(caps, r)
+					}
+				case strings.HasPrefix(part, "init-constraint:"):
+					constraints = append(constraints, strings.TrimPrefix(part, "init-constraint:"))
+				}
+			}
+		}
+		if len(caps) == 0 {
+			continue
+		}
+		sort.Strings(caps)
+		constraint := "a build constraint"
+		if len(constraints) > 0 {
+			constraint = strings.Join(constraints, ", ")
+		}
+		out = append(out, finding.Finding{
+			CheckID: "VC-002i", Axis: finding.AxisKnownCompromise,
+			Severity: finding.SevHigh, GateClass: finding.GateEligible,
+			Confidence: 0.6, NodeID: v.Pkg.ID,
+			Title: fmt.Sprintf("package auto-runs build-constrained startup code (%s)", v.Hook.Name),
+			Evidence: fmt.Sprintf("a conditionally-compiled file (%s) auto-runs startup code (init) exhibiting %s — "+
+				"a shape used to hide a runtime payload from default-build review and testing",
+				constraint, strings.Join(caps, ", ")),
+			Remediation: "review the constrained startup code: conditionally-compiled init that reaches the network, " +
+				"decodes a blob, or reads credentials is a runtime backdoor kept out of the default build",
+		})
+	}
+	return out
+}
+
 func dedupeStrings(in []string) []string {
 	seen := map[string]bool{}
 	var out []string

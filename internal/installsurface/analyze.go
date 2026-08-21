@@ -861,6 +861,12 @@ func AnalyzeGo(sources map[string]string) Surface {
 		if h, ok := analyzeCgoDirectives(file, src); ok {
 			s.Hooks = append(s.Hooks, h)
 		}
+
+		// build-tag-gated init evasion (OPU-28 Increment 3): startup code hidden
+		// behind a build constraint, carrying a network/decode/credential capability.
+		if h, ok := analyzeConstrainedInit(file, src); ok {
+			s.Hooks = append(s.Hooks, h)
+		}
 	}
 	return s
 }
@@ -926,6 +932,153 @@ func cgoInjectionReasons(line string) []string {
 // VC-002g gates on IsPersistenceMarker.
 func IsCgoInjectionMarker(marker string) bool {
 	return strings.HasPrefix(marker, "cgo-inject:")
+}
+
+var (
+	// goBuildTagRe / goLegacyBuildTagRe match an explicit build constraint (the
+	// modern `//go:build expr` and the legacy `// +build expr`). A file carrying
+	// one is conditionally compiled — it evades a default-build review, test run,
+	// and CI on a non-matching platform/tag.
+	goBuildTagRe       = regexp.MustCompile(`(?m)^//go:build[ \t]+(.+?)[ \t]*$`)
+	goLegacyBuildTagRe = regexp.MustCompile(`(?m)^// \+build[ \t]+(.+?)[ \t]*$`)
+
+	// goInitFuncRe / goBlankVarInitRe match the two package-level shapes that run
+	// code automatically at program startup: `func init()` and a blank-identifier
+	// var whose initializer is a CALL (`var _ = doThing()`) — the latter a known
+	// evasion that avoids the more conspicuous init(). A blank var with a TYPE
+	// (`var _ io.Reader = ...`, an interface assertion) has text between `_` and
+	// `=`, so it is deliberately not matched.
+	goInitFuncRe     = regexp.MustCompile(`(?m)^func[ \t]+init[ \t]*\([ \t]*\)`)
+	goBlankVarInitRe = regexp.MustCompile(`(?m)^var[ \t]+_[ \t]*=[ \t]*[\w.]+\(`)
+
+	// goGOOS / goGOARCH are the platform tokens a filename suffix (`net_linux.go`,
+	// `asm_amd64.go`, `sys_linux_arm64.go`) encodes as an implicit build constraint.
+	goGOOS = map[string]bool{
+		"aix": true, "android": true, "darwin": true, "dragonfly": true, "freebsd": true,
+		"hurd": true, "illumos": true, "ios": true, "js": true, "linux": true,
+		"netbsd": true, "openbsd": true, "plan9": true, "solaris": true, "wasip1": true,
+		"windows": true, "zos": true,
+	}
+	goGOARCH = map[string]bool{
+		"386": true, "amd64": true, "arm": true, "arm64": true, "loong64": true,
+		"mips": true, "mips64": true, "mips64le": true, "mipsle": true, "ppc64": true,
+		"ppc64le": true, "riscv64": true, "s390x": true, "sparc64": true, "wasm": true,
+	}
+)
+
+// analyzeConstrainedInit reports a build-tag-gated init EVASION (OPU-28 Increment
+// 3): a conditionally-compiled file whose startup code (init / blank-var call)
+// carries a network, download-cradle, decode-obfuscation, or credential
+// capability. All three must hold — a bare init(), an unconstrained file, or a
+// constrained platform file that merely registers a driver stays silent, which is
+// what keeps this off the very common benign build-tagged Go file.
+//
+// A runtime init is NOT an install hook, so no install-hook capability is exposed
+// (Caps is nil); the facts ride evidence markers `init-constraint:<what>` and
+// `init-cap:<reason>` that the dedicated VC-002i judge reads. Test files are
+// skipped — their init runs only under `go test`, never in a consumer's binary.
+func analyzeConstrainedInit(file, src string) (Hook, bool) {
+	if strings.HasSuffix(pathBase(file), "_test.go") {
+		return Hook{}, false
+	}
+	constraint, ok := goBuildConstraint(file, src)
+	if !ok {
+		return Hook{}, false
+	}
+	if !goInitFuncRe.MatchString(src) && !goBlankVarInitRe.MatchString(src) {
+		return Hook{}, false
+	}
+	caps, _ := scanCaps(stripCodeComments(src))
+	reasons := dangerousInitReasons(caps)
+	if len(reasons) == 0 {
+		return Hook{}, false
+	}
+	ev := []string{"init-constraint:" + constraint}
+	for _, r := range reasons {
+		ev = append(ev, "init-cap:"+r)
+	}
+	return Hook{
+		Name:     "init:" + file,
+		Command:  "build-constrained startup code (" + constraint + ")",
+		Caps:     nil, // a runtime init is not an install-hook capability (VC-002i judges it)
+		Evidence: ev,
+	}, true
+}
+
+// goBuildConstraint returns a short description of a file's build constraint, and
+// whether it has one: an explicit `//go:build` / `// +build` tag (preferred), or a
+// GOOS/GOARCH filename suffix.
+func goBuildConstraint(file, src string) (string, bool) {
+	if m := goBuildTagRe.FindStringSubmatch(src); m != nil {
+		return "build-tag " + truncateStr(strings.TrimSpace(m[1]), 60), true
+	}
+	if m := goLegacyBuildTagRe.FindStringSubmatch(src); m != nil {
+		return "build-tag " + truncateStr(strings.TrimSpace(m[1]), 60), true
+	}
+	return filenamePlatformConstraint(file)
+}
+
+// filenamePlatformConstraint reports the platform a file's `_GOOS`/`_GOARCH`/
+// `_GOOS_GOARCH` suffix implies, and whether it has one.
+func filenamePlatformConstraint(file string) (string, bool) {
+	base := strings.TrimSuffix(pathBase(file), ".go")
+	parts := strings.Split(base, "_")
+	if len(parts) < 2 {
+		return "", false
+	}
+	last := parts[len(parts)-1]
+	if len(parts) >= 3 {
+		if secondLast := parts[len(parts)-2]; goGOOS[secondLast] && goGOARCH[last] {
+			return secondLast + "/" + last, true
+		}
+	}
+	if goGOOS[last] {
+		return last, true
+	}
+	if goGOARCH[last] {
+		return last, true
+	}
+	return "", false
+}
+
+// dangerousInitReasons filters analyzed capabilities to the shapes that make an
+// auto-running init suspicious: a network beacon, a download cradle, a decode of an
+// embedded blob, or a credential read. Bare exec is deliberately excluded — a
+// platform-specific file legitimately shells out to a system tool, and flagging
+// that would tax normal cross-platform Go.
+func dangerousInitReasons(caps []Capability) []string {
+	want := map[Capability]string{
+		CapNetwork:     "network",
+		CapCradle:      "download-cradle",
+		CapObfuscation: "decode-obfuscation",
+		CapCredentials: "credentials",
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range caps {
+		if r, ok := want[c]; ok && !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// pathBase returns the last path component of a slash- or backslash-separated path,
+// without importing path/filepath (this package keeps a minimal import footprint).
+func pathBase(p string) string {
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
+// IsInitEvasionMarker reports whether an evidence marker names a build-constrained
+// startup-code capability (OPU-28 Increment 3). VC-002i gates on it, the same way
+// VC-002g/h gate on their own marker predicates.
+func IsInitEvasionMarker(marker string) bool {
+	return strings.HasPrefix(marker, "init-cap:")
 }
 
 // ---- PHP/Composer analysis --------------------------------------------------

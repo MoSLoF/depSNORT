@@ -3458,3 +3458,48 @@ including an ordinary build.rs) each flip a case. Real-world oracle: a re-scan o
 Deferred to later OPU-28 increments (documented): per-dependency attribution from vendor/ and
 the module cache; build-tag-gated init() evasion (runtime); and `go run <remote>@<version>` as
 a Go package runner.
+
+## D-93 — OPU-28 (Increment 3): build-tag-gated init evasion (VC-002i)
+
+Increments 1-2 covered Go's `go generate` (on-demand) and cgo `#cgo` (at `go build`) vectors.
+Increment 3 covers the RUNTIME one: a package that auto-runs code at program startup — an
+init() or a blank-identifier var initializer (`var _ = boot()`) — hidden behind a build
+constraint. The constraint is the evasion: a `//go:build` tag or a GOOS/GOARCH filename suffix
+(`telemetry_linux.go`) makes the code conditionally compiled, so it is dormant on a reviewer's
+platform, skipped by tests/CI running elsewhere, and thus escapes default-build scrutiny — while
+still running on the targeted platform when the consumer runs their program.
+
+The evasion needs three ingredients together, and all three are required to fire: (1)
+conditionally compiled (explicit build tag or platform-suffix filename), (2) auto-runs at
+startup (`func init()` or a blank-var CALL initializer — a `var _ Type = value` interface
+assertion has text between `_` and `=` and is deliberately not matched), and (3) carries a
+network / download-cradle / decode-obfuscation / credential capability. Bare init(), an
+unconstrained file, an ordinary platform file that merely registers a driver, an exec-ONLY init
+(a platform file legitimately shelling out to a system tool), and a test file (its init runs
+only under `go test`, never in a consumer's binary) all stay silent.
+
+Honest framing drove the wiring. A runtime init is NOT an install hook, so exposing CapNetwork
+would make VC-002b report "install hook reaches the network" — a mislabel of the trigger. So the
+extractor exposes NO install-hook capability (Hook.Caps is nil, which trips nothing in the
+existing family — VC-002a is npm-only, VC-002b-f gate on caps). The facts ride evidence markers
+`init-constraint:<what>` and `init-cap:<reason>` that only the dedicated judge, VC-002i, reads
+(installsurface.IsInitEvasionMarker). VC-002i is high/gate-eligible: a strong, review-worthy
+evasion shape, not a proven-live compromise. It is registered in builtin.Default() (the drift
+guard enforces registration). AnalyzeGo now carries all three OPU-28 increments; the gomod
+adapter and walk are unchanged.
+
+Proof: AnalyzeGo unit tests (build-tag/filename-suffix/blank-var/legacy-+build positives across
+network/decode/cradle/credential; unconstrained, benign-register, no-init, exec-only, test-file,
+and interface-assertion negatives) and an end-to-end wiring test through the real gomod adapter
+into VC-002i (a `telemetry_linux.go` init that beacons fires VC-002i AND explicitly NOT VC-002b;
+an ordinary `driver_linux.go` register-init stays silent). Each guard mutation-proven: dropping
+the constraint requirement, adding CapExec to the dangerous set, dropping the auto-run
+requirement, and exposing the capabilities (Caps not nil, which then mislabels the init as a
+VC-002b install-hook network reach) each flip a case. Real-world oracle: a re-scan of depSNORT's
+own 251 .go files (5 of them build-constrained) with init-evasion detection active still yields
+zero hooks. gofmt/vet clean, go test -race ./... green.
+
+Deferred to later OPU-28 increments (documented): per-dependency vendor/ and module-cache
+attribution; and `go run <remote>@<version>` as a Go package runner (an npx analog). With
+Increment 3 the three build-surface execution phases Go actually has — on-demand generate,
+build-time cgo, and runtime init — are all covered.
