@@ -64,6 +64,10 @@ func TestAnalyzeGo_CgoFlagInjection(t *testing.T) {
 		"tool-redirect":  "package p\n/*\n#cgo CFLAGS: -B/tmp/evil\n*/\nimport \"C\"\n",
 		"response-file":  "package p\n/*\n#cgo LDFLAGS: @/tmp/flags\n*/\nimport \"C\"\n",
 		"shell-metachar": "package p\n/*\n#cgo LDFLAGS: -l$(whoami)\n*/\nimport \"C\"\n",
+		// line-comment preamble form (// #cgo ...) — equally valid Go cgo syntax,
+		// and common for short directive lists. Regression guard for the
+		// cgoDirectiveRe optional-comment-prefix fix.
+		"line-comment": "package p\n// #cgo LDFLAGS: -fplugin=/tmp/evil.so\nimport \"C\"\n",
 	}
 	for name, src := range inject {
 		s := AnalyzeGo(map[string]string{"c.go": src})
@@ -91,7 +95,10 @@ func TestAnalyzeGo_CgoFlagInjection(t *testing.T) {
 		"benign pkg-config":     "package p\n/*\n#cgo pkg-config: gtk+-3.0\n*/\nimport \"C\"\n",
 		"benign SRCDIR var":     "package p\n/*\n#cgo CFLAGS: -I${SRCDIR}/include\n*/\nimport \"C\"\n",
 		"benign -Wl,-Bsymbolic": "package p\n/*\n#cgo LDFLAGS: -Wl,-Bsymbolic -Wl,-z,now\n*/\nimport \"C\"\n",
-		"no import C":           "package p\n/*\n#cgo CFLAGS: -fplugin=/tmp/evil.so\n*/\nvar x = 1\n", // line-start #cgo, but no import "C" -> not cgo
+		// line-comment preamble carrying only inert flags must stay quiet too — the
+		// widened regex recognizes the // form, the dangerous-flag gate still filters.
+		"benign line-comment": "package p\n// #cgo LDFLAGS: -L/usr/lib -lssl -lcrypto\nimport \"C\"\n",
+		"no import C":         "package p\n/*\n#cgo CFLAGS: -fplugin=/tmp/evil.so\n*/\nvar x = 1\n", // line-start #cgo, but no import "C" -> not cgo
 	} {
 		if s := AnalyzeGo(map[string]string{"c.go": src}); len(s.Hooks) != 0 {
 			t.Errorf("benign/non-cgo %q must not be recorded, got %+v", name, s.Hooks)

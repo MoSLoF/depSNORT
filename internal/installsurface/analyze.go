@@ -794,7 +794,11 @@ var (
 
 	// cgoDirectiveRe matches a single `#cgo …` preamble directive line (e.g.
 	// `#cgo CFLAGS: -O2`, `#cgo linux LDFLAGS: -ldl`, `#cgo pkg-config: gtk+-3.0`).
-	cgoDirectiveRe = regexp.MustCompile(`(?m)^[ \t]*#cgo\b[^\n]*`)
+	// The preamble may be written as a block comment (`/* #cgo … */`, where the
+	// directive line begins with `#cgo`) OR as line comments (`// #cgo …`), both
+	// equally valid cgo syntax; the optional `//` prefix accepts the latter so a
+	// plugin-load injection in a line-comment preamble is not missed.
+	cgoDirectiveRe = regexp.MustCompile(`(?m)^[ \t]*(?://[ \t]*)?#cgo\b[^\n]*`)
 
 	// The dangerous-flag detectors. A `#cgo` directive normally carries only inert
 	// compiler/linker flags (-I, -L, -l, -D, -std=, -Wall, pkg-config names). These
