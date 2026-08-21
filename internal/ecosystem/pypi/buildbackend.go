@@ -54,7 +54,11 @@ func (a *Adapter) resolveBuildBackend(ctx context.Context, g *graph.Graph, consu
 		// fact instead, and reserve the coverage gate for UNKNOWN backends,
 		// whose unresolvability is a genuine signal (Decision: OPU-29).
 		if installsurface.IsKnownBuildBackend(backend) {
-			addKnownBackend(consumer, name)
+			// Record the ACTUAL backend module reference (e.g. hatchling.build),
+			// not just the requires-entry package name, so a watch/drift rule sees
+			// the real value that executes at build time rather than a sanitized
+			// one (OPU-30).
+			addKnownBackend(consumer, backend)
 			return
 		}
 		addUnresolved(consumer, name)
@@ -107,7 +111,7 @@ func (a *Adapter) resolveBuildBackend(ctx context.Context, g *graph.Graph, consu
 // This mirrors the pypi.marker_excluded convention: the situation is surfaced,
 // not silently dropped, but it does not read as a real gap. The names are kept
 // sorted and de-duplicated so the attr is deterministic (D-09/D-13).
-func addKnownBackend(n *graph.Node, name string) {
+func addKnownBackend(n *graph.Node, backendRef string) {
 	if n.Attr == nil {
 		n.Attr = map[string]string{}
 	}
@@ -117,7 +121,7 @@ func addKnownBackend(n *graph.Node, name string) {
 			set[s] = true
 		}
 	}
-	set[name] = true
+	set[backendRef] = true
 	names := make([]string, 0, len(set))
 	for s := range set {
 		names = append(names, s)
