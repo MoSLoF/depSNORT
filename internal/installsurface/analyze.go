@@ -14,7 +14,9 @@
 package installsurface
 
 import (
+	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"ihbv.io/depsnort/internal/pep508"
@@ -745,6 +747,83 @@ func AnalyzeRust(buildRs string) Surface {
 		h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
 	}
 	s.Hooks = append(s.Hooks, h)
+	return s
+}
+
+// ---- Go analysis ------------------------------------------------------------
+
+// GoInstallHookNames labels the Go build-surface execution points OPU-28 extracts.
+// Go, uniquely, runs NO package code at `go get` / `go build` by design — its
+// closest analog to a lifecycle script is the go:generate directive, which ships
+// an arbitrary command that runs when a developer invokes `go generate`.
+var GoInstallHookNames = []string{
+	"go:generate",
+}
+
+// goGenerateRe matches a `//go:generate <command>` directive and captures the
+// command. Go requires the directive comment to have NO space between `//` and
+// `go:generate`; cmd/go tolerates leading indentation, so optional leading
+// whitespace is accepted. The command is the rest of the line (trailing
+// whitespace trimmed); `.` does not cross newlines, so a directive stays on its
+// own line.
+var goGenerateRe = regexp.MustCompile(`(?m)^[ \t]*//go:generate[ \t]+(.+?)[ \t]*$`)
+
+// AnalyzeGo builds the install surface from a Go module's source files (OPU-28).
+// sources maps a file path (used only to label the hook) to that .go file's text.
+//
+// Increment 1 extracts `//go:generate` directives. A go:generate command runs
+// when a developer invokes `go generate` — NOT at `go build` or `go get`, which
+// execute no package code (this is Go's deliberate design, and the finding text
+// says so). It is nonetheless the strongest "arbitrary command shipped in a
+// package" shape Go offers, and `go generate ./...` is a routine dev/CI step, so
+// a hostile directive in a dependency is weaponizable. The command is classified
+// by the shared scanCaps engine, so a benign generator (`mockgen`, `stringer`,
+// `go run ./internal/gen`) exhibits no capability and is not recorded, while a
+// network fetch or a `curl | sh` cradle raises the matching VC-002 finding.
+//
+// cgo `#cgo` flag injection (build-time) and build-tag-gated init evasion
+// (runtime) are a later increment.
+func AnalyzeGo(sources map[string]string) Surface {
+	var s Surface
+	files := make([]string, 0, len(sources))
+	for f := range sources {
+		files = append(files, f)
+	}
+	sort.Strings(files) // deterministic hook order (D-09 byte-reproducibility)
+
+	for _, file := range files {
+		directives := goGenerateRe.FindAllStringSubmatch(sources[file], -1)
+		for i, m := range directives {
+			cmd := strings.TrimSpace(m[1])
+			if cmd == "" {
+				continue
+			}
+			caps, ev := scanCaps(cmd)
+			// Only surface a directive that actually reaches the network, executes
+			// remote code, or obfuscates — a benign local generator carries no
+			// capability and is not a finding (the run-vs-fetch discipline, applied
+			// to codegen). This also keeps a module full of benign go:generate
+			// directives from cluttering the graph with inert hook nodes.
+			if len(caps) == 0 {
+				continue
+			}
+			name := "go:generate:" + file
+			if len(directives) > 1 {
+				name = fmt.Sprintf("go:generate:%s#%d", file, i+1)
+			}
+			h := Hook{
+				Name:     name,
+				Command:  truncateStr(cmd, 400),
+				Caps:     caps,
+				Evidence: appendStr(ev, "go:generate"),
+				Sinks:    findSinks(cmd),
+			}
+			for _, u := range dedupe(urlRe.FindAllString(cmd, -1)) {
+				h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+			}
+			s.Hooks = append(s.Hooks, h)
+		}
+	}
 	return s
 }
 
