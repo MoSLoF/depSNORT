@@ -208,8 +208,12 @@ var (
 		// PHP
 		"exec(", "shell_exec(", "passthru(", "system(",
 		"proc_open(", "popen(",
-		// PowerShell
-		"Start-Process", "Invoke-Expression", "iex ", "& ",
+		// PowerShell. The call operator "&" is NOT a plain substring marker: bare
+		// "& " (ampersand-space) matches shell "&& " and a trailing background "&",
+		// which are ubiquitous in benign hooks (npm install && npm run build), so it
+		// gave every such hook an incidental CapExec. It is detected structurally by
+		// psCallOperatorRe instead (OPU-27 follow-up).
+		"Start-Process", "Invoke-Expression", "iex ",
 		// Windows LOLBins (code execution / app-whitelisting bypass)
 		"mshta", "regsvr32", "cscript", "wscript",
 	}
@@ -282,6 +286,18 @@ var (
 
 	// cmd.exe delayed expansion — enables !var! substitution for evasion.
 	delayedExpansionRe = regexp.MustCompile(`(?i)/v:on\b`)
+
+	// psCallOperatorRe detects the PowerShell CALL operator — a single `&` that
+	// invokes a command by quoted path, scriptblock, or variable (`& "C:\p.exe"`,
+	// `& {…}`, `& $payload`, and the no-space `&"p.exe"`/`&$payload` forms). It
+	// deliberately excludes the shell logical-AND `&&` and a trailing background
+	// `&`: the leading `[^&]` rules out the second `&` of `&&`, and the required
+	// following `['"{$]` rules out `&& cmd` and `cmd & other` (which the old bare
+	// `"& "` substring marker matched, giving `npm install && npm run build` a
+	// spurious CapExec). A bare `& word` is left unmatched: it is ambiguous with
+	// shell backgrounding, and the dangerous PowerShell shapes are quoted/variable
+	// invocations, already covered here, or the iex/Start-Process markers above.
+	psCallOperatorRe = regexp.MustCompile(`(?:^|[^&])&\s*['"{$]`)
 
 	// persistenceMarkers are filesystem locations that AUTO-EXECUTE on boot or
 	// login — shell profiles, cron, systemd/launchd services, the Windows Startup
@@ -482,6 +498,11 @@ func scanCaps(text string) ([]Capability, []string) {
 	// cmd delayed expansion: /v:on enables !var! for evasion
 	if delayedExpansionRe.MatchString(text) {
 		add(CapObfuscation, "cmd-delayed-expansion")
+	}
+	// PowerShell call operator (`& "path"`, `& {block}`, `& $var`): code
+	// execution, distinguished structurally from shell `&&` / background `&`.
+	if m := psCallOperatorRe.FindString(text); m != "" {
+		add(CapExec, "ps-call-operator:"+strings.TrimSpace(m))
 	}
 	// Package RUNNER (npx / pnpm dlx / yarn dlx / bunx): fetch-and-execute a
 	// registry package in one step — network + exec at the consumer's install
