@@ -3708,3 +3708,48 @@ backend swap between a baselined version and its update is the real defense for 
 feasible because the disclosure carries the real backend reference. And periodic review of the
 known-list, which is now the trust boundary (adding an entry is a one-line low-risk change; loosening
 the match is not).
+
+## D-99 — OPU-31: npm load-time (import-time) execution detection (VC-002j)
+
+Closes depSNORT's blind spot to npm malware that runs at MODULE LOAD with no lifecycle script — the
+evasion used by the RedC2 npm loader (disclosed 2026-08-21). The RedC2 packages carry no
+install/postinstall script; their entry file (`dist/index.mjs`) re-exports the promised helpers and, at
+import, marks a bundled native binary executable and spawns it detached. A single import anywhere in the
+graph — even transitive — runs the payload. depSNORT's npm install-surface was seeded ONLY by
+package.json lifecycle scripts (`if len(m.Scripts) == 0 { continue }`), so the entry module was never
+read and a shipped native executable was invisible: a benign structural mimic scanned completely clean
+(0 hooks / 0 findings).
+
+**Extraction half** — `AnalyzeLoadTime(entryRel, entrySource, read)` in `internal/installsurface`. It
+strips comments (D-25), scans the entry via the existing `scanCaps`, and — ONLY when the entry reaches an
+exec capability — emits a `module-load:<entry>` hook with `load-time-execution` evidence. Sibling files
+the entry references (quoted relative paths) are resolved relative to the entry's dir and read; any
+carrying native-executable magic bytes is flagged `bundled-native-executable:<kind>`.
+`nativeExecutableKind` is stdlib-only (D-10), reads leading magic bytes only — ELF (`\x7fELF`), PE
+(`MZ`), Mach-O (thin + fat, both endiannesses; the `0xcafebabe` fat form also matches a Java class, itself
+noteworthy in an npm entry so reported as mach-o). Nothing is executed (D-04) — magic-byte + string
+inspection only. Sibling reads are capped at 16 per entry and go through the same containment/symlink-safe
+reader as lifecycle scripts.
+
+The npm adapter now reads `main`/`module`, DROPS the empty-scripts gate (so a script-less package is still
+analyzed), and runs `AnalyzeLoadTime` on each entry candidate (`main`, `module`, `index.{js,mjs,cjs}`). An
+absent entry file is read quietly (not a gap); only a referenced sibling that is REFUSED becomes a gap.
+
+**Judgment half** — `HookLoadTimeNativeExec` (VC-002j), high / gate-eligible, escalates the precise
+composition `load-time-execution` + `bundled-native-executable`. Load-time + NETWORK was already covered
+by the cap-based checks (HookNetwork et al.), so VC-002j deliberately targets only the OFFLINE
+load-time + bundled-native-binary fingerprint, avoiding double-reporting. A legitimate prebuilt-binary
+package (esbuild, sharp) resolves its binary via `require.resolve` of a separate platform package and
+invokes it lazily, so it does not spawn a raw ELF at module-load and VC-002j does not fire (verified
+against the existing esbuild regression fixture).
+
+FP posture / honest limits: `scanCaps` sees exec anywhere in the entry (no JS parser under D-10), so a
+package that merely DEFINES but does not call an exec function still emits a load-time hook FACT — but it
+stays non-escalating, since VC-002j requires the bundled-binary composition. `exports`-as-object is not
+resolved this pass (the RedC2 case uses `main`). Gate-eligible, not block — a rare legitimate
+load-time-binary case is flagged for human confirmation, not hard-blocked.
+
+Proof: analyzer tests (entry-exec fires; pure-data entry silent; bundled ELF sibling surfaced with
+CapExec; `nativeExecutableKind` across elf/pe/mach-o/js/short) and check tests (VC-002j fires on the
+composition, silent without the bundled binary, silent on a plain lifecycle exec hook). The registry
+drift guard requires VC-002j's registration. Full suite green (33/0), go vet silent, gofmt clean.

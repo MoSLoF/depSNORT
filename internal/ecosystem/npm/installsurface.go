@@ -16,6 +16,42 @@ import (
 // pkgManifest is the subset of a package's own package.json we read.
 type pkgManifest struct {
 	Scripts map[string]string `json:"scripts"`
+	// Main/Module are the entry modules a require()/import loads. They are read
+	// for load-time execution analysis (OPU-31): a package with no lifecycle
+	// script can still run a payload the instant it is imported.
+	Main   string `json:"main"`
+	Module string `json:"module"`
+}
+
+// npmEntryCandidates returns the entry modules an import of this package could
+// load, in priority order, deduplicated and normalized to package-relative
+// slash paths. `exports`-as-object is not resolved in this pass (documented
+// limitation); main/module plus the conventional index.* cover the common cases
+// including the RedC2 loader, whose package.json sets "main": "dist/index.mjs".
+func npmEntryCandidates(m pkgManifest) []string {
+	var out []string
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		p = strings.TrimPrefix(filepath.ToSlash(filepath.Clean(filepath.FromSlash(p))), "./")
+		if p == "" || strings.HasPrefix(p, "..") {
+			return
+		}
+		for _, x := range out {
+			if x == p {
+				return
+			}
+		}
+		out = append(out, p)
+	}
+	add(m.Main)
+	add(m.Module)
+	add("index.js")
+	add("index.mjs")
+	add("index.cjs")
+	return out
 }
 
 // rootDir resolves the project root from a path that may be a dir or the
@@ -84,9 +120,6 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			gaps.AddReason(n.ID, manifestPath, instsurf.GapParse, err)
 			continue
 		}
-		if len(m.Scripts) == 0 {
-			continue
-		}
 
 		// Reader scoped to this package directory; the contained reader enforces
 		// root containment and symlink safety, this closure keeps it within the
@@ -109,8 +142,25 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			return b, true
 		}
 
-		surface := installsurface.Analyze(m.Scripts, read)
-		addSurfaceToGraph(g, n, surface)
+		// Lifecycle-script install surface (VC-002a..).
+		if len(m.Scripts) > 0 {
+			surface := installsurface.Analyze(m.Scripts, read)
+			addSurfaceToGraph(g, n, surface)
+		}
+
+		// Load-time (import-time) install surface (OPU-31): the entry module runs
+		// on import even with NO lifecycle script — the RedC2 evasion. A missing
+		// entry file (pre-install tree, or a candidate the package does not ship)
+		// is normal and read quietly; only a referenced sibling that is refused
+		// becomes a gap (via the `read` closure passed to AnalyzeLoadTime).
+		for _, cand := range npmEntryCandidates(m) {
+			src, err := reader.ReadFile(filepath.Join(absPkgDir, filepath.FromSlash(cand)))
+			if err != nil {
+				continue
+			}
+			lt := installsurface.AnalyzeLoadTime(cand, string(src), read)
+			addSurfaceToGraph(g, n, lt)
+		}
 	}
 	return gaps.Err()
 }

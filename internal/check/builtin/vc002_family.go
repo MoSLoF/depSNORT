@@ -493,3 +493,54 @@ func dedupeStrings(in []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// ---- VC-002j: load-time execution of a bundled native binary --------------
+
+// HookLoadTimeNativeExec (VC-002j) reports a package whose ENTRY MODULE runs at
+// import (load-time-execution) and references a bundled NATIVE EXECUTABLE
+// (ELF/Mach-O/PE). Unlike a lifecycle hook this fires on ANY import — even a
+// transitive one — with no install script: the exact evasion used by the RedC2
+// npm loader, whose dist/index.mjs marks a shipped binary executable and spawns
+// it detached the instant the module loads. A legitimate prebuilt-binary
+// package (esbuild, sharp) invokes its binary lazily through an API or loads a
+// .node addon; it does not spawn a raw ELF at module-load, so this composition
+// is high / gate-eligible rather than a bare warning.
+type HookLoadTimeNativeExec struct{}
+
+func (HookLoadTimeNativeExec) Meta() check.Meta {
+	return check.Meta{
+		ID: "VC-002j", Axis: finding.AxisKnownCompromise,
+		DefaultSeverity: finding.SevHigh, DefaultGate: finding.GateEligible,
+		Description: "entry module executes a bundled native binary at import time",
+	}
+}
+
+func (HookLoadTimeNativeExec) Run(ctx *check.Context) []finding.Finding {
+	var out []finding.Finding
+	for _, v := range collectHooks(ctx.Graph) {
+		if !hookEvidenceHas(v, "load-time-execution") || !hookEvidenceHas(v, "bundled-native-executable") {
+			continue
+		}
+		out = append(out, finding.Finding{
+			CheckID: "VC-002j", Axis: finding.AxisKnownCompromise,
+			Severity: finding.SevHigh, GateClass: finding.GateEligible,
+			Confidence: 0.7, NodeID: v.Pkg.ID,
+			Title: fmt.Sprintf("%s spawns a bundled native binary at import time", v.Hook.Name),
+			Evidence: fmt.Sprintf("entry module executes on import with no lifecycle hook and references a bundled native executable; markers: %s",
+				strings.Join(dedupeStrings(v.Evidence), ", ")),
+			Remediation: "treat as a load-time trojan loader unless the bundled binary and its import-time launch are both expected; inspect the package's dist/ tree for the native payload",
+		})
+	}
+	return out
+}
+
+// hookEvidenceHas reports whether any of the hook's evidence strings contains
+// the marker substring (evidence entries are comma-joined per source node).
+func hookEvidenceHas(v hookView, marker string) bool {
+	for _, ev := range v.Evidence {
+		if strings.Contains(ev, marker) {
+			return true
+		}
+	}
+	return false
+}
