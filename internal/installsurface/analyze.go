@@ -668,6 +668,123 @@ func dedupeSinks(in []Sink) []Sink {
 	return out
 }
 
+// ---- Load-time (import-time) analysis (OPU-31) ------------------------------
+
+// loadTimeRefRe extracts quoted RELATIVE paths a module references (e.g. the
+// bundled binary a loader spawns): 'new URL("./math-core.bin", import.meta.url)'
+// or join(__dirname, "./internal/calc.dat"). Absolute paths and bare specifiers
+// (npm deps) are intentionally not matched — only files shipped alongside the
+// entry.
+var loadTimeRefRe = regexp.MustCompile(`['"](\.\.?/[^'"\n]+)['"]`)
+
+// AnalyzeLoadTime builds the install surface from a package's ENTRY MODULE — the
+// file a require()/import loads. Analyze() is seeded by package.json lifecycle
+// scripts; a package with NO such script can still run a payload the moment it
+// is imported, even transitively, from its main/entry module. That is exactly
+// how the RedC2 npm loader evades lifecycle-script analysis: dist/index.mjs
+// re-exports the promised helpers and, at module load, marks a bundled binary
+// executable and spawns it detached — no install hook, no exported function
+// (OPU-31). This scans the entry's top level for execution capability and, when
+// present, records a load-time hook; a referenced sibling file carrying native
+// executable magic is surfaced as the bundled-binary payload. Nothing is
+// executed (D-04).
+//
+// entryRel is the entry's package-relative path (for evidence and to resolve
+// sibling references); entrySource is its content; read resolves sibling files
+// relative to the package root.
+func AnalyzeLoadTime(entryRel, entrySource string, read FileReader) Surface {
+	var s Surface
+	clean := stripCodeComments(entrySource)
+	if strings.TrimSpace(clean) == "" {
+		return s
+	}
+	caps, ev := scanCaps(clean)
+	// A pure data/helper entry module is not a load-time execution surface; the
+	// signal is code that reaches an EXEC capability the instant it is imported.
+	if !containsCap(caps, CapExec) {
+		return s
+	}
+	h := Hook{
+		Name:     "module-load:" + entryRel,
+		Command:  "entry module executes at import (no lifecycle hook required): " + entryRel,
+		Caps:     caps,
+		Evidence: appendStr(ev, "load-time-execution"),
+		Sinks:    findSinks(clean),
+	}
+	// Remote code/data fetched at load time.
+	for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
+		h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+	}
+	// Sibling files the entry references, resolved relative to the entry's dir.
+	// A referenced NATIVE EXECUTABLE spawned at import is the payload half of the
+	// loader pattern — the composition (load-time exec + bundled native binary)
+	// is the RedC2 fingerprint.
+	entryDir := ""
+	if i := strings.LastIndexByte(entryRel, '/'); i >= 0 {
+		entryDir = entryRel[:i]
+	}
+	seen := map[string]bool{}
+	for _, m := range loadTimeRefRe.FindAllStringSubmatch(clean, -1) {
+		ref := strings.TrimPrefix(m[1], "./")
+		if ref == "" || seen[ref] || len(seen) >= 16 {
+			continue
+		}
+		seen[ref] = true
+		full := ref
+		if entryDir != "" {
+			full = entryDir + "/" + ref
+		}
+		if read == nil {
+			continue
+		}
+		body, ok := read(full)
+		if !ok {
+			continue
+		}
+		art := Artifact{Ref: ref, Read: true}
+		if kind, native := nativeExecutableKind(body); native {
+			art.Caps = appendUnique(art.Caps, CapExec)
+			art.Evidence = appendStr(art.Evidence, "bundled-native-executable:"+kind)
+			h.Evidence = appendStr(h.Evidence, "bundled-native-executable:"+kind)
+		}
+		h.Artifacts = append(h.Artifacts, art)
+	}
+	h.Sinks = dedupeSinks(h.Sinks)
+	s.Hooks = append(s.Hooks, h)
+	return s
+}
+
+// containsCap reports whether caps includes c.
+func containsCap(caps []Capability, c Capability) bool {
+	for _, x := range caps {
+		if x == c {
+			return true
+		}
+	}
+	return false
+}
+
+// nativeExecutableKind classifies a file's leading magic bytes as a native
+// executable format. Stdlib-only (D-10), reads only the first bytes. The
+// 0xcafebabe case also matches a Java class file; in an npm package spawned at
+// import that is itself noteworthy, so it is reported as mach-o/fat.
+func nativeExecutableKind(b []byte) (string, bool) {
+	if len(b) < 4 {
+		return "", false
+	}
+	if b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F' {
+		return "elf", true
+	}
+	if b[0] == 0x4d && b[1] == 0x5a { // "MZ" — PE/DOS
+		return "pe", true
+	}
+	switch uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3]) {
+	case 0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xbebafeca:
+		return "mach-o", true
+	}
+	return "", false
+}
+
 // ---- Ruby analysis ----------------------------------------------------------
 
 // RubyInstallHookNames are hook names for Ruby gem install-time execution.
