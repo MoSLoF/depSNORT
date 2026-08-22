@@ -44,6 +44,45 @@ func gateColor(g finding.GateClass) rgb {
 	}
 }
 
+// epssLabel renders a finding's exploit-prediction summary as a scannable,
+// colour-coded line — the same peak score the JSON and SARIF outputs carry
+// (Increment 3), given a first-class place in the human report rather than being
+// buried in the evidence prose. The colour tracks magnitude so a reader scanning
+// the page sees the hot ones without reading the numbers: >= 0.5 in the block
+// accent, >= 0.1 in the gate accent, the long tail muted. escalated appends the
+// reason a finding was raised to gate-eligible (its score met the -epss-gate
+// threshold).
+func epssLabel(es *finding.ExploitScore, escalated bool) (string, rgb) {
+	c := colMuted
+	switch {
+	case es.Peak >= 0.5:
+		c = colBlock
+	case es.Peak >= 0.1:
+		c = colGate
+	}
+	s := fmt.Sprintf("Exploit prediction (EPSS): %.3f  -  %.1fth percentile  -  %s",
+		es.Peak, es.Percentile*100, es.CVE)
+	if escalated {
+		s += "  -  escalated to gate-eligible"
+	}
+	return s, c
+}
+
+// evidenceForDisplay strips the "; peak EPSS …" tail VC-008 appends to its
+// evidence when a structured EPSS score is present, so the PDF shows that score
+// once — on its own dedicated line — instead of twice. The invariant is exact:
+// VC-008 sets f.EPSS and appends that suffix in the same branch, so the marker is
+// present whenever f.EPSS is. Other formats keep the full evidence string.
+func evidenceForDisplay(f finding.Finding) string {
+	if f.EPSS == nil {
+		return f.Evidence
+	}
+	if i := strings.Index(f.Evidence, "; peak EPSS "); i >= 0 {
+		return f.Evidence[:i]
+	}
+	return f.Evidence
+}
+
 // gateLabel is the human label for a gate class.
 func gateLabel(g finding.GateClass) string {
 	switch g {
@@ -339,8 +378,16 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 			meta += fmt.Sprintf("  -  score %.3f", score)
 			d.text(meta, fontMono, 8, colMuted, 8, 11)
 
-			if f.Evidence != "" {
-				d.wrapped("Evidence: "+f.Evidence, fontRegular, 8.5, colMuted, 8, 10.5)
+			// Exploit-prediction line, when the finding carries an EPSS score.
+			// Placed right under the scoring line so the "how likely to be
+			// exploited" axis reads alongside "how bad / how sure".
+			if f.EPSS != nil {
+				epssText, epssCol := epssLabel(f.EPSS, f.GateClass == finding.GateEligible)
+				d.text(epssText, fontMono, 8, epssCol, 8, 11)
+			}
+
+			if ev := evidenceForDisplay(f); ev != "" {
+				d.wrapped("Evidence: "+ev, fontRegular, 8.5, colMuted, 8, 10.5)
 			}
 			if f.Remediation != "" {
 				d.wrapped("Remediation: "+f.Remediation, fontRegular, 8.5, colMuted, 8, 10.5)

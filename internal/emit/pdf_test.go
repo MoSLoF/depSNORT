@@ -206,6 +206,72 @@ func TestPDFGateOrdering(t *testing.T) {
 	}
 }
 
+// A finding carrying an exploit-prediction score renders EPSS as a first-class,
+// de-duplicated line — the score appears once, on its own line (not twice, once
+// here and once inside the evidence prose) — and a gate-eligible finding says why
+// it was escalated.
+func TestPDFRendersEPSSLine(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "pkg:npm/hot@1.0.0", Kind: graph.KindPackage, Name: "hot", Version: "1.0.0"})
+	g.MarkRoot("pkg:npm/hot@1.0.0")
+	res := verdict.Evaluate(g, []finding.Finding{{
+		CheckID:    "VC-008",
+		Axis:       finding.AxisVuln,
+		Severity:   finding.SevMedium,
+		GateClass:  finding.GateEligible,
+		Confidence: 1,
+		NodeID:     "pkg:npm/hot@1.0.0",
+		Title:      "1 known vulnerability",
+		Evidence:   "hot@1.0.0 is affected by CVE-2021-44228; peak EPSS 0.944 (CVE-2021-44228, 100th pct); gate-eligible (>= 0.500 exploit-probability threshold)",
+		EPSS:       &finding.ExploitScore{Peak: 0.944, Percentile: 1.0, CVE: "CVE-2021-44228"},
+	}}, verdict.Policy{FailOnEligible: true})
+
+	var b bytes.Buffer
+	if err := (PDF{}).Emit(&b, g, res, RunInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	// Parens are escaped in the PDF content stream (escapePDF), so match the
+	// unparenthesized fragments the stream actually contains.
+	if !strings.Contains(out, "Exploit prediction") || !strings.Contains(out, "0.944") {
+		t.Error("EPSS score must render on its own line")
+	}
+	if !strings.Contains(out, "100.0th percentile") || !strings.Contains(out, "CVE-2021-44228") {
+		t.Error("EPSS line must carry the percentile and peak CVE")
+	}
+	if !strings.Contains(out, "escalated to gate-eligible") {
+		t.Error("a gate-eligible EPSS finding must state why it was escalated")
+	}
+	// De-duplication: the "peak EPSS …" note VC-008 embeds in the evidence must be
+	// stripped from the displayed evidence so the score is not shown twice.
+	if strings.Contains(out, "peak EPSS 0.944") {
+		t.Error("the inline evidence EPSS note must be stripped in the PDF (shown once, on its own line)")
+	}
+	// The base evidence (the affected-by list) must survive the strip.
+	if !strings.Contains(out, "is affected by CVE-2021-44228") {
+		t.Error("stripping the EPSS note must not drop the rest of the evidence")
+	}
+}
+
+// Without an EPSS score the report is unchanged: no EPSS line at all.
+func TestPDFOmitsEPSSLineWhenAbsent(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "pkg:npm/x@1.0.0", Kind: graph.KindPackage, Name: "x", Version: "1.0.0"})
+	g.MarkRoot("pkg:npm/x@1.0.0")
+	res := verdict.Evaluate(g, []finding.Finding{{
+		CheckID: "VC-008", Axis: finding.AxisVuln, Severity: finding.SevMedium,
+		GateClass: finding.GateAdvisory, Confidence: 1, NodeID: "pkg:npm/x@1.0.0",
+		Title: "1 known vulnerability", Evidence: "x@1.0.0 is affected by CVE-2020-1111",
+	}}, verdict.Policy{})
+	var b bytes.Buffer
+	if err := (PDF{}).Emit(&b, g, res, RunInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), "Exploit prediction") {
+		t.Error("no-EPSS finding must not render an EPSS line")
+	}
+}
+
 // datasourceStatsWithGaps builds a Stats value carrying n gaps.
 func datasourceStatsWithGaps(n int) datasource.Stats {
 	return datasource.Stats{Queried: 10, FromNet: 10 - n, Gaps: n}

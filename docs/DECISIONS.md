@@ -4246,3 +4246,31 @@ Proof: VC-008 tests extended for the structured field (present when scored, nil 
 SARIF test asserts the three epss properties. Mutation-proven: `>=`→`>` fails the boundary test, dropping the
 structured field fails the annotation test; restore green. CLI smoke: out-of-range exits 64, `-epss-gate`
 implies `-epss`. Full suite green (34 packages), -race clean, go vet silent, gofmt no diffs.
+
+## D-115 — EPSS enrichment, Increment 4: EPSS in the PDF report
+
+The JSON and SARIF outputs already carried the peak exploit-prediction score as structured data (D-114); the
+PDF only had it buried in the evidence prose. This gives EPSS a first-class place in the human report.
+
+Under each VC-008 finding that carries a score, a dedicated line renders right below the severity/confidence/
+score line — "Exploit prediction (EPSS): 0.944  -  100.0th percentile  -  CVE-2021-44228" — so the
+"how likely to be exploited" axis reads alongside "how bad" and "how sure". The line is colour-coded by
+magnitude so a reader scanning the page sees the hot ones without reading the numbers: peak >= 0.5 in the block
+accent, >= 0.1 in the gate accent, the long tail muted. A finding that -epss-gate escalated to gate-eligible
+also states the reason ("escalated to gate-eligible").
+
+De-duplication: VC-008 embeds a "; peak EPSS …" note in its evidence string (kept, because the JSON/text
+consumers read evidence). Showing that AND the new dedicated line would print the same number twice, so the PDF
+strips the note from the DISPLAYED evidence via a small `evidenceForDisplay` helper. The strip is exact, not
+heuristic: VC-008 sets f.EPSS and appends that suffix in the same branch, so the marker is present precisely
+when f.EPSS is. The underlying finding is untouched — only the PDF's rendering trims it; every other format
+keeps the full string.
+
+Scope: the FINDINGS section only. The PACKAGE RISK table's fixed-width row format has no room for another
+column and the node does not carry EPSS directly (it lives on the finding), so a per-package peak-EPSS column is
+left as a possible later increment.
+
+Proof: two PDF tests — a scored gate-eligible finding renders the EPSS line (score, percentile, CVE) with the
+escalation reason and strips the redundant inline note while preserving the base evidence; a no-EPSS finding
+renders no EPSS line. Mutation-proven: breaking the label and disabling the strip each fail the render test;
+restore green. Full suite green (34 packages), -race clean, go vet silent, gofmt no diffs.
