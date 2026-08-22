@@ -3967,3 +3967,28 @@ remaining gate-eligible is maturin's setup.py network VC-002b, a plausible real 
 
 Noted, NOT bundled (follow-up): `stripCodeComments` strips only C-family comments, so Python `#` prose can
 still match other substring markers — worth a separate pass so scanner markers can't match Python comments.
+
+## D-106 — npm-registry packument scripts: tolerant parse (Kibana live-fire)
+
+A Kibana live-fire exposed a robustness bug in the npm-registry datasource. The packument client typed
+`packumentVersion.Scripts` as `map[string]string`, but npm packuments preserve historical junk: joi 0.1.x
+(10 versions) stored the `blanket` and `travis-cov` CONFIG OBJECTS under `"scripts"` (a 2013-era habit).
+One object-valued entry aborts the ENTIRE packument unmarshal —
+`json: cannot unmarshal object into ... scripts of type string` — so every version of joi loses
+npm-registry coverage (existence, per-version publisher/actor, lineage), degrading the whole npm-registry
+axis for that package (the joi-rooted project fell back to expand-only).
+
+Fix: a tolerant `scriptMap` type (underlying type `map[string]string`, so `installHooksOf(v.Scripts)` is
+unchanged and assignable) with a custom `UnmarshalJSON` that decodes to `map[string]json.RawMessage`, keeps
+the string-valued entries (the real script bodies), and drops non-string config objects. One malformed
+field can no longer nuke registry coverage for an entire package. Well-formed packuments parse identically.
+
+Proof: `TestPackumentTolerantScripts` (joi-shaped packument — object-valued `blanket`/`travis-cov` dropped,
+the `postinstall` string body kept, a later clean version still parses, `installHooksOf` intact over the
+survivors). Mutation-proven: reverting to `map[string]string` fails with the exact live-fire unmarshal
+error. Full suite green (33/0), -race clean, vet/fmt clean.
+
+Note (not part of this fix): the Kibana run's 3 BLOCK verdicts were accurate — known-malicious OSV MAL-*
+matches on `kbn-check-prod-native-modules-cli` TEST FIXTURES whose placeholder names (package-x,
+native-module2) now collide with real squatted npm packages: a genuine dependency-confusion exposure in
+test infra, correctly flagged and separate from this parser fix.
