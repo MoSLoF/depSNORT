@@ -90,13 +90,13 @@ Seven ecosystems share the same graph, check, verdict, and output model:
 
 | Ecosystem | Lockfile(s) / manifest | PURL type | Install-time surface |
 |-----------|-------------|-----------|----------------------|
-| **npm** | `package-lock.json` (v1–v3), `yarn.lock` (v1 + Berry), or `package.json` | `pkg:npm/` | `preinstall`/`postinstall` and related lifecycle scripts |
-| **PyPI** | `requirements*.txt` (incl. dev/test siblings), `Pipfile.lock`, `pyproject.toml`, `setup.py` | `pkg:pypi/` | `setup.py`, PEP 517 build backends, `.pth` files |
+| **npm** | `package-lock.json` (v1–v3), `yarn.lock` (v1 + Berry), `pnpm-lock.yaml`, `bun.lock`, or `package.json` | `pkg:npm/` | `preinstall`/`postinstall`, related lifecycle scripts, and load-time (import-time) execution |
+| **PyPI** | `requirements*.txt` (incl. dev/test siblings), `uv.lock`, `poetry.lock`, `pdm.lock`, `pylock.toml` (PEP 751), `Pipfile`/`Pipfile.lock`, `pyproject.toml`, `setup.py` | `pkg:pypi/` | `setup.py`, PEP 517 build backends, `.pth` files |
 | **RubyGems** | `Gemfile.lock`, or `Gemfile` | `pkg:gem/` | `extconf.rb` / native-extension install paths |
 | **Cargo** | `Cargo.lock` | `pkg:cargo/` | `build.rs` and compile-time code paths |
 | **Composer** | `composer.lock`, or `composer.json` | `pkg:composer/` | scripts, plugin packages, plugin entrypoints |
-| **NuGet** | `packages.lock.json`, `packages.config`, or `paket.lock` | `pkg:nuget/` | install/init scripts and package build assets |
-| **Go** | `go.mod` | `pkg:golang/` | not yet extracted — Go has resolution, expansion, OSV advisories, and the temporal axis, but no install-surface analysis yet |
+| **NuGet** | `packages.lock.json`, `packages.config`, `paket.lock`, or the modern declared surface — `PackageReference` (`.csproj`/`.vbproj`/`.fsproj`/`.vcxproj`), Central Package Management (`Directory.Packages.props`), `Directory.Build.props`, `.nuspec`, `.config/dotnet-tools.json`, `project.json`, `paket.dependencies` — with `project.assets.json` preferred when a restore is present (the one modern format with a real resolved tree) | `pkg:nuget/` | install/init scripts, package build assets, and local-tool manifests |
+| **Go** | `go.mod` | `pkg:golang/` | `go:generate` directives, cgo `#cgo` build-flag injection, build-tag-gated `init()` evasion, the `go run module@version` package runner, and per-dependency vendor/module-cache attribution |
 
 A lockfile gives a fully-resolved tree; a bare manifest (an unpinned
 `requirements.txt`, a `pyproject.toml`, a lockless `package.json`, `go.mod`)
@@ -107,10 +107,13 @@ The built-in pack currently covers:
 
 - **VC-001** — known malicious releases: OSV malicious-package advisories;
 - **VC-002 family** — install-surface behavior: network egress, named credential
-  access, decode/execute indirection, credential-exfiltration shapes, and
-  download/execute cradles;
+  access, decode/execute indirection, credential-exfiltration shapes,
+  download/execute cradles, persistence (startup-folder / LaunchAgents /
+  LaunchDaemons / cron-shaped hooks), cgo `#cgo` build-flag injection,
+  build-tag-gated `init()` evasion, and load-time (import-time) execution;
 - **VC-003** — operator IOC ledger: explicit package/version indicators supplied
-  by the operator;
+  by the operator (an [example Miasma/Hades feed](docs/ioc-miasma-hades.json)
+  ships in the repo — see [Threat-intelligence tiers](#threat-intelligence-tiers));
 - **VC-004** — dormancy: a recent release cluster following prolonged inactivity;
 - **VC-005** — anomalous release burst: release density measured against the
   package's own historical cadence;
@@ -118,13 +121,17 @@ The built-in pack currently covers:
 - **VC-007** — dependency confusion: internal names/scopes resolving from a
   public registry;
 - **VC-008** — disclosed CVEs: vulnerability context that remains advisory by
-  design;
+  design, optionally enriched with FIRST.org EPSS exploit-probability scores
+  (`-epss`) and ranked/gated by them (`-epss-gate`);
 - **VC-009** — unverifiable dependency source: a package resolved from a git URL,
   a local path, or a direct artifact URL, which no advisory feed indexes;
 - **VC-010** — capability drift: install-time capability gained relative to a
   known-good baseline, weighted by what the version number claimed;
 - **VC-011** — publisher lineage: a version published by an account with no
-  prior release of that package.
+  prior release of that package;
+- **VC-012** — yank-lure: a version pinned to a since-yanked/retracted release,
+  live-newest enrichment introducing a new dependency or build-time payload
+  shaped like a lure.
 
 `./depsnort checks` prints the live registry — it is generated from the same
 single registration point the adversarial corpus builds from (D-37), so the list
@@ -219,7 +226,16 @@ The VC-002 family scores *where an install path reaches*:
 - **VC-002e** — decode-and-execute indirection → gate-eligible;
 - **VC-002d** — named credentials **plus** network egress → **block**;
 - **VC-002f** — download-and-execute cradle (`curl … | sh`,
-  `iex (…).DownloadString`, `certutil -urlcache`, and kin) → **block**.
+  `iex (…).DownloadString`, `certutil -urlcache`, and kin) → **block**;
+- **VC-002g** — persistence: a startup-folder drop, a LaunchAgent/LaunchDaemon
+  plist, or a cron-shaped hook installed at install time → gate-eligible;
+- **VC-002h** — Go: a `#cgo` directive that injects build flags (`LDFLAGS`,
+  `CFLAGS`) reachable from a build/generate hook → gate-eligible;
+- **VC-002i** — Go: an `init()` gated behind a non-default build tag, proven
+  reachable via `go/ast` closure over the package's own build directives →
+  gate-eligible;
+- **VC-002j** — npm: an entry module that spawns a bundled native binary at
+  import time, with no lifecycle hook involved → gate-eligible.
 
 When a cradle is present, VC-002b defers to VC-002f so the reach is reported
 once, at the higher gate class, rather than twice.
@@ -433,6 +449,20 @@ The OSV client honors `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`, so a sandboxed
 or corporate runner can reach `api.osv.dev` through an egress proxy with no
 depSNORT-specific configuration.
 
+**Exploit-probability ranking (opt-in).** `-epss` enriches every VC-008 finding
+with its peak [FIRST.org EPSS](https://www.first.org/epss/) score — the
+probability a CVE is exploited in the wild in the next 30 days — turning a flat
+"96 vulnerable packages" list into a ranked one. Advisory IDs that OSV's
+querybatch path returns with no CVE alias (a GHSA- or GO- primary advisory) are
+resolved through a cached, deduplicated `osv.CVEAliases` call so EPSS — which is
+CVE-keyed — can still score them. `-epss-gate <threshold>` escalates a finding
+whose peak score is at or above the threshold from advisory to gate-eligible, so
+`-fail-on-eligible` can fail a build on only the handful of vulnerabilities
+actually being exploited, while ordinary CVE noise stays advisory. Both flags
+need live network and are skipped `-offline` (EPSS has no bundled fallback).
+The score appears in JSON, SARIF, and the PDF (a dedicated per-finding line and
+a per-package peak column in the risk table).
+
 ## Coverage is part of the verdict
 
 A scanner must not confuse *nothing found* with *nothing inspected*.
@@ -449,12 +479,14 @@ A scanner must not confuse *nothing found* with *nothing inspected*.
 Unpinned specifiers, datasource failures, unreadable subtrees, offline cache
 misses, failed workspace projects, partial install-surface extraction, and
 non-registry package sources are all disclosed. So is a **recognized manifest no
-adapter can resolve** — a bare `.csproj` with no `packages.lock.json`, a
-`pom.xml`, a `Pipfile`, a `.gemspec`/`.podspec`/`.vcxproj`/`.cabal`/`.sbt`, a
+adapter can resolve** — a `pom.xml`, a `.gemspec`/`.podspec`/`.cabal`/`.sbt`, a
 `gradle.lockfile`, a `mix.exs`, a `.terraform.lock.hcl` — which degrades coverage
 ("manifest present, dependencies unread") rather than reading as "nothing to
-scan". As a last-ditch net, any other unrecognized `*.lock` file is disclosed as
-an unknown-ecosystem gap rather than skipped in silence. A partial run is never
+scan". (A bare `.csproj`/`.vcxproj` with no lockfile and a `Pipfile` with no
+`Pipfile.lock` are *not* in this category any more — both are now read
+declared-only, flat, and disclosed as such — see the ecosystem table above.) As
+a last-ditch net, any other unrecognized `*.lock` file is disclosed as an
+unknown-ecosystem gap rather than skipped in silence. A partial run is never
 silently promoted to clean. Precedence is:
 
 ```
@@ -464,6 +496,67 @@ block > gate-eligible > incomplete > advisory
 **Advisory findings never change the exit code**, regardless of policy — a
 structural guarantee enforced in `internal/verdict` (D-06), not a configurable
 default.
+
+**Adjudication, never exemption.** A finding on a test fixture or a demo
+project is real noise in a self-scan, but the fix is never an allowlist — every
+exemption is a place a real attack can hide. Instead, `-real-roots
+<substring,…>` names the root(s) you actually build/ship; every finding is
+stamped with the complete set of scan roots that reach it (`reachable_from_roots`
+in JSON, over *any* edge type, not just `depends-on`), and one that no
+designated root reaches is labeled `contained` with that reachability list as
+its proof. The label changes nothing else — same severity, same gate class,
+same exit code; a contained block still blocks. It is proof attached to an
+otherwise untouched finding, not a suppression. See
+[`tools/ihbv-repoguard.py`](tools/ihbv-repoguard.py)`--verify` for the
+complementary tamper-adjudication mechanism, below.
+
+## Repo-open execution surface (RepoGuard)
+
+depSNORT answers "what happens when I *install* these dependencies?" Some
+campaigns (Miasma/Hades, `Azure/durabletask`, 2026-06-05) skip installation
+entirely and execute the moment a repo is *opened* in an editor or AI coding
+agent — via checked-in configuration: a VS Code task set to
+`"runOn": "folderOpen"`, a devcontainer `initializeCommand` (which runs on the
+**host**, before the container exists), or `.claude`/`.cursor`/`.gemini` agent
+hooks. No package is installed, so no dependency scanner — depSNORT included —
+sees it. That surface is out of scope for the Go binary by construction, so a
+companion ships instead:
+
+```
+python3 tools/ihbv-repoguard.py /path/to/freshly-cloned-repo
+```
+
+Read-only, stdlib-only Python; it never executes, installs, or imports
+anything from the target, and discloses what it cannot read rather than
+implying clean (the same D-04/D-24 discipline as the Go scanner). It flags
+on-open surfaces (`.vscode/tasks.json`, devcontainer lifecycle commands, agent
+hook files, `.envrc`, checked-in git hooks) and grades them by whether they
+also reach the network or obfuscate their payload, plus a small table of
+campaign-specific IOCs (Miasma/Hades, Shai-Hulud lineage markers).
+
+`--verify authentic.sha256` takes a sha256sum-format manifest of known-good
+files (`tools/ihbv-authentic.sha256` ships this repo's own). A hash match
+adjudicates that file's findings **false** — printed with their evidence,
+labeled with the proof, no longer counting toward the exit code. A hash
+**mismatch** becomes a new CRITICAL `TAMPERED` finding: a file wearing a
+known-authentic name with different content is precisely the planted-lookalike
+threat, made the loudest thing in the report instead of an allowlisted blind
+spot. Run *your* trusted copy of the script with *your* out-of-band manifest
+against the quarantine clone — a manifest checked into the repo it verifies can
+be tampered alongside the files it lists.
+
+A ready-to-use IOC feed for the Miasma/Hades campaign ships at
+[`docs/ioc-miasma-hades.json`](docs/ioc-miasma-hades.json) for the `-ioc` flag
+above (VC-003).
+
+Recommended workflow for an untrusted clone:
+
+```
+git clone <repo> /quarantine/path
+python3 tools/ihbv-repoguard.py /quarantine/path --verify tools/ihbv-authentic.sha256
+./depsnort scan -ioc docs/ioc-miasma-hades.json -real-roots <your-real-root> /quarantine/path
+# only if both are acceptable: open in an editor or agent
+```
 
 ## Quick start
 
@@ -625,20 +718,24 @@ scripts/github-actions.example.yml # workflow example, actions pinned by digest
 
 ```
 cmd/depsnort/                 CLI + exit-code contract
-internal/finding/             severity / axis / gate class / risk state
+internal/finding/             severity / axis / gate class / risk state / reachable-root proof
 internal/purl/                canonical package-url identity
 internal/graph/               declared + install-time graph model, coverage, provenance
 internal/ecosystem/           ecosystem adapters (incl. gomod) + conformance suite
 internal/expand/              Nth-layer transitive walk + version-truth engine
-internal/datasource/          OSV, registry metadata, deps.dev, go-proxy, IOC, cache
-internal/pep440/ nugetver/    ecosystem-specific version models (ranges + ordering)
+internal/datasource/          OSV, EPSS, registry metadata, deps.dev, go-proxy, IOC, cache
+internal/pep440/ pep508/ nugetver/ semver/   version/range models per ecosystem
 internal/installsurface/      static install-time analysis
+internal/securefs/            path-containment primitive (fuzzed)
 internal/profile/             capability profiles and the deterministic drift engine
 internal/baseline/            known-good baseline file format
 internal/check/               vector-check contract + registry
 internal/check/builtin/       built-in VC rules
-internal/verdict/             findings -> node state + process exit
+internal/verdict/             findings -> node state + process exit + containment adjudication
 internal/emit/                JSON / SARIF / DOT / Cypher / PDF
+internal/versiondrift/        README/pyproject version-literal consistency guard
+internal/ciactions/           workflow-action SHA-pin guard
+tools/                        ihbv-repoguard.py (repo-open surface triage) + org/priority scan drivers
 ```
 
 ## Market position
@@ -686,7 +783,30 @@ differentiation is the intersection of:
 - ✅ transitive expansion past the manifest across all seven ecosystems, with a
   graded version-truth axis (observed / asserted / presumed / contested) that
   never lets a presumed version gate;
-- ✅ an optional deps.dev asserted tier and a cross-ecosystem conformance suite.
+- ✅ an optional deps.dev asserted tier and a cross-ecosystem conformance suite;
+- ✅ `yarn.lock` (Yarn v1 classic and v2+ Berry) — resolved via the sibling
+  `package.json` — plus `pnpm-lock.yaml` and `bun.lock`;
+- ✅ the PyPI lockfile family: `uv.lock` (incl. rootless), `poetry.lock`,
+  `pdm.lock`, `pylock.toml` (PEP 751), and `Pipfile`/`Pipfile.lock`;
+- ✅ the modern .NET dependency surface: `PackageReference` (incl. Central
+  Package Management and `Directory.Build.props`), `.nuspec`,
+  `dotnet-tools.json`, `project.json`, `paket.dependencies`, and
+  `project.assets.json`'s real resolved tree;
+- ✅ install-surface persistence (VC-002g), Go cgo build-flag injection
+  (VC-002h) and build-tag-gated init evasion (VC-002i, proven via `go/ast`
+  reachability), npm load-time native execution (VC-002j);
+- ✅ yank-lure detection (VC-012): a version pinned to a since-yanked/retracted
+  release with a live-newest enrichment shaped like a lure, across
+  Cargo/PyPI/Go;
+- ✅ a post-expansion advisory pass so packages discovered by transitive
+  expansion — and directs whose versions were only known after expansion — are
+  OSV-checked too, closing a false-clean gap;
+- ✅ opt-in FIRST.org EPSS exploit-probability enrichment (`-epss`), CVE-alias
+  resolution for GHSA-/GO-primary advisories, and `-epss-gate` threshold
+  escalation;
+- ✅ adjudication mechanisms so a finding is proven true or false rather than
+  exempted: `-real-roots` containment (complete root-reachability attribution)
+  and the companion RepoGuard `--verify` tamper check.
 
 **Current hardening:**
 
@@ -703,10 +823,8 @@ differentiation is the intersection of:
   -level drift for other ecosystems needs artifact retrieval);
 - ⬜ PR-native dependency delta: summarize only newly introduced dependencies,
   versions, capabilities, and gate changes in pull requests;
-- ✅ `yarn.lock` (Yarn v1 classic and v2+ Berry) — resolved via the sibling `package.json`
-- ⬜ Maven/Gradle adapters; pnpm, Poetry, and uv lockfile dialects
-  (Go modules are implemented; these lockfiles currently fall back to a sibling
-  manifest where one exists);
+- ⬜ Maven/Gradle adapters (JVM ecosystems have no adapter at all yet — `pom.xml`
+  and `gradle.lockfile` are disclosed as recognized-but-unresolved, not parsed);
 - ⬜ policy-as-code for thresholds, allowlists, and approved publishers, over
   fixed safety invariants;
 - ⬜ enforcement integrations: feed verdicts into artifact-manager, admission, or
