@@ -69,13 +69,13 @@ func TestOPU19InstallSurfaceProbeTable(t *testing.T) {
 // VC-002g reads. If a marker moved to the wrong list, VC-002g would either miss a
 // real persistence write or false-positive on site-packages.
 func TestOPU19PersistenceMarkerSplit(t *testing.T) {
-	persistence := []string{"crontab", "systemd", "systemctl", "launchctl", "launchd", "startup", ".bashrc", ".zshrc", ".profile", "/etc/", "$PROFILE"}
+	persistence := []string{"crontab", "systemd", "systemctl", "launchctl", "launchd", "startup-folder", ".bashrc", ".zshrc", ".profile", "/etc/", "$PROFILE"}
 	for _, m := range persistence {
 		if !IsPersistenceMarker(m) {
 			t.Errorf("%q should be a persistence marker", m)
 		}
 	}
-	benign := []string{"site-packages", ".pth", "Gem.dir", "os.homedir()", "sysconfig.", "AppData\\Roaming"}
+	benign := []string{"site-packages", ".pth", "Gem.dir", "os.homedir()", "sysconfig.", "AppData\\Roaming", "startup", "process_startup"}
 	for _, m := range benign {
 		if IsPersistenceMarker(m) {
 			t.Errorf("%q must NOT be a persistence marker (ordinary install write)", m)

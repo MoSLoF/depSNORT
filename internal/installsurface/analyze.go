@@ -311,7 +311,12 @@ var (
 	// by the check via IsPersistenceMarker, not in a new capability.
 	persistenceMarkers = []string{
 		".bashrc", ".bash_profile", ".zshrc", ".profile", "/etc/",
-		"crontab", "systemd", "systemctl", "launchctl", "launchd", "startup",
+		"crontab", "systemd", "systemctl", "launchctl", "launchd",
+		// The Windows Startup FOLDER (matched precisely by startupFolderRe below,
+		// emitted as the "startup-folder" marker). A bare "startup" substring was
+		// removed: it matched benign identifiers and prose — coverage.py's
+		// `process_startup()` .pth and a "on startup" comment in setuptools'
+		// setup.py both tripped VC-002g HIGH in the OpenShell live-fire.
 		// PowerShell / .NET
 		"$PROFILE", "Microsoft.PowerShell",
 		// VCS-event auto-execution (OPU-27): an install hook that redirects the
@@ -442,6 +447,11 @@ func isBenignRunnerTarget(name string) bool {
 // install write. VC-002g uses it to gate on cron/service/profile/startup writes
 // only, excluding benign site-packages/.pth/gem writes (OPU-19).
 func IsPersistenceMarker(marker string) bool {
+	// startup-folder is emitted by startupFolderRe (a precise Windows Startup
+	// folder / shell:startup match), replacing the old bare "startup" substring.
+	if strings.EqualFold(marker, "startup-folder") {
+		return true
+	}
 	for _, m := range persistenceMarkers {
 		if strings.EqualFold(marker, m) {
 			return true
@@ -494,6 +504,12 @@ func scanCaps(text string) ([]Capability, []string) {
 	// read by VC-002g, so the capability output is unchanged (OPU-19).
 	scan(persistenceMarkers, CapFilesystem)
 	scan(installWriteMarkers, CapFilesystem)
+	// The Windows Startup FOLDER, matched precisely (shell:startup, or a
+	// ...\Programs\Startup path) rather than the bare word "startup", which
+	// over-matched benign identifiers/prose (process_startup, "on startup").
+	if startupFolderRe.MatchString(text) {
+		add(CapFilesystem, "startup-folder")
+	}
 
 	// A URL anywhere is a network reach even without a named client.
 	if urlRe.MatchString(text) {
@@ -676,6 +692,13 @@ func dedupeSinks(in []Sink) []Sink {
 // (npm deps) are intentionally not matched — only files shipped alongside the
 // entry.
 var loadTimeRefRe = regexp.MustCompile(`['"](\.\.?/[^'"\n]+)['"]`)
+
+// startupFolderRe matches the Windows Startup FOLDER precisely — a
+// `shell:startup` (or `shell:common startup`) reference, or a
+// ...\Programs\Startup path — so VC-002g persistence gates on a real autostart
+// location rather than the bare word "startup" (which matched process_startup,
+// "on startup", startup-time, etc.).
+var startupFolderRe = regexp.MustCompile(`(?i)shell:(?:common )?startup|programs[\\/]+startup`)
 
 // jsLoadTimeExecRe matches a GENUINE JavaScript/TypeScript execution capability
 // reachable at import: a process-spawning module, or dynamic code evaluation. It
