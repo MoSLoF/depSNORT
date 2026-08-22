@@ -122,3 +122,76 @@ func section(g *graph.Graph, id string) string {
 	}
 	return ""
 }
+
+// A rootless uv.lock: an application-style lock (or `uv pip compile` export)
+// with NO editable/virtual self-entry — just resolved registry packages with
+// inter-package edges. This must synthesize a root and attach the in-degree-zero
+// packages (the poetry/pdm/pylock shape), not error out. Regression for the
+// open-webui live-fire, whose uv.lock is exactly this.
+const sampleUvLockRootless = `version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "aiohttp"
+version = "3.13.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohappyeyeballs" },
+    { name = "multidict" },
+]
+
+[[package]]
+name = "aiohappyeyeballs"
+version = "2.6.1"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "multidict"
+version = "6.1.0"
+source = { registry = "https://pypi.org/simple" }
+`
+
+func TestParseUvLockRootless(t *testing.T) {
+	g, err := parseUvLock("app/uv.lock", []byte(sampleUvLockRootless))
+	if err != nil {
+		t.Fatalf("rootless uv.lock must resolve, got error: %v", err)
+	}
+	if len(g.Roots) != 1 {
+		t.Fatalf("roots = %v, want one synthesized root", g.Roots)
+	}
+	rootID := g.Roots[0]
+	if a := g.Get(rootID).Attr["pypi.direct_attribution"]; a != "in-degree-zero" {
+		t.Errorf("synthesized root direct_attribution = %q, want in-degree-zero", a)
+	}
+	// The synthesized root is NOT one of the package nodes.
+	for _, id := range []string{
+		"pkg:pypi/aiohttp@3.13.5", "pkg:pypi/aiohappyeyeballs@2.6.1", "pkg:pypi/multidict@6.1.0",
+	} {
+		if g.Get(id) == nil {
+			t.Errorf("missing node %s", id)
+		}
+	}
+	// aiohttp is in-degree zero -> a direct root edge.
+	if !hasEdge(g, rootID, "pkg:pypi/aiohttp@3.13.5", graph.EdgeDependsOn) {
+		t.Error("aiohttp (in-degree zero) should be a direct root edge")
+	}
+	if !g.Get("pkg:pypi/aiohttp@3.13.5").Direct {
+		t.Error("aiohttp should be marked Direct")
+	}
+	// Its deps are real transitive edges, not flat.
+	if !hasEdge(g, "pkg:pypi/aiohttp@3.13.5", "pkg:pypi/aiohappyeyeballs@2.6.1", graph.EdgeDependsOn) ||
+		!hasEdge(g, "pkg:pypi/aiohttp@3.13.5", "pkg:pypi/multidict@6.1.0", graph.EdgeDependsOn) {
+		t.Error("missing aiohttp -> {aiohappyeyeballs, multidict} edges")
+	}
+	if hasEdge(g, rootID, "pkg:pypi/aiohappyeyeballs@2.6.1", graph.EdgeDependsOn) {
+		t.Error("aiohappyeyeballs is transitive; must not be a direct root edge")
+	}
+	if d := g.Get("pkg:pypi/aiohappyeyeballs@2.6.1").Depth; d < 2 {
+		t.Errorf("aiohappyeyeballs depth = %d, want >= 2 (real tree, not flat)", d)
+	}
+	// Real edges -> no flat-resolution penalty.
+	if v := g.Get(rootID).Attr[graph.AttrFlatResolution]; v != "" {
+		t.Errorf("rootless uv.lock has real edges; must not carry flat-resolution, got %q", v)
+	}
+}

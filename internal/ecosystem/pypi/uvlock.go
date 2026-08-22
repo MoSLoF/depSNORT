@@ -90,8 +90,16 @@ func parseUvLock(path string, raw []byte) (*graph.Graph, error) {
 	}
 
 	root := selectUvRoot(g, pkgs, idOf)
+	synthesizedRoot := false
 	if root == nil {
-		return nil, fmt.Errorf("pypi: %s declares no editable or virtual root project", uvLockName)
+		// A uv.lock need not contain the project itself: an application-style
+		// lock (or a `uv pip compile`-style export) is a pure list of resolved
+		// dependencies with no editable/virtual self-entry — open-webui's lock is
+		// exactly this. That is not an error; it is the poetry.lock / pdm.lock /
+		// pylock.toml shape, so synthesize a root and attach the in-degree-zero
+		// packages once inter-package edges are built below.
+		root = rootNode(g, path)
+		synthesizedRoot = true
 	}
 	g.MarkRoot(root.ID)
 
@@ -171,6 +179,50 @@ func parseUvLock(path string, raw []byte) (*graph.Graph, error) {
 	}
 	if len(rootUnresolved) > 0 {
 		markUnresolved(root, rootUnresolved)
+	}
+
+	if synthesizedRoot {
+		// No editable/virtual entry: the effective direct set is the in-degree-zero
+		// packages (nothing else in the lock depends on them), attached to the
+		// synthesized root — the poetry/pdm/pylock heuristic. The lock still
+		// carries real inter-package edges, so depths stay real (no flat penalty).
+		indeg := map[string]int{}
+		for _, e := range g.Edges {
+			if e.Type == graph.EdgeDependsOn {
+				indeg[e.To]++
+			}
+		}
+		var attached int
+		for i := range pkgs {
+			p := &pkgs[i]
+			if p.version == "" {
+				continue
+			}
+			id := idOf(p)
+			if indeg[id] > 0 {
+				continue // reached transitively
+			}
+			g.AddEdge(root.ID, id, graph.EdgeDependsOn)
+			attached++
+			if n := g.Get(id); n != nil {
+				n.Direct = true
+			}
+		}
+		if attached == 0 { // pure cycle: never leave the tree empty
+			for i := range pkgs {
+				if pkgs[i].version == "" {
+					continue
+				}
+				g.AddEdge(root.ID, idOf(&pkgs[i]), graph.EdgeDependsOn)
+				if n := g.Get(idOf(&pkgs[i])); n != nil {
+					n.Direct = true
+				}
+			}
+		}
+		if root.Attr == nil {
+			root.Attr = map[string]string{}
+		}
+		root.Attr["pypi.direct_attribution"] = "in-degree-zero"
 	}
 
 	if format != 0 && format != uvLockFormatSupported {
