@@ -4325,3 +4325,43 @@ only when partial); a PDF test that a source Note renders in the coverage sectio
 data_sources[].note and .stats reach the report. Mutation-proven: not rendering the Note fails the PDF test,
 renaming a summary label fails the formatter test; restore green. Full suite green (34 packages), -race clean,
 go vet silent, gofmt no diffs.
+
+## D-118 — NuGet: the modern .NET dependency surface (PackageReference et al.)
+
+Before this, the NuGet adapter read only packages.lock.json, paket.lock, and packages.config. Every project
+using PackageReference — the SDK-style default since VS2017 / .NET Core, and the majority of .NET repositories
+today — resolved to ZERO packages and was disclosed as a recognized-but-unresolved manifest. A live-fire scan
+of Polly (59 PackageVersion entries at the repo root) surfaced exactly this blind spot.
+
+A new msbuild.go reads the full modern declared surface, all FLAT (declared, not locked — D-24):
+PackageReference in .csproj/.vbproj/.fsproj/.vcxproj/.proj (Version as attribute or child element); Central
+Package Management (Directory.Packages.props PackageVersion + GlobalPackageReference); Directory.Build.props /
+.targets; .nuspec dependencies (incl. grouped); .config/dotnet-tools.json (local tools that execute);
+project.json (pre-VS2017 .NET Core); and paket.dependencies when no paket.lock is present. Static only (D-04):
+nothing restores or executes.
+
+Two correctness points drove the design:
+
+- Central Package Management and Directory.Build.props are discovered by MSBuild by walking UP the tree, so a
+  repo-root version table governs projects nested in src/*. The reader walks ancestor directories
+  outermost-first (stopping at the .git root, never reading outside the scanned tree) so the NEAREST definition
+  wins — reading only the project's own directory is what left Polly's versionless PackageReferences
+  unresolvable.
+
+- Versions that cannot be pinned statically — floating (1.2.*), open ranges ([1.0,2.0)), unexpanded
+  $(Property) — are DISCLOSED as unresolved with a reason, never guessed and never dropped (D-59). OSV needs an
+  exact coordinate; inventing one would be a false-clean. Exact bracketed pins ([1.2.3]) and one-level
+  $(Prop) expansion from collected MSBuild properties ARE resolved.
+
+project.assets.json (the restore output) is the one modern format with a REAL resolved transitive tree, so
+when present it is preferred and produces package->package edges rather than a flat list (and is not marked
+flat). Lockfile precedence is preserved: a resolved packages.lock.json / paket.lock always wins. A project
+mid-migration (packages.config alongside PackageReference) is covered by BOTH via mergeDeclared, so neither
+half becomes a blind spot.
+
+Proof: TestMSBuildFormatsResolve (13 formats, each of which resolved to zero before); transitive-edge test for
+project.assets.json; D-59 disclosure test (floating/range/no-version/missing-prop all disclosed, none
+fabricated, count exact, marked flat); lockfile-precedence and packages.config+PackageReference merge tests.
+Mutation-proven: accepting floating versions fails the disclosure test, skipping the CPM lookup fails the
+Central Package Management test; restore green. Full suite green (34 packages), -race clean, go vet silent,
+gofmt no diffs.
