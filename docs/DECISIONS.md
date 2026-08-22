@@ -4081,3 +4081,31 @@ Noted, offered next (separate): the 3 remaining gate-eligible on beats are VC-00
 network" on backoff/deprecated/pyasn1 — URLs + network words matched inside the setup.py long_description
 README string and `url=` metadata, not an actual egress call; a distinct fix would require a real network
 call, not string-literal content.
+
+## D-110 — VC-002b: setup.py documentation-field network precision (beats live-fire follow-up)
+
+The final beats live-fire false positive (offered in D-109's note). VC-002b "setup.py reaches network" fired
+gate-eligible on backoff / deprecated / pyasn1 because the network capability was scanned over the whole
+setup.py, and their `long_description` (an embedded README) and `description` carry example code and tool
+names — `requests.get(...)`, `httpx.get()`, `urllib.request.urlopen()`, `curl ...` — that are documentation,
+not install-time egress. `analyzeSetupPy` already stripped URLs before the scan (README badges / homepage),
+but network CLIENT-NAME markers are not URLs, so they survived and raised CapNetwork.
+
+Fix: strip the string-literal VALUE of the documentation metadata keywords (`long_description` /
+`description`) before capability scanning — extending the existing "metadata is not code" URL-strip to the
+prose fields that carry those markers. A string literal passed to `setup()` never executes, so markers
+inside it are inert. Deliberately scoped to these two doc fields ONLY: an arbitrary string literal is NOT
+stripped, so a shell cradle in `os.system("curl x | sh")` (a command string, not a doc field) still raises
+CapNetwork/CapExec; and real egress in module-level code or a cmdclass body is untouched. RE2 has no
+backreferences, so each quote form is handled explicitly, triple-quoted first; both the keyword-arg
+(`long_description=`) and dict-entry (`'long_description':`) forms are matched, while
+`long_description_content_type` is not (the `\b` after the key fails before the `_`).
+
+Proof: `TestSetupPyReadmeNetworkWordsNotNetwork` (a backoff-shaped README with requests/httpx/urllib/curl
+examples in `long_description` + `description` raises NO CapNetwork) and
+`TestSetupPyCradleInCommandStringStillDetected` (a `curl … | sh` cradle in `os.system(...)` still fires,
+guarding against over-stripping). Mutation-proven: the FP test fails against the pre-fix code with evidence
+`[curl  urllib.request urlopen( requests.get httpx.]`. Existing setup.py tests
+(`TestSetupPyRealNetworkEgressStillDetected`, README-URL, metadata-URL, comment/error-URL) all unchanged.
+Full suite green (33/0), -race clean, vet/fmt clean. This clears the last beats gate-eligible FP; the
+remaining beats findings (VC-008 known-vuln, VC-004 dormancy, etc.) are genuine.

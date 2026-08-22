@@ -1734,6 +1734,37 @@ func AnalyzePython(setupPy, pyprojectToml string, pthFiles map[string]string) Su
 	return s
 }
 
+// setupDocStringRes strip the STRING-LITERAL value of setup()'s documentation
+// metadata keywords (long_description / description) before capability scanning.
+// These fields are inert package metadata — a string literal passed to setup()
+// never executes — yet a README embedded as long_description routinely contains
+// example code (`requests.get(...)`, `httpx.get()`, `curl ...`, `DownloadFile`)
+// and tool names that are NOT install-time behavior. This was the beats live-fire
+// VC-002b false positive on backoff / deprecated / pyasn1. Scoped deliberately to
+// these two doc fields: an arbitrary string literal is NOT stripped (a shell
+// command in `os.system("curl x | sh")` must still be scanned), and real egress
+// in module-level code or a cmdclass body is untouched. RE2 has no backreferences,
+// so each quote form is handled explicitly, triple-quoted first (a single-line
+// pattern would otherwise close on the first quote inside a triple-quoted body).
+// The key may be a keyword arg (`long_description=`) or a dict entry
+// (`'long_description':`); `long_description_content_type` is not matched (the
+// `\b` after the key fails before the `_`).
+var setupDocStringRes = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}""".*?"""`),
+	regexp.MustCompile(`(?s)['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}'''.*?'''`),
+	regexp.MustCompile(`['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}"[^"\n]*"`),
+	regexp.MustCompile(`['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}'[^'\n]*'`),
+}
+
+// stripSetupDocStrings removes the doc-metadata string-literal values (see
+// setupDocStringRes) so their prose cannot contribute capability markers.
+func stripSetupDocStrings(source string) string {
+	for _, re := range setupDocStringRes {
+		source = re.ReplaceAllString(source, "long_description=\"\"")
+	}
+	return source
+}
+
 // analyzeSetupPy extracts install-time hooks from setup.py. It identifies
 // module-level side effects (code that runs before setup()) and custom cmdclass
 // overrides (classes that replace pip's default install behavior).
@@ -1746,7 +1777,10 @@ func analyzeSetupPy(source string) []Hook {
 	// function markers (urlopen, requests.get, curl, etc.) which fire
 	// independently of the URL string. Only collect URL artifacts from lines
 	// that also contain a network function call — those are actual targets.
-	cleaned := urlRe.ReplaceAllString(source, "")
+	// The documentation metadata fields (long_description / description) are
+	// stripped first: a README embedded there carries example code and tool
+	// names that are metadata, not egress (beats live-fire VC-002b FP).
+	cleaned := urlRe.ReplaceAllString(stripSetupDocStrings(source), "")
 
 	allCaps, allEvidence := scanCaps(cleaned)
 	allSinks := findSinks(cleaned)
