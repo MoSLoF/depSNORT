@@ -53,10 +53,18 @@ func (*Adapter) Detect(path string) bool {
 	if info.IsDir() {
 		return fileExists(filepath.Join(path, packagesLockName)) ||
 			fileExists(filepath.Join(path, packagesConfigName)) ||
-			fileExists(filepath.Join(path, paketLockName))
+			fileExists(filepath.Join(path, paketLockName)) ||
+			assetsPath(path) != "" ||
+			hasMSBuildSurface(path)
 	}
 	base := filepath.Base(path)
-	return base == packagesLockName || base == packagesConfigName || base == paketLockName
+	if base == packagesLockName || base == packagesConfigName || base == paketLockName ||
+		base == directoryPackagesName || base == paketDepsName || base == projectJSONName ||
+		base == "dotnet-tools.json" {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(base))
+	return projectExts[ext] || ext == ".nuspec"
 }
 
 func fileExists(p string) bool {
@@ -78,13 +86,21 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 		if err != nil {
 			return nil, fmt.Errorf("nuget: reading %s: %w", filepath.Base(path), err)
 		}
-		switch filepath.Base(path) {
-		case packagesConfigName:
+		switch base := filepath.Base(path); {
+		case base == packagesConfigName:
 			return parsePackagesConfig(path, raw)
-		case paketLockName:
+		case base == paketLockName:
 			return parsePaketLock(path, raw)
-		default:
+		case base == packagesLockName:
 			return parsePackagesLock(path, raw)
+		case base == projectAssetsName:
+			return parseProjectAssets(filepath.Dir(path), raw)
+		default:
+			// A directly-pointed modern manifest (.csproj, Directory.Packages.props,
+			// .nuspec, dotnet-tools.json, project.json, paket.dependencies) is read
+			// in the context of its directory, since Central Package Management and
+			// Directory.Build.props live alongside it.
+			return parseMSBuildDir(filepath.Dir(path))
 		}
 	}
 	if lock := filepath.Join(path, packagesLockName); fileExists(lock) {
@@ -94,6 +110,13 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 		}
 		return parsePackagesLock(path, raw)
 	}
+	if ap := assetsPath(path); ap != "" {
+		raw, err := os.ReadFile(ap)
+		if err != nil {
+			return nil, fmt.Errorf("nuget: reading %s: %w", projectAssetsName, err)
+		}
+		return parseProjectAssets(path, raw)
+	}
 	if paket := filepath.Join(path, paketLockName); fileExists(paket) {
 		raw, err := os.ReadFile(paket)
 		if err != nil {
@@ -101,12 +124,29 @@ func (*Adapter) Resolve(path string) (*graph.Graph, error) {
 		}
 		return parsePaketLock(path, raw)
 	}
-	config := filepath.Join(path, packagesConfigName)
-	raw, err := os.ReadFile(config)
-	if err != nil {
-		return nil, fmt.Errorf("nuget: reading %s: %w", packagesConfigName, err)
+	// The legacy packages.config still wins when present, but a project may be
+	// mid-migration (packages.config alongside PackageReference), so both are
+	// read and merged rather than letting either become a blind spot.
+	if config := filepath.Join(path, packagesConfigName); fileExists(config) {
+		raw, err := os.ReadFile(config)
+		if err != nil {
+			return nil, fmt.Errorf("nuget: reading %s: %w", packagesConfigName, err)
+		}
+		g, err := parsePackagesConfig(path, raw)
+		if err != nil {
+			return nil, err
+		}
+		if hasMSBuildSurface(path) {
+			if mg, mErr := parseMSBuildDir(path); mErr == nil {
+				mergeDeclared(g, mg)
+			}
+		}
+		return g, nil
 	}
-	return parsePackagesConfig(path, raw)
+	if hasMSBuildSurface(path) {
+		return parseMSBuildDir(path)
+	}
+	return nil, fmt.Errorf("nuget: no NuGet manifest in %s", filepath.Base(path))
 }
 
 // nugetLockFile represents the structure of packages.lock.json.
