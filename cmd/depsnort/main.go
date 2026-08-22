@@ -31,6 +31,7 @@ import (
 	"ihbv.io/depsnort/internal/check/builtin"
 	"ihbv.io/depsnort/internal/datasource"
 	"ihbv.io/depsnort/internal/datasource/depsdev"
+	"ihbv.io/depsnort/internal/datasource/epss"
 	"ihbv.io/depsnort/internal/datasource/goproxy"
 	"ihbv.io/depsnort/internal/datasource/ioc"
 	"ihbv.io/depsnort/internal/datasource/npmreg"
@@ -850,6 +851,7 @@ func cmdScan(args []string) int {
 	snapshotPath := fs.String("osv-snapshot", "", "path to a JSON advisory snapshot to import into the OSV cache before scanning (bootstraps -offline with zero network calls)")
 	exportPath := fs.String("osv-export", "", "write this scan's OSV results to path as a JSON snapshot for later -osv-snapshot import; requires live network access (incompatible with -offline/-no-osv)")
 	noBundled := fs.Bool("no-osv-bundled", false, "never use the compiled-in fallback advisory dataset, even when the network is unreachable")
+	epssOn := fs.Bool("epss", false, "enrich VC-008 findings with FIRST.org EPSS exploit-prediction scores and order them by peak score (opt-in; needs network + OSV)")
 	regCacheDir := fs.String("registry-cache", defaultCacheDir("registry"), "registry metadata cache directory")
 	noRegistry := fs.Bool("no-registry", false, "skip registry-metadata source (disables VC-004/VC-005)")
 	expandTree := fs.Bool("expand", true, "discover transitive layers past what the lockfile recorded; presumed versions are labelled and never gate")
@@ -1065,6 +1067,55 @@ func cmdScan(args []string) int {
 			dataSourceGaps = append(dataSourceGaps, client.Name())
 		}
 		info.DataSources = append(info.DataSources, cov)
+
+		// EPSS enrichment (opt-in, -epss): resolve each vulnerable coordinate's
+		// advisories to their CVE aliases (querybatch returns none), score those CVEs
+		// with FIRST.org EPSS, and hand VC-008 the scores to annotate and rank by
+		// exploit probability. Skipped offline (EPSS has no bundled fallback).
+		if *epssOn && !*offline {
+			var coords []datasource.Coord
+			for _, n := range g.SortedNodes() {
+				hasVuln := false
+				for _, a := range ctx.Advisories[n.ID] {
+					if !a.Malicious {
+						hasVuln = true
+						break
+					}
+				}
+				if hasVuln && n.Version != "" {
+					coords = append(coords, datasource.Coord{Ecosystem: n.Ecosystem, Name: n.Name, Version: n.Version})
+				}
+			}
+			if len(coords) > 0 {
+				aliasByID, aErr := client.CVEAliases(context.Background(), coords)
+				if aErr != nil {
+					fmt.Fprintf(os.Stderr, "depsnort: warning: EPSS alias resolution degraded: %v\n", aErr)
+				}
+				var cves []string
+				for id, advs := range ctx.Advisories {
+					for i := range advs {
+						if cs, ok := aliasByID[advs[i].ID]; ok {
+							advs[i].Aliases = append(advs[i].Aliases, cs...)
+							cves = append(cves, cs...)
+						}
+						if strings.HasPrefix(strings.ToUpper(advs[i].ID), "CVE-") {
+							cves = append(cves, strings.ToUpper(advs[i].ID))
+						}
+					}
+					ctx.Advisories[id] = advs
+				}
+				epssClient := epss.New(datasource.NewCache(*cacheDir, 24*time.Hour), *offline)
+				scores, eErr := epssClient.Scores(context.Background(), cves)
+				ctx.EPSS = scores
+				epssCov := emit.DataSourceCoverage{Name: epssClient.Name(), Stats: epssClient.Stats}
+				if eErr != nil {
+					epssCov.Error = eErr.Error()
+					fmt.Fprintf(os.Stderr, "depsnort: warning: EPSS coverage degraded: %v\n", eErr)
+				}
+				info.DataSources = append(info.DataSources, epssCov)
+				fmt.Fprintf(os.Stderr, "depsnort: EPSS scored %d CVE(s) across %d vulnerable coordinate(s)\n", len(scores), len(coords))
+			}
+		}
 	}
 
 	// Registry-metadata stage: publish-time history for the temporal axis.

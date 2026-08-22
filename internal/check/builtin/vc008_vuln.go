@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"ihbv.io/depsnort/internal/check"
+	"ihbv.io/depsnort/internal/datasource"
+	"ihbv.io/depsnort/internal/datasource/epss"
 	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
 )
@@ -42,18 +44,30 @@ const maxListedAdvisories = 8
 // on axios alone — which buried every supply-chain signal in the report. The
 // gate was unaffected (advisories never gate), but a report nobody can read is
 // its own kind of failure.
+//
+// When EPSS scores are present (ctx.EPSS, populated by -epss), each finding is
+// annotated with the PEAK exploit-prediction score across its CVEs and the whole
+// set is ordered by that peak, so the vulnerabilities most likely to be exploited
+// in the wild surface first — the difference between "96 vulnerable packages" and
+// "the 4 that matter this week".
 func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
-	var out []finding.Finding
+	type scored struct {
+		f    finding.Finding
+		peak float64
+	}
+	var ranked []scored
 	for _, n := range ctx.Graph.SortedNodes() {
 		if n.Kind != graph.KindPackage {
 			continue
 		}
 		var ids []string
+		var advs []datasource.Advisory
 		for _, adv := range ctx.Advisories[n.ID] {
 			if adv.Malicious {
 				continue // that is VC-001's job
 			}
 			ids = append(ids, adv.ID)
+			advs = append(advs, adv)
 		}
 		if len(ids) == 0 {
 			continue
@@ -67,17 +81,78 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 			suffix = fmt.Sprintf(", +%d more", len(ids)-maxListedAdvisories)
 		}
 		title := fmt.Sprintf("%d known %s", len(ids), plural(len(ids), "vulnerability", "vulnerabilities"))
-		out = append(out, finding.Finding{
-			CheckID:     "VC-008",
-			Axis:        finding.AxisVuln,
-			Severity:    finding.SevMedium,
-			GateClass:   finding.GateAdvisory,
-			Confidence:  1.0,
-			NodeID:      n.ID,
-			Title:       title,
-			Evidence:    fmt.Sprintf("%s@%s is affected by %s%s", n.Name, n.Version, strings.Join(listed, ", "), suffix),
-			Remediation: "upgrade to a release that is not covered by these advisories",
+		evidence := fmt.Sprintf("%s@%s is affected by %s%s", n.Name, n.Version, strings.Join(listed, ", "), suffix)
+
+		peak := -1.0
+		if len(ctx.EPSS) > 0 {
+			if note, p, ok := epssNote(advs, ctx.EPSS); ok {
+				evidence += note
+				peak = p
+			}
+		}
+
+		ranked = append(ranked, scored{
+			f: finding.Finding{
+				CheckID:     "VC-008",
+				Axis:        finding.AxisVuln,
+				Severity:    finding.SevMedium,
+				GateClass:   finding.GateAdvisory,
+				Confidence:  1.0,
+				NodeID:      n.ID,
+				Title:       title,
+				Evidence:    evidence,
+				Remediation: "upgrade to a release that is not covered by these advisories",
+			},
+			peak: peak,
 		})
+	}
+
+	// Highest exploit-probability first when EPSS is present; SortedNodes order
+	// (already deterministic) is preserved for ties and when EPSS is absent.
+	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].peak > ranked[j].peak })
+
+	out := make([]finding.Finding, len(ranked))
+	for i, r := range ranked {
+		out[i] = r.f
+	}
+	return out
+}
+
+// epssNote returns the evidence suffix and peak EPSS across an advisory set's
+// CVEs (an advisory contributes its ID if it is a CVE, plus any CVE aliases).
+// ok is false when none of the advisories has a scored CVE.
+func epssNote(advs []datasource.Advisory, scores map[string]epss.Score) (note string, peak float64, ok bool) {
+	var peakCVE string
+	var peakScore epss.Score
+	for _, adv := range advs {
+		for _, cve := range advisoryCVEs(adv) {
+			s, found := scores[cve]
+			if !found {
+				continue
+			}
+			if !ok || s.EPSS > peakScore.EPSS {
+				ok, peakScore, peakCVE = true, s, cve
+			}
+		}
+	}
+	if !ok {
+		return "", -1, false
+	}
+	return fmt.Sprintf("; peak EPSS %.3f (%s, %.0fth pct)", peakScore.EPSS, peakCVE, peakScore.Percentile*100),
+		peakScore.EPSS, true
+}
+
+// advisoryCVEs returns the CVE IDs an advisory maps to: its own ID if it is a
+// CVE, plus any CVE aliases.
+func advisoryCVEs(adv datasource.Advisory) []string {
+	var out []string
+	if strings.HasPrefix(strings.ToUpper(adv.ID), "CVE-") {
+		out = append(out, strings.ToUpper(adv.ID))
+	}
+	for _, a := range adv.Aliases {
+		if strings.HasPrefix(strings.ToUpper(a), "CVE-") {
+			out = append(out, strings.ToUpper(a))
+		}
 	}
 	return out
 }
