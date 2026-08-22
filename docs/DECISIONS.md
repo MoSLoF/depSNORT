@@ -4013,3 +4013,38 @@ remaining coverage note is the inherent transitive-expansion presumption ("expan
 bound. Definitive Kibana result: 5,618 nodes / 15,986 edges across 12 sub-projects; 3 block (accurate OSV
 MAL-* matches on test-fixture names colliding with real squatted npm packages — a dependency-confusion
 exposure in test infra) / 6 gate-eligible / 147 advisory.
+
+## D-108 — OPU-28 (Inc. 3 follow-up): VC-002i init-reachability scoping (elastic-agent live-fire)
+
+An elastic-agent live-fire exposed a false positive in VC-002i (build-tag-gated init evasion, D-93).
+`analyzeConstrainedInit` gated on `(build-tag AND an init() exists AND a dangerous capability appears
+ANYWHERE in the file)` — whole-file attribution, never verifying the init actually REACHES the capability.
+elastic-agent's `magefile.go` (`//go:build mage`) fired HIGH: its `init()` is byte-identical to upstream and
+only registers mage targets (`common.RegisterCheckDeps(Update)` / `RegisterDeps`); the network/credential
+code lives in SEPARATE, explicitly-invoked mage targets. The fork injected no payload (diff vs upstream =
+version drift only) — a standard build tool called a hidden runtime backdoor.
+
+Fix: scope the capability scan to what AUTO-RUNS at import. New `initReachableSource` (stdlib `go/ast` /
+`go/parser` / `go/token`, D-10-clean) computes the import-time closure — `init()` bodies + package-level var
+initializers + every LOCAL function transitively reachable from them by a direct call (BFS with a visited
+set) — and `scanCaps` runs on that closure, not the whole file. `common.RegisterCheckDeps(Update)` is an
+EXTERNAL registrar (its `Update` argument is register-for-later, not followed), so the closure is just the
+init body → no network/creds → no finding.
+
+Blind-spot guards (the fix must never trade a FP for a false negative): a multi-hop payload (a helper called
+by init at any depth) is in the closure and still fires; a LOCAL callee receiving a LOCAL function VALUE
+(which it may invoke at import) forces a fallback to the whole-file scan; an EXTERNAL registrar receiving a
+value does NOT (that clears the mage FP); an unparseable file falls back to the whole-file scan. The fallback
+is always toward MORE scanning, so the change can only remove FPs, never create FNs — except the precise
+target class (caps in unrelated, explicitly-invoked functions). The alternative simple fix — allowlisting
+the mage build tag — was REJECTED: it would blind the check to a real payload hidden IN a magefile init;
+reachability scoping preserves that detection.
+
+Proof: `constrained_init_reach_test.go` — the mage-shape (external registrar) and a cap in an unreached
+function stay SILENT (FP cleared); a payload reached directly, two hops down, via higher-order LOCAL
+dispatch, from a package-var initializer, or in an unparseable file all STILL FIRE (no blind spot). The
+existing OPU-28 `TestAnalyzeGo_ConstrainedInit` (all positives fire, all negatives silent) is unchanged.
+Mutation-proven: reverting to the whole-file scan makes both FP cases wrongly fire. Only the capability SET
+feeds the finding (`caps, _ := scanCaps(...)`), so scan-text order does not affect output (D-09 safe). Live-
+fire: elastic-agent VC-002i 1 → 0, verdict 0/1/43 → 0/0/43, everything else identical. Full suite green
+(33/0), -race clean, vet/fmt clean.

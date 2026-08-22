@@ -15,6 +15,9 @@ package installsurface
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"regexp"
 	"sort"
 	"strings"
@@ -1228,7 +1231,7 @@ func analyzeConstrainedInit(file, src string) (Hook, bool) {
 	if !goInitFuncRe.MatchString(src) && !goBlankVarInitRe.MatchString(src) {
 		return Hook{}, false
 	}
-	caps, _ := scanCaps(stripCodeComments(src))
+	caps, _ := scanCaps(stripCodeComments(initScanText(src)))
 	reasons := dangerousInitReasons(caps)
 	if len(reasons) == 0 {
 		return Hook{}, false
@@ -1243,6 +1246,125 @@ func analyzeConstrainedInit(file, src string) (Hook, bool) {
 		Caps:     nil, // a runtime init is not an install-hook capability (VC-002i judges it)
 		Evidence: ev,
 	}, true
+}
+
+// initScanText returns the source that AUTO-RUNS at import — the init() bodies and
+// package-level var initializers, plus every local function transitively reachable
+// from them by a direct call — so a build-constrained-init finding is judged on
+// what the startup path reaches, not on capabilities sitting in unrelated,
+// explicitly-invoked functions elsewhere in the file. That whole-file attribution
+// was the elastic-agent magefile false positive: an init() that only registers
+// mage targets, in a file that (in separate targets) has network + credentials.
+//
+// It falls back to the full source — never a blind spot — when the file cannot be
+// parsed, or when a higher-order dispatch shape is present (a LOCAL function
+// receiving a LOCAL function VALUE, which it may invoke at import). An external
+// registrar receiving a function value (mage's common.RegisterCheckDeps) is
+// register-for-later and does NOT force the fallback, which is what clears the FP.
+func initScanText(src string) string {
+	if reachable, ok := initReachableSource(src); ok {
+		return reachable
+	}
+	return src
+}
+
+func initReachableSource(src string) (string, bool) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", src, 0)
+	if err != nil {
+		return "", false // unparseable -> conservative whole-file scan
+	}
+
+	local := map[string]*ast.FuncDecl{}
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name != nil && fd.Body != nil {
+			local[fd.Name.Name] = fd // over-approx: methods indexed by name too (safe)
+		}
+	}
+
+	// Import-time roots: init() bodies and package-level var initializers.
+	var roots []ast.Node
+	for _, d := range f.Decls {
+		switch g := d.(type) {
+		case *ast.FuncDecl:
+			if g.Recv == nil && g.Name.Name == "init" && g.Body != nil {
+				roots = append(roots, g.Body)
+			}
+		case *ast.GenDecl:
+			if g.Tok == token.VAR {
+				for _, s := range g.Specs {
+					if vs, ok := s.(*ast.ValueSpec); ok {
+						for _, v := range vs.Values {
+							roots = append(roots, v)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	selName := func(e ast.Expr) string {
+		switch fn := e.(type) {
+		case *ast.Ident:
+			return fn.Name
+		case *ast.SelectorExpr:
+			return fn.Sel.Name
+		}
+		return ""
+	}
+	argIsLocalFunc := func(a ast.Expr) bool {
+		_, ok := local[selName(a)]
+		return ok
+	}
+
+	reached := map[string]bool{}
+	nodes := append([]ast.Node{}, roots...)
+	work := append([]ast.Node{}, roots...)
+
+	for len(work) > 0 {
+		n := work[0]
+		work = work[1:]
+		fellBack := false
+		ast.Inspect(n, func(x ast.Node) bool {
+			call, ok := x.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := selName(call.Fun)
+			fd, isLocal := local[name]
+			if isLocal {
+				// A local callee receiving a local function VALUE may invoke it at
+				// import; scanning only the callee's body could miss that payload,
+				// so widen to the whole file (blind-spot guard).
+				for _, a := range call.Args {
+					if argIsLocalFunc(a) {
+						fellBack = true
+						return false
+					}
+				}
+				if !reached[name] {
+					reached[name] = true
+					nodes = append(nodes, fd.Body)
+					work = append(work, fd.Body)
+				}
+			}
+			return true
+		})
+		if fellBack {
+			return "", false
+		}
+	}
+
+	var b strings.Builder
+	for _, n := range nodes {
+		s := fset.Position(n.Pos()).Offset
+		e := fset.Position(n.End()).Offset
+		if s >= 0 && e <= len(src) && s < e {
+			b.WriteString(src[s:e])
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), true
 }
 
 // goBuildConstraint returns a short description of a file's build constraint, and
