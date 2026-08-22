@@ -1038,8 +1038,12 @@ func cmdScan(args []string) int {
 		}
 		fmt.Fprintf(os.Stderr, "depsnort: imported %d advisory record(s) from snapshot\n", n)
 	}
+	// osvClient is hoisted so the post-expansion advisory pass (below) can reuse
+	// the same cached client; nil when -no-osv.
+	var osvClient *osv.Client
 	if !*noOSV {
 		client := osv.New(datasource.NewCache(*cacheDir, 24*time.Hour), *offline)
+		osvClient = client
 		if *noBundled {
 			client.Bundled = nil
 		}
@@ -1085,58 +1089,6 @@ func cmdScan(args []string) int {
 		}
 		info.DataSources = append(info.DataSources, cov)
 
-		// EPSS enrichment (opt-in, -epss): resolve each vulnerable coordinate's
-		// advisories to their CVE aliases (querybatch returns none), score those CVEs
-		// with FIRST.org EPSS, and hand VC-008 the scores to annotate and rank by
-		// exploit probability. Skipped offline (EPSS has no bundled fallback).
-		if *epssOn && !*offline {
-			var coords []datasource.Coord
-			for _, n := range g.SortedNodes() {
-				hasVuln := false
-				for _, a := range ctx.Advisories[n.ID] {
-					if !a.Malicious {
-						hasVuln = true
-						break
-					}
-				}
-				if hasVuln && n.Version != "" {
-					coords = append(coords, datasource.Coord{Ecosystem: n.Ecosystem, Name: n.Name, Version: n.Version})
-				}
-			}
-			if len(coords) > 0 {
-				aliasByID, aErr := client.CVEAliases(context.Background(), coords)
-				if aErr != nil {
-					fmt.Fprintf(os.Stderr, "depsnort: warning: EPSS alias resolution degraded: %v\n", aErr)
-				}
-				var cves []string
-				for id, advs := range ctx.Advisories {
-					for i := range advs {
-						if cs, ok := aliasByID[advs[i].ID]; ok {
-							advs[i].Aliases = append(advs[i].Aliases, cs...)
-							cves = append(cves, cs...)
-						}
-						if strings.HasPrefix(strings.ToUpper(advs[i].ID), "CVE-") {
-							cves = append(cves, strings.ToUpper(advs[i].ID))
-						}
-					}
-					ctx.Advisories[id] = advs
-				}
-				epssClient := epss.New(datasource.NewCache(*cacheDir, 24*time.Hour), *offline)
-				scores, eErr := epssClient.Scores(context.Background(), cves)
-				ctx.EPSS = scores
-				epssCov := emit.DataSourceCoverage{
-					Name:  epssClient.Name(),
-					Stats: epssClient.Stats,
-					Note:  epss.EnrichmentSummary(len(coords), len(aliasByID), epssClient.Stats, aErr != nil),
-				}
-				if eErr != nil {
-					epssCov.Error = eErr.Error()
-					fmt.Fprintf(os.Stderr, "depsnort: warning: EPSS coverage degraded: %v\n", eErr)
-				}
-				info.DataSources = append(info.DataSources, epssCov)
-				fmt.Fprintf(os.Stderr, "depsnort: EPSS %s\n", epssCov.Note)
-			}
-		}
 	}
 
 	// Registry-metadata stage: publish-time history for the temporal axis.
@@ -1269,6 +1221,148 @@ func cmdScan(args []string) int {
 				continue
 			}
 			n.Attr[pypi.AttrReconstruction] = "not-attempted"
+		}
+	}
+
+	// Post-expansion advisory pass. The first prefetch runs BEFORE transitive
+	// expansion, so it can only ask about coordinates the manifests already
+	// pinned. Two very common shapes were therefore never advisory-checked at
+	// all: packages discovered BY expansion, and a manifest that pins nothing
+	// (a Poetry-style pyproject.toml of version RANGES with no lockfile, whose
+	// direct dependencies are unresolved placeholders at prefetch time and only
+	// gain versions during expansion). Both produced a clean-looking
+	// "0 advisory" verdict backed by zero OSV queries. This second pass asks
+	// about every package that has a version and was not queried the first time;
+	// the client is cached and batched, so already-known coordinates cost
+	// nothing (D-59: disclose, never false-clean).
+	if osvClient != nil {
+		var (
+			newCoords []datasource.Coord
+			newIDs    []string
+		)
+		rootIDs := map[string]bool{}
+		for _, r := range g.Roots {
+			rootIDs[r] = true
+		}
+		for _, n := range g.SortedNodes() {
+			if rootIDs[n.ID] || n.Kind != graph.KindPackage || n.Version == "" {
+				continue
+			}
+			if _, queried := ctx.Advisories[n.ID]; queried {
+				continue
+			}
+			newCoords = append(newCoords, datasource.Coord{Ecosystem: n.Ecosystem, Name: n.Name, Version: n.Version})
+			newIDs = append(newIDs, n.ID)
+		}
+		if len(newCoords) > 0 {
+			results, qErr := osvClient.QueryBatch(context.Background(), newCoords)
+			if ctx.Advisories == nil {
+				ctx.Advisories = map[string][]datasource.Advisory{}
+			}
+			for i := range results {
+				if i < len(newIDs) {
+					ctx.Advisories[newIDs[i]] = results[i]
+				}
+			}
+			// Fold the second pass into the existing osv coverage line so the
+			// report states one honest total rather than two partial ones.
+			for i := range info.DataSources {
+				if info.DataSources[i].Name != "osv" {
+					continue
+				}
+				st := &info.DataSources[i].Stats
+				st.Queried += osvClient.Stats.Queried
+				st.Advisories += osvClient.Stats.Advisories
+				st.Malicious += osvClient.Stats.Malicious
+				st.FromCache += osvClient.Stats.FromCache
+				st.FromNet += osvClient.Stats.FromNet
+				st.Gaps += osvClient.Stats.Gaps
+				st.NotFound += osvClient.Stats.NotFound
+				if qErr != nil && info.DataSources[i].Error == "" {
+					info.DataSources[i].Error = qErr.Error()
+				}
+				break
+			}
+			if qErr != nil {
+				fmt.Fprintf(os.Stderr, "depsnort: warning: OSV coverage degraded (post-expansion): %v\n", qErr)
+			}
+			fmt.Fprintf(os.Stderr, "depsnort: advisory check covered %d additional package(s) resolved after expansion\n", len(newCoords))
+		}
+
+		// Never let a clean verdict be mistaken for a verified one: if resolved
+		// packages exist and NONE of them was advisory-checked, say so loudly.
+		var resolved int
+		for _, n := range g.SortedNodes() {
+			if !rootIDs[n.ID] && n.Kind == graph.KindPackage && n.Version != "" {
+				resolved++
+			}
+		}
+		var checked int
+		for id := range ctx.Advisories {
+			if !rootIDs[id] {
+				checked++
+			}
+		}
+		if resolved > 0 && checked == 0 {
+			fmt.Fprintf(os.Stderr,
+				"depsnort: WARNING - advisory coverage: 0 of %d resolved package(s) were checked against OSV; "+
+					"a clean vulnerability verdict here is NOT a verified one\n", resolved)
+		}
+	}
+
+	// EPSS enrichment (opt-in, -epss): resolve each vulnerable coordinate's
+	// advisories to their CVE aliases (querybatch returns none), score those CVEs
+	// with FIRST.org EPSS, and hand VC-008 the scores to annotate and rank by
+	// exploit probability. Skipped offline (EPSS has no bundled fallback).
+	// EPSS runs AFTER the post-expansion advisory pass so it scores the complete
+	// advisory set, including packages discovered during expansion. Requires the
+	// OSV client for CVE-alias resolution, so it is skipped under -no-osv.
+	if *epssOn && !*offline && osvClient != nil {
+		var coords []datasource.Coord
+		for _, n := range g.SortedNodes() {
+			hasVuln := false
+			for _, a := range ctx.Advisories[n.ID] {
+				if !a.Malicious {
+					hasVuln = true
+					break
+				}
+			}
+			if hasVuln && n.Version != "" {
+				coords = append(coords, datasource.Coord{Ecosystem: n.Ecosystem, Name: n.Name, Version: n.Version})
+			}
+		}
+		if len(coords) > 0 {
+			aliasByID, aErr := osvClient.CVEAliases(context.Background(), coords)
+			if aErr != nil {
+				fmt.Fprintf(os.Stderr, "depsnort: warning: EPSS alias resolution degraded: %v\n", aErr)
+			}
+			var cves []string
+			for id, advs := range ctx.Advisories {
+				for i := range advs {
+					if cs, ok := aliasByID[advs[i].ID]; ok {
+						advs[i].Aliases = append(advs[i].Aliases, cs...)
+						cves = append(cves, cs...)
+					}
+					if strings.HasPrefix(strings.ToUpper(advs[i].ID), "CVE-") {
+						cves = append(cves, strings.ToUpper(advs[i].ID))
+					}
+				}
+				ctx.Advisories[id] = advs
+			}
+			epssClient := epss.New(datasource.NewCache(*cacheDir, 24*time.Hour), *offline)
+			scores, eErr := epssClient.Scores(context.Background(), cves)
+			ctx.EPSS = scores
+			epssCov := emit.DataSourceCoverage{
+				Name:  epssClient.Name(),
+				Stats: epssClient.Stats,
+				Note:  epss.EnrichmentSummary(len(coords), len(aliasByID), epssClient.Stats, aErr != nil),
+			}
+			if eErr != nil {
+				epssCov.Error = eErr.Error()
+				fmt.Fprintf(os.Stderr, "depsnort: warning: EPSS coverage degraded: %v\n", eErr)
+			}
+			info.DataSources = append(info.DataSources, epssCov)
+			fmt.Fprintf(os.Stderr, "depsnort: EPSS %s\n", epssCov.Note)
 		}
 	}
 

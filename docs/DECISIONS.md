@@ -4365,3 +4365,37 @@ fabricated, count exact, marked flat); lockfile-precedence and packages.config+P
 Mutation-proven: accepting floating versions fails the disclosure test, skipping the CPM lookup fails the
 Central Package Management test; restore green. Full suite green (34 packages), -race clean, go vet silent,
 gofmt no diffs.
+
+## D-119 — Advisory coverage: a post-expansion OSV pass (close the prefetch/expansion gap)
+
+The advisory prefetch runs BEFORE transitive expansion, so it can only ask OSV about coordinates the manifests
+already pinned. Two very common shapes were therefore never advisory-checked at all, and both produced a
+clean-looking "0 advisory" verdict backed by ZERO OSV queries:
+
+  - Packages DISCOVERED by expansion. A live-fire scan of cecil-protocol left 186 expansion-discovered
+    packages unchecked — hiding a real esbuild advisory.
+  - A manifest that pins nothing at prefetch: a Poetry-style pyproject.toml of version RANGES with no lockfile,
+    whose direct dependencies are unresolved placeholders at prefetch time and only gain versions during
+    expansion. pyrsistencesniper reported "0 advisory" off zero queries.
+
+Fix: after expansion, a second OSV pass asks about every package that now has a version and was not queried the
+first time. The OSV client is hoisted out of the prefetch block and reused, so it is cached and batched —
+already-known coordinates cost nothing. Its stats are FOLDED INTO the existing "osv" coverage line (queried,
+advisories, cache, net, gaps, not-found all summed), so the report states one honest total rather than two
+partial ones, and a post-expansion error degrades that same line.
+
+Two honesty guards (D-59, D-24):
+  - The selection predicate is pinned by a test: the second pass selects exactly the non-root, KindPackage,
+    versioned nodes not already in ctx.Advisories — expansion-added packages and range-pinned directs, never
+    hooks or versionless placeholders.
+  - If resolved packages exist and NONE was advisory-checked, a loud stderr WARNING says so: a clean
+    vulnerability verdict there is explicitly NOT a verified one.
+
+EPSS enrichment MOVED to run after this pass (it was previously inside the prefetch block), so it scores the
+complete advisory set — including packages discovered during expansion — and it now shares the hoisted OSV
+client for CVE-alias resolution (skipped under -no-osv, as before under -offline).
+
+Proof: two selection/coverage tests pin the predicate and the zero-coverage detection (cmdScan itself is not
+unit-testable, so these pin the logic that drives it, matching the codebase's existing main-package test
+pattern); an offline end-to-end scan runs the new path with no regression. Full suite green (34 packages),
+-race clean, go vet silent, gofmt no diffs.
