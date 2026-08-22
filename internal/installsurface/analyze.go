@@ -1752,12 +1752,154 @@ func AnalyzePython(setupPy, pyprojectToml string, pthFiles map[string]string) Su
 var setupDocStringRes = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}""".*?"""`),
 	regexp.MustCompile(`(?s)['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}'''.*?'''`),
-	regexp.MustCompile(`['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}"[^"\n]*"`),
-	regexp.MustCompile(`['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}'[^'\n]*'`),
+	regexp.MustCompile(`['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}"(?:[^"\\\n]|\\.)*"`),
+	regexp.MustCompile(`['"]?\b(?:long_description|description)\b['"]?\s*[:=]\s*[rbufRBUF]{0,2}'(?:[^'\\\n]|\\.)*'`),
 }
 
 // stripSetupDocStrings removes the doc-metadata string-literal values (see
 // setupDocStringRes) so their prose cannot contribute capability markers.
+// shellToolNetMarkers are network markers that are shell COMMANDS (LOLBins / CLI
+// tools) rather than in-language client calls. They are egress only when actually
+// run by a shell-exec sink; on their own (printed instructions, comments) they
+// are inert.
+var shellToolNetMarkers = map[string]bool{
+	"curl ": true, "wget ": true, "certutil": true, "bitsadmin": true,
+	"finger.exe": true, "msiexec": true,
+}
+
+// hasLibraryNetworkMarker reports whether any IN-LANGUAGE network client marker
+// (urlopen(, requests.get, Net::HTTP, reqwest::, DownloadString, ...) — i.e. a
+// networkMarker that is not a shell tool) is present.
+func hasLibraryNetworkMarker(source string) bool {
+	lower := strings.ToLower(source)
+	for _, m := range networkMarkers {
+		if shellToolNetMarkers[m] {
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
+}
+
+var shellExecSinkRe = regexp.MustCompile(`(?i)os\.system|subprocess|Popen|os\.popen|\bcommands\.getoutput|shell\s*=\s*true|\bexec\s*\(|\beval\s*\(`)
+
+// hasShellExecSink reports whether source contains a way to run a shell command
+// (os.system, subprocess, Popen, exec/eval, shell=True, ...).
+func hasShellExecSink(source string) bool { return shellExecSinkRe.MatchString(source) }
+
+// stripPyInert removes text that cannot execute — Python `#` comments and the
+// module docstring — from setup.py source before capability scanning, so
+// documentation is never mistaken for install-time behavior: a README rendered
+// as __doc__ (long_description=__doc__), a `$ pip install X` line, a `wget ...`
+// bootstrap comment, or RST backticks. It is string-aware — a `#` or keyword
+// INSIDE a string literal (the command in os.system("curl x | sh")) is preserved
+// — so real egress and download cradles still scan. Only the LEADING module
+// docstring (a bare string as the first statement) is dropped; string VALUES
+// (assignments, call args, dict entries) are kept, since those can be behavior.
+func stripPyInert(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+	i, n := 0, len(src)
+	atStmtStart := true
+	docstringDropped := false
+	for i < n {
+		c := src[i]
+		// A string at statement start (optionally r/b/u/f-prefixed) is the module
+		// docstring — inert (stored as __doc__, never executed), so drop it.
+		if atStmtStart && !docstringDropped {
+			if q := pyStringOpen(src, i); q >= 0 {
+				i = scanPyString(src, q)
+				docstringDropped = true
+				atStmtStart = false
+				continue
+			}
+		}
+		switch {
+		case c == '#':
+			for i < n && src[i] != '\n' {
+				i++
+			}
+		case c == '"' || c == '\'':
+			end := scanPyString(src, i)
+			b.WriteString(src[i:end])
+			i = end
+			atStmtStart = false
+		case c == '\n':
+			b.WriteByte(c)
+			i++
+			atStmtStart = true
+		case c == ' ' || c == '\t' || c == '\r':
+			b.WriteByte(c)
+			i++
+		default:
+			b.WriteByte(c)
+			i++
+			atStmtStart = false
+		}
+	}
+	return b.String()
+}
+
+// pyStringOpen returns the index of the opening quote if s at i begins a Python
+// string literal (with up to two r/b/u/f prefix letters), else -1.
+func pyStringOpen(s string, i int) int {
+	j := i
+	for j < i+2 && j < len(s) {
+		c := s[j]
+		if c == 'r' || c == 'R' || c == 'b' || c == 'B' || c == 'u' || c == 'U' || c == 'f' || c == 'F' {
+			j++
+			continue
+		}
+		break
+	}
+	if j < len(s) && (s[j] == '"' || s[j] == '\'') {
+		return j
+	}
+	return -1
+}
+
+// scanPyString returns the index just past the Python string literal that begins
+// at i, handling ' and " single- and triple-quoted forms and backslash escapes.
+func scanPyString(s string, i int) int {
+	n := len(s)
+	q := s[i]
+	if i+2 < n && s[i+1] == q && s[i+2] == q { // triple-quoted
+		i += 3
+		for i < n {
+			if s[i] == '\\' {
+				i += 2
+				continue
+			}
+			if s[i] == q && i+2 < n && s[i+1] == q && s[i+2] == q {
+				return i + 3
+			}
+			if s[i] == q && i+2 >= n { // closing triple at end of input
+				if i+3 <= n && i+1 < n && s[i+1] == q && i+2 < n && s[i+2] == q {
+					return i + 3
+				}
+			}
+			i++
+		}
+		return n
+	}
+	i++ // past the opening quote
+	for i < n {
+		switch s[i] {
+		case '\\':
+			i += 2
+		case q:
+			return i + 1
+		case '\n':
+			return i // unterminated single-line string; stop at the newline
+		default:
+			i++
+		}
+	}
+	return n
+}
+
 func stripSetupDocStrings(source string) string {
 	for _, re := range setupDocStringRes {
 		source = re.ReplaceAllString(source, "long_description=\"\"")
@@ -1780,9 +1922,18 @@ func analyzeSetupPy(source string) []Hook {
 	// The documentation metadata fields (long_description / description) are
 	// stripped first: a README embedded there carries example code and tool
 	// names that are metadata, not egress (beats live-fire VC-002b FP).
-	cleaned := urlRe.ReplaceAllString(stripSetupDocStrings(source), "")
+	cleaned := urlRe.ReplaceAllString(stripPyInert(stripSetupDocStrings(source)), "")
 
 	allCaps, allEvidence := scanCaps(cleaned)
+	// Shell-tool network words (curl/wget/certutil/...) are egress only if the
+	// file can actually run a shell command. In setup.py they routinely appear in
+	// printed instructions ("wget https://.../ez_setup.py") with no exec sink —
+	// inert (pyasn1 VC-002b FP). Drop CapNetwork when its only basis is a
+	// shell-tool word with no network-library CALL and no shell-exec sink present.
+	if containsCap(allCaps, CapNetwork) && !hasLibraryNetworkMarker(cleaned) && !hasShellExecSink(cleaned) {
+		allCaps, allEvidence = dropCap(allCaps, CapNetwork, allEvidence,
+			"curl ", "wget ", "certutil", "bitsadmin", "finger.exe", "msiexec")
+	}
 	allSinks := findSinks(cleaned)
 	// IMDS is almost always reached via a URL (urlopen("http://169.254.169.254/…")),
 	// and the URL strip above removes the host before credential scanning. Recognize

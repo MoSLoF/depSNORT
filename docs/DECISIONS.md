@@ -4109,3 +4109,46 @@ guarding against over-stripping). Mutation-proven: the FP test fails against the
 (`TestSetupPyRealNetworkEgressStillDetected`, README-URL, metadata-URL, comment/error-URL) all unchanged.
 Full suite green (33/0), -race clean, vet/fmt clean. This clears the last beats gate-eligible FP; the
 remaining beats findings (VC-008 known-vuln, VC-004 dormancy, etc.) are genuine.
+
+## D-111 — VC-002b: setup.py inert-text network precision (completes D-110; beats live-fire)
+
+Re-scanning beats after D-110 showed the "setup.py reaches network" FP persisting on backoff / deprecated /
+pyasn1 — three inert-text shapes the doc-field strip did not fully cover, including a real bug in D-110's own
+regex:
+
+- **backoff 2.2.1**: README in a poetry `long_description` string literal. D-110's single-line strip used
+  `'[^'\n]*'`, which closed early on the first ESCAPED quote (`Reitz\'s`), leaving the rest of the README
+  (with `requests.get`, `aiohttp`) to trip the scan. Fixed by matching a proper literal:
+  `'(?:[^'\\\n]|\\.)*'` (and the `"` form), so `\'` no longer terminates it.
+- **deprecated 1.2.14**: README IS the module docstring (`u"""…"""`), used via `long_description=__doc__`.
+  A leading `u`-prefixed docstring was not recognized as inert.
+- **pyasn1 0.4.8**: `wget https://…/ez_setup.py` inside a `print()` error message — a shell-tool word with
+  no way to run it, and setup.py `#` comments were never stripped at all.
+
+Fix (three parts, all in the setup.py scan path):
+
+1. **Escaped-quote-aware** single-line doc-string strip (above).
+2. **`stripPyInert`** — a string-aware single pass that removes `#` comments and the leading module docstring
+   (with `r/b/u/f` prefixes) before scanning. A `#` or keyword INSIDE a string literal (the command in
+   `os.system("curl x | sh")`) is PRESERVED — only provably non-executing text (a docstring stored as
+   `__doc__`, a comment) is removed. String VALUES of assignments/args/dict entries are kept, since those can
+   be behavior.
+3. **Shell-sink gate** — a shell-tool network word (`curl `/`wget `/`certutil`/`bitsadmin`/`finger.exe`/
+   `msiexec`) counts as egress only when a network-LIBRARY call (`urlopen(`, `requests.get`, `Net::HTTP`, …)
+   OR a shell-exec sink (`os.system`, `subprocess`, `Popen`, `os.popen`, `exec(`/`eval(`, `shell=True`) is
+   present. A bare `wget URL` with no way to run it is inert. (The overbroad `.run(`/`.call(` sink patterns
+   were deliberately NOT used — they match `unittest`'s `.run(suite)`; real subprocess use always contains
+   `subprocess`/`Popen`.)
+
+Blind-spot guards, all proven: a network LIBRARY call is never suppressed; a shell-tool word is suppressed
+only when nothing in the file can run it; command strings passed to `os.system`/`subprocess` are preserved by
+the string-aware strip.
+
+Proof: `TestSetupPyInertNetwork` — 4 inert shapes silent (README literal with escaped quotes; README as
+`__doc__`; `wget` in a `print()`; payload word in a `#` comment), 5 genuine-egress shapes still fire
+(module-level `urlopen`; `requests.get`; `os.system('curl … | sh')`; `os.system('wget …')`;
+`subprocess.run(shell=True)`). Mutation-proven: disabling `stripPyInert` + the shell-sink gate makes the
+comment / docstring / wget-in-print cases wrongly fire. D-110's setup.py tests all still pass. Full suite
+green (33/0), -race clean, vet/fmt clean. beats is now clean of gate-eligible findings (VC-002b setup.py-
+network 3 → 0; verdict 0/4/38 → 0/0/38; VC-008/VC-004 advisories unchanged). This also closes the long-open
+Python-comment-stripping thread for setup.py.
