@@ -337,6 +337,30 @@ func TestPDFRiskTableEPSSLegendOnlyWhenScored(t *testing.T) {
 	}
 }
 
+// A data source's coverage Note (e.g. the EPSS enrichment summary) is rendered
+// in the DATA SOURCE COVERAGE section, not dropped.
+func TestPDFRendersDataSourceNote(t *testing.T) {
+	g, res := sampleGraph()
+	info := RunInfo{DataSources: []DataSourceCoverage{{
+		Name:  "epss",
+		Stats: datasource.Stats{Queried: 10, FromNet: 8, Gaps: 2},
+		Note:  "scored 8 of 10 CVE(s); enriched 6 vulnerable coordinate(s); resolved 4 advisory alias(es) to CVE via OSV /v1/query",
+	}}}
+	var b bytes.Buffer
+	if err := (PDF{}).Emit(&b, g, res, info); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "DATA SOURCE COVERAGE") {
+		t.Fatal("no data source coverage section")
+	}
+	for _, want := range []string{"scored 8 of 10 CVE", "enriched 6 vulnerable", "advisory alias"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("data source note fragment missing: %q", want)
+		}
+	}
+}
+
 // datasourceStatsWithGaps builds a Stats value carrying n gaps.
 func datasourceStatsWithGaps(n int) datasource.Stats {
 	return datasource.Stats{Queried: 10, FromNet: 10 - n, Gaps: n}

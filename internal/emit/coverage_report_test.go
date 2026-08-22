@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"ihbv.io/depsnort/internal/datasource"
 	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/verdict"
@@ -124,5 +125,46 @@ func TestFindingJSONCarriesScore(t *testing.T) {
 	}
 	if got["check_id"] != "VC-005" {
 		t.Errorf("custom marshaller dropped fields: %s", raw)
+	}
+}
+
+// The EPSS enrichment summary (and any data-source Note) must reach the JSON
+// coverage output, so a consumer that never reads the PDF still sees it.
+func TestJSONCarriesDataSourceNote(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "pkg:npm/x@1.0.0", Kind: graph.KindPackage, Name: "x", Version: "1.0.0"})
+	g.MarkRoot("pkg:npm/x@1.0.0")
+	res := verdict.Evaluate(g, nil, verdict.Policy{})
+	info := RunInfo{DataSources: []DataSourceCoverage{{
+		Name:  "epss",
+		Stats: datasource.Stats{Queried: 10, FromNet: 8, Gaps: 2},
+		Note:  "scored 8 of 10 CVE(s); enriched 6 vulnerable coordinate(s); resolved 4 advisory alias(es) to CVE via OSV /v1/query",
+	}}}
+	var b bytes.Buffer
+	if err := (JSON{}).Emit(&b, g, res, info); err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		DataSources []struct {
+			Name  string `json:"name"`
+			Note  string `json:"note"`
+			Stats struct {
+				Queried int `json:"queried"`
+				Gaps    int `json:"gaps"`
+			} `json:"stats"`
+		} `json:"data_sources"`
+	}
+	if err := json.Unmarshal(b.Bytes(), &parsed); err != nil {
+		t.Fatalf("Unmarshal: %v\n%s", err, b.String())
+	}
+	if len(parsed.DataSources) != 1 {
+		t.Fatalf("want 1 data source, got %d", len(parsed.DataSources))
+	}
+	ds := parsed.DataSources[0]
+	if ds.Name != "epss" || !strings.Contains(ds.Note, "enriched 6 vulnerable") {
+		t.Errorf("EPSS note missing from JSON coverage: %+v", ds)
+	}
+	if ds.Stats.Queried != 10 || ds.Stats.Gaps != 2 {
+		t.Errorf("EPSS stats missing from JSON coverage: %+v", ds.Stats)
 	}
 }
