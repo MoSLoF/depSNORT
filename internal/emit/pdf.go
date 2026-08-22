@@ -277,6 +277,12 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 				row += fmt.Sprintf(", not-published %d", s.NotFound)
 			}
 			d.text(row, fontMono, 8.5, colInk, 0, 11.5)
+			// A source's non-error coverage note — e.g. the EPSS enrichment summary
+			// (CVEs scored, coordinates enriched, advisory aliases resolved) — so the
+			// per-source context lands in the report, not only on stderr.
+			if ds.Note != "" {
+				d.wrapped(ds.Note, fontRegular, 8.5, colMuted, 10, 11)
+			}
 			if s.Gaps > 0 {
 				d.wrapped(fmt.Sprintf(
 					"Coverage is incomplete: %d coordinate(s) returned no data. Findings below are a lower bound.", s.Gaps),

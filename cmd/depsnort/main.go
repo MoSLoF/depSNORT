@@ -1124,13 +1124,17 @@ func cmdScan(args []string) int {
 				epssClient := epss.New(datasource.NewCache(*cacheDir, 24*time.Hour), *offline)
 				scores, eErr := epssClient.Scores(context.Background(), cves)
 				ctx.EPSS = scores
-				epssCov := emit.DataSourceCoverage{Name: epssClient.Name(), Stats: epssClient.Stats}
+				epssCov := emit.DataSourceCoverage{
+					Name:  epssClient.Name(),
+					Stats: epssClient.Stats,
+					Note:  epss.EnrichmentSummary(len(coords), len(aliasByID), epssClient.Stats, aErr != nil),
+				}
 				if eErr != nil {
 					epssCov.Error = eErr.Error()
 					fmt.Fprintf(os.Stderr, "depsnort: warning: EPSS coverage degraded: %v\n", eErr)
 				}
 				info.DataSources = append(info.DataSources, epssCov)
-				fmt.Fprintf(os.Stderr, "depsnort: EPSS scored %d CVE(s) across %d vulnerable coordinate(s)\n", len(scores), len(coords))
+				fmt.Fprintf(os.Stderr, "depsnort: EPSS %s\n", epssCov.Note)
 			}
 		}
 	}

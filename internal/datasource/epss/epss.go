@@ -213,6 +213,24 @@ func normalizeCVEs(in []string) []string {
 	return out
 }
 
+// EnrichmentSummary formats a one-line coverage note for the EPSS stage, so the
+// enrichment context — how many CVEs were scored, how many vulnerable
+// coordinates were enriched, and how many advisories were resolved to a CVE (via
+// OSV /v1/query, since querybatch returns none) — lands in the report's coverage
+// output rather than only in ephemeral stderr. scored is derived from the Stats
+// (cache + network), and aliasDegraded appends a caveat when the advisory->CVE
+// resolution step itself was partial.
+func EnrichmentSummary(coords, aliasesResolved int, st datasource.Stats, aliasDegraded bool) string {
+	scored := st.FromCache + st.FromNet
+	s := fmt.Sprintf(
+		"scored %d of %d CVE(s) (%d without a score); enriched %d vulnerable coordinate(s); resolved %d advisory alias(es) to CVE via OSV /v1/query",
+		scored, st.Queried, st.Gaps, coords, aliasesResolved)
+	if aliasDegraded {
+		s += "; advisory->CVE resolution was partial, so some scores may be missing"
+	}
+	return s
+}
+
 func chunkStrings(in []string, size int) [][]string {
 	if size <= 0 {
 		size = 1

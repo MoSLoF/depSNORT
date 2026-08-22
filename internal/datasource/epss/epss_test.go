@@ -186,3 +186,25 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+func TestEnrichmentSummary(t *testing.T) {
+	st := datasource.Stats{Queried: 10, FromCache: 3, FromNet: 5, Gaps: 2}
+	got := EnrichmentSummary(7, 4, st, false)
+	for _, want := range []string{
+		"scored 8 of 10 CVE(s)", // FromCache + FromNet
+		"2 without a score",
+		"enriched 7 vulnerable coordinate(s)",
+		"resolved 4 advisory alias(es) to CVE via OSV /v1/query",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary missing %q\n got: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "partial") {
+		t.Errorf("no degradation caveat expected: %s", got)
+	}
+	// The alias-degraded caveat appears only when the resolution was partial.
+	if d := EnrichmentSummary(7, 4, st, true); !strings.Contains(d, "advisory->CVE resolution was partial") {
+		t.Errorf("degraded summary missing caveat: %s", d)
+	}
+}

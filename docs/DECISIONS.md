@@ -4300,3 +4300,28 @@ version passed against the whole document and failed to catch either mutation, b
 the D-115 findings-section EPSS line repeat the same names and score ahead of the table. Mutation-proven after
 scoping: forcing the cell to a dash fails the value test, dropping the tiebreaker fails the ordering test;
 restore green. Full suite green (34 packages), -race clean, go vet silent, gofmt no diffs.
+
+## D-117 — EPSS enrichment, Increment 6: enrichment stats in coverage output
+
+The EPSS stage already emitted a DataSourceCoverage entry carrying the generic datasource.Stats (queried /
+cache / network / gaps), but its EPSS-specific context — how many vulnerable coordinates were enriched and how
+many advisories were resolved to a CVE via OSV /v1/query — went only to ephemeral stderr, and the OSV
+alias-resolution step contributed no coverage at all. This surfaces that context in the report.
+
+The EPSS DataSourceCoverage now carries a Note built by a new testable formatter, epss.EnrichmentSummary:
+"scored N of M CVE(s) (K without a score); enriched V vulnerable coordinate(s); resolved A advisory alias(es)
+to CVE via OSV /v1/query", with a "resolution was partial" caveat appended when the advisory->CVE step (from
+osv.CVEAliases) itself degraded. The alias-resolution count is derived from the map CVEAliases already returns
+(len of advisory->CVE map), so no signature change was needed. The same string replaces the ad-hoc stderr line,
+so stderr and the report now say the same thing.
+
+The DataSourceCoverage.Note field existed (used by no emitter) and already serialized into the JSON report; it
+is now also RENDERED in the PDF's DATA SOURCE COVERAGE section, a small addition that benefits any source that
+sets a note, not only EPSS. This keeps to the D-24 discipline — what the scan did and did not cover is stated in
+the artifact, not left on a terminal that a CI pipeline discards.
+
+Proof: EnrichmentSummary unit test (scored = cache+net, gaps, coordinates, aliases, and the degraded caveat
+only when partial); a PDF test that a source Note renders in the coverage section; a JSON test that
+data_sources[].note and .stats reach the report. Mutation-proven: not rendering the Note fails the PDF test,
+renaming a summary label fails the formatter test; restore green. Full suite green (34 packages), -race clean,
+go vet silent, gofmt no diffs.
