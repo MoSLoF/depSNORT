@@ -3936,3 +3936,34 @@ regression) still pass. meshclaw result: load-time hooks 11 → 0 (all were fals
 while every real signal is preserved (the 4 VC-002a lockfile hook facts and the 2 genuine prepublish
 `npm install -g` network hooks on smart-buffer / socks). Full suite green (33/0), -race clean, vet/fmt
 clean. D-04 / D-10 preserved.
+
+## D-105 — OPU-19 (follow-up): VC-002g persistence — Startup-folder precision
+
+An OpenShell live-fire (Rust + Python) exposed a false-positive in VC-002g persistence (D-28/OPU-19). The
+`persistenceMarkers` set carried the bare substring `"startup"` — intended for the Windows Startup folder —
+which `IsPersistenceMarker` treats as boot/login persistence (the HIGH gate). depSNORT fetched sdists and
+statically parsed setup.py / .pth (D-04: parse, never execute) and raised 3 VC-002g HIGH findings, none of
+which touches an OS autostart location:
+
+- coverage 7.13.2 `.pth`: `coverage.process_startup(slug="pth")` — the substring matched the FUNCTION NAME
+  `process_startup`, not a Startup folder.
+- setuptools 80.10.2 setup.py: the only `"startup"` occurrences are in a CODE COMMENT ("…implicit behavior
+  on startup…") — matched because Python `#` comments are not stripped (`stripCodeComments` is C-family
+  only).
+
+Fix (scoped to the one marker): remove the bare `"startup"` substring from `persistenceMarkers`; add
+`startupFolderRe = (?i)shell:(?:common )?startup|programs[\\/]+startup`, which emits a precise
+`startup-folder` marker (CapFilesystem) matching only a real autostart location; `IsPersistenceMarker`
+recognizes `startup-folder`. Every other persistence marker (cron, systemd, launchd, shell profiles,
+`$PROFILE`, `.git/hooks`) is untouched, and a genuine Startup-folder write still raises VC-002g.
+
+Proof: `persistence_fp_test.go` — `process_startup`, an "on startup" comment, and the word "startup" raise
+NO persistence marker; `shell:startup`, `shell:common startup`, and a `...\Programs\Startup` path (back- or
+forward-slash) DO. The OPU-19 probe/split test is updated (`startup-folder` is the persistence marker; bare
+`startup` and `process_startup` are explicitly benign). Mutation-proven: re-adding the bare `"startup"`
+substring fails the benign cases. OpenShell result: VC-002g HIGH 3 → 0, verdict 0/4/59 → 0/1/59 (the
+remaining gate-eligible is maturin's setup.py network VC-002b, a plausible real signal); all other findings
+(VC-008 ×33, VC-004 ×17, …) unchanged. Full suite green (33/0), -race clean, vet/fmt clean.
+
+Noted, NOT bundled (follow-up): `stripCodeComments` strips only C-family comments, so Python `#` prose can
+still match other substring markers — worth a separate pass so scanner markers can't match Python comments.
