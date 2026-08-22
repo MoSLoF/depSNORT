@@ -3872,3 +3872,29 @@ This exhausts D-97's in-adapter reader list (uv / poetry / pdm / pnpm / pylock /
 Only the four no-adapter formats remain — flake.lock / conan.lock / deno.lock / pom.xml — each a whole new
 ecosystem adapter (Detect / Resolve / purl type / coverage plumbing / registration), not a
 reader-into-existing-adapter; they stay disclosed as coverage gaps until built.
+
+## D-103 — OPU-29 (Increment 5): uv.lock rootless-lock fix (synthesized root)
+
+A live-fire scan of MoSLoF/open-webui (npm frontend + pypi backend) exposed a correctness bug in the
+OPU-29 uv reader: it treated a uv.lock with NO editable/virtual self-entry as a fatal error —
+`pypi: uv.lock declares no editable or virtual root project`. open-webui's lock is exactly that shape:
+`version = 1, revision = 3`, every package `source = { registry }`, no self-entry — a valid uv form for an
+APPLICATION (or a `uv pip compile` export), structurally identical to poetry.lock. The inter-package
+`dependencies` edges were all present; only the project's own root entry was absent. Result: that project
+failed to resolve on its richest input and fell back to `requirements.txt` (flat + expansion). Coverage was
+disclosed as incomplete (never a false-clean), but the real uv graph was lost.
+
+Fix: when `selectUvRoot` returns nil, synthesize a root (`rootNode`) and, after the inter-package edges are
+built, attach the in-degree-zero packages to it as the effective direct set — the EXACT pattern
+poetry.lock / pdm.lock / pylock.toml already use, disclosed via `pypi.direct_attribution = in-degree-zero`.
+Because the lock carries real edges, the result is a real transitive tree with real depths — NO D-24 flat
+penalty (unlike a manifest). The editable/virtual-root path (the common case) is untouched, so no
+regression; the existing `attachUnrooted`/`assignDepths` passes still run for both paths.
+
+Proof: `TestParseUvLockRootless` (rootless registry-only lock → synthesized in-degree-zero root, aiohttp
+direct, aiohappyeyeballs/multidict transitive at real depth ≥2, no flat-resolution); mutation-proven
+(reverting to the fatal error fails it with the exact live-fire message). `TestParseUvLock` (editable root)
+unchanged. Live-fire recovery: open-webui's isolated uv.lock went from TOTAL FAILURE to 493 nodes / 878
+edges (depths 0–4); the full re-scan resolved 3/3 projects (was 1 failed), recovering +129 pypi package
+nodes and +30 previously-unsurfaced findings. Full suite green (33/0), -race clean, vet/fmt clean. D-10 and
+D-24 preserved.
