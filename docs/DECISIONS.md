@@ -3992,3 +3992,24 @@ Note (not part of this fix): the Kibana run's 3 BLOCK verdicts were accurate —
 matches on `kbn-check-prod-native-modules-cli` TEST FIXTURES whose placeholder names (package-x,
 native-module2) now collide with real squatted npm packages: a genuine dependency-confusion exposure in
 test infra, correctly flagged and separate from this parser fix.
+
+## D-107 — npm-registry packument "time": tolerant parse (Kibana follow-up to D-106)
+
+With the D-106 scripts fix merged, re-scanning Kibana surfaced the next packument failure, the same abort in
+a sibling field: `parsing packument for package-a: json: cannot unmarshal object into ... packument.time of
+type string`. The `time` field (a version→timestamp map) was `map[string]string`, and a stray object value
+aborts the whole packument — identical failure mode to scripts, different field.
+
+Fix: generalize the tolerant type from D-106 (`scriptMap` → `tolerantStrMap`) and apply it to BOTH brittle
+packument string-maps — `packument.Time` and `packumentVersion.Scripts`. One tolerant type now guards both;
+the underlying type is still `map[string]string`, so all consumers (the `range p.Time` timestamp loop,
+`installHooksOf`) are unchanged. A single malformed registry field can no longer sink a package's entire
+registry coverage.
+
+Proof: `TestPackumentTolerantTime` (object-valued `time` entry dropped, string timestamps and versions
+preserved) alongside the retained `TestPackumentTolerantScripts`. Full suite green (33/0), -race clean,
+vet/fmt clean. Kibana registry axis is now fully covered (both joi and package-a packuments parse); the only
+remaining coverage note is the inherent transitive-expansion presumption ("expand"), disclosed as a lower
+bound. Definitive Kibana result: 5,618 nodes / 15,986 edges across 12 sub-projects; 3 block (accurate OSV
+MAL-* matches on test-fixture names colliding with real squatted npm packages — a dependency-confusion
+exposure in test infra) / 6 gate-eligible / 147 advisory.

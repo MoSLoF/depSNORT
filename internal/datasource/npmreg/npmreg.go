@@ -77,9 +77,9 @@ func (c *Client) GetStats() datasource.Stats { return c.Stats }
 // packument is the subset of the registry document we keep. The full document
 // is large; everything not named here is discarded at decode time.
 type packument struct {
-	Name        string            `json:"name"`
-	Time        map[string]string `json:"time"`
-	Maintainers []maintainer      `json:"maintainers"`
+	Name        string         `json:"name"`
+	Time        tolerantStrMap `json:"time"`
+	Maintainers []maintainer   `json:"maintainers"`
 	// Versions is the per-version manifest map. Two facts are taken from it and
 	// everything else is discarded at decode time:
 	//
@@ -97,31 +97,34 @@ type packument struct {
 
 type packumentVersion struct {
 	NpmUser              maintainer        `json:"_npmUser"`
-	Scripts              scriptMap         `json:"scripts"`
+	Scripts              tolerantStrMap    `json:"scripts"`
 	Dependencies         map[string]string `json:"dependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
 }
 
-// scriptMap is a package.json "scripts" map that tolerates the non-string values
-// some legacy packuments carry. npm requires script bodies to be strings, but the
-// registry preserves historical junk: joi 0.1.x, for example, stored the
-// blanket / travis-cov CONFIG OBJECTS under "scripts". A strict map[string]string
-// aborts the ENTIRE packument unmarshal on one such entry — silently degrading
-// registry coverage for every version of that package. This keeps the
-// string-valued entries (the real script bodies installHooksOf cares about) and
-// drops the rest.
-type scriptMap map[string]string
+// tolerantStrMap is a JSON string→string map that tolerates the non-string
+// values some legacy packuments carry, keeping the string entries and dropping
+// the rest. npm requires these fields to be string-valued, but the registry
+// preserves historical junk, and a strict map[string]string aborts the ENTIRE
+// packument unmarshal on one bad entry — silently degrading registry coverage
+// for every version of that package. Two packument fields are affected:
+//
+//   - scripts: joi 0.1.x stored the blanket / travis-cov CONFIG OBJECTS here
+//     (the string bodies installHooksOf needs still survive).
+//   - time: a version→timestamp map where a stray object value (seen on
+//     package-a in the Kibana live-fire) otherwise sinks the whole packument.
+type tolerantStrMap map[string]string
 
-func (s *scriptMap) UnmarshalJSON(b []byte) error {
+func (s *tolerantStrMap) UnmarshalJSON(b []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
-	m := make(scriptMap, len(raw))
+	m := make(tolerantStrMap, len(raw))
 	for k, v := range raw {
 		var str string
 		if json.Unmarshal(v, &str) == nil {
-			m[k] = str // a real script body; non-string config values are skipped
+			m[k] = str // a real string value; non-string junk is skipped
 		}
 	}
 	*s = m
