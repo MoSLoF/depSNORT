@@ -1,0 +1,6 @@
+# iHBV known-authentic file manifest (sha256sum format).
+# TRUST NOTE: a manifest inside the repo it verifies can be tampered with the
+# files; keep an out-of-band copy and run a trusted repoguard against clones.
+d224bb06ae162b0af57ec9a7f4ee54ff104468f0d46396c4c35f64f4e05dcd05  tools/ihbv-repoguard.py
+793ca65e877cdc353e88f9329112683cf5fc731d84e85d6b12ab73d55d8a822c  tools/depsnort_org.py
+44542f7869c70f790933c123212ee6f56484e9859394e2a39e005ccb6ec4ddcf  tools/depsnort_priority.py

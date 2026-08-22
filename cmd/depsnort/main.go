@@ -138,6 +138,10 @@ usage:
 scan flags:
   -format string           output format: json | dot | cypher | sarif | pdf (default "json")
   -fail-on-eligible        let gate-eligible warnings fail the run (exit 2)
+  -real-roots string       comma-separated substrings naming the roots you
+                           actually build/ship; findings no designated root can
+                           reach are labeled CONTAINED with the reachability
+                           proof attached — never hidden, never re-gated
   -fail-on-incomplete      let degraded resolution coverage fail the run (exit 3);
                            coverage is always REPORTED, this only makes it gate
   -offline                 use only the local OSV cache; never touch the network
@@ -851,6 +855,7 @@ func cmdScan(args []string) int {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	format := fs.String("format", "json", "output format: "+strings.Join(emit.Formats(), " | "))
 	failEligible := fs.Bool("fail-on-eligible", false, "gate-eligible warnings fail the run (exit 2)")
+	realRoots := fs.String("real-roots", "", "comma-separated substrings naming the roots you actually build/ship; findings no designated root can reach are labeled contained (with proof) — never hidden, never re-gated")
 	failIncomplete := fs.Bool("fail-on-incomplete", false, "degraded resolution coverage fails the run (exit 3)")
 	offline := fs.Bool("offline", false, "use only the local OSV cache; never touch the network")
 	noOSV := fs.Bool("no-osv", false, "skip the OSV data-source layer entirely")
@@ -1458,6 +1463,7 @@ func cmdScan(args []string) int {
 	res := verdict.EvaluateWithCoverage(g, findings, cov, verdict.Policy{
 		FailOnEligible:   *failEligible,
 		FailOnIncomplete: *failIncomplete,
+		RealRoots:        splitCSV(*realRoots),
 	})
 	// Incomplete coverage is announced on stderr even when it does not gate: a
 	// pipeline that only reads the exit code must still be told the tool could

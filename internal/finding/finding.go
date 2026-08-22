@@ -111,6 +111,20 @@ type Finding struct {
 	// evidence prose) so a JSON/SARIF consumer can rank and threshold on it
 	// without parsing text.
 	EPSS *ExploitScore `json:"epss,omitempty"`
+	// ReachableRoots lists EVERY scan root from which this finding's node is
+	// reachable (over any edge type), sorted. Where DepPath shows one shortest
+	// chain, this is the complete attribution fact — the substrate of a
+	// containment proof: a finding whose reachable roots are all test fixtures
+	// can be shown, with evidence, to be unable to enter any real build.
+	// Populated by the verdict for every finding.
+	ReachableRoots []string `json:"reachable_from_roots,omitempty"`
+	// Contained is set only when the run designated real roots (-real-roots)
+	// and NO designated root reaches this node: the finding is proven confined
+	// to undesignated (e.g. fixture/test) subtrees. This is an ADJUDICATION
+	// LABEL, never a suppression — the finding stays fully visible, keeps its
+	// severity and gate class, and still gates exactly as before. The proof
+	// (ReachableRoots) travels with it.
+	Contained bool `json:"contained,omitempty"`
 }
 
 // ExploitScore is a finding's peak exploit-prediction summary: the single
