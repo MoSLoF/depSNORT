@@ -677,6 +677,74 @@ func dedupeSinks(in []Sink) []Sink {
 // entry.
 var loadTimeRefRe = regexp.MustCompile(`['"](\.\.?/[^'"\n]+)['"]`)
 
+// jsLoadTimeExecRe matches a GENUINE JavaScript/TypeScript execution capability
+// reachable at import: a process-spawning module, or dynamic code evaluation. It
+// deliberately omits the shell / multi-language substring markers scanCaps
+// carries — a template-literal backtick, a regex `.exec(`, a `system(` substring,
+// a lone `spawn(` — which fire on ordinary bundled library code and fabricated
+// load-time hooks on buffer / ms / lru-cache / mqtt / @meshtastic/core in the
+// meshclaw live-fire. A real loader is still matched, including the RedC2 shape
+// (`node:child_process` + a bundled binary) that motivated load-time analysis.
+var jsLoadTimeExecRe = regexp.MustCompile(`(?i)child_process|\beval\s*\(|new\s+Function\s*\(|\bvm\.runin|node:vm|require\(\s*['"]vm['"]`)
+
+// jsLoadTimeNetworkRe matches genuine JS network reach: a bare global fetch(
+// (NOT a `.fetch(` method call such as lru-cache's cache.fetch()), an
+// http/https/net/tls/dgram/http2 module, a WebSocket / XMLHttpRequest, or a known
+// HTTP client. URL literals are handled separately by the caller.
+var jsLoadTimeNetworkRe = regexp.MustCompile(`(?i)(?:^|[^.\w])fetch\s*\(|node:(?:http|https|net|tls|dgram|http2)|require\(\s*['"](?:https?|net|tls|dgram|http2|node-fetch|axios|got|undici)['"]|xmlhttprequest|new\s+websocket`)
+
+// loadTimeExecJS reports whether an entry module has a real JS execution surface:
+// a process-spawn / dynamic-eval capability, or one of the precise STRUCTURAL
+// exec signals scanCaps already resolves (a package runner, a wildcard-obscured
+// exe, the PowerShell call operator, a download cradle). The ambiguous substring
+// exec markers are ignored here — that is the whole point of the JS-context gate.
+func loadTimeExecJS(clean string, ev []string) bool {
+	if jsLoadTimeExecRe.MatchString(clean) {
+		return true
+	}
+	for _, e := range ev {
+		// Only structural signals that are genuinely suspicious IN JS count here.
+		// A PowerShell call operator (`ps-call-operator:"&"`) matches a JS bitwise
+		// `&` / minified operator (mqtt's bundle: `&":"`, `&"env"`), and a package
+		// runner needs child_process to actually run (already covered above) — both
+		// are shell/PS constructs that FP on JS, so they are excluded.
+		if strings.HasPrefix(e, "wildcard-exe:") || strings.HasPrefix(e, "download-cradle:") {
+			return true
+		}
+	}
+	return false
+}
+
+// loadTimeNetworkJS reports whether an entry module has a real JS network reach.
+func loadTimeNetworkJS(clean string) bool {
+	return jsLoadTimeNetworkRe.MatchString(clean) || urlRe.MatchString(clean)
+}
+
+// dropCap returns caps without c, and evidence without the given false-positive
+// markers (used to strip a method-fetch network signal from a load-time hook).
+func dropCap(caps []Capability, c Capability, ev []string, fpMarkers ...string) ([]Capability, []string) {
+	out := caps[:0:0]
+	for _, x := range caps {
+		if x != c {
+			out = append(out, x)
+		}
+	}
+	if len(fpMarkers) == 0 {
+		return out, ev
+	}
+	drop := map[string]bool{}
+	for _, m := range fpMarkers {
+		drop[m] = true
+	}
+	kept := ev[:0:0]
+	for _, e := range ev {
+		if !drop[e] {
+			kept = append(kept, e)
+		}
+	}
+	return out, kept
+}
+
 // AnalyzeLoadTime builds the install surface from a package's ENTRY MODULE — the
 // file a require()/import loads. Analyze() is seeded by package.json lifecycle
 // scripts; a package with NO such script can still run a payload the moment it
@@ -699,10 +767,21 @@ func AnalyzeLoadTime(entryRel, entrySource string, read FileReader) Surface {
 		return s
 	}
 	caps, ev := scanCaps(clean)
-	// A pure data/helper entry module is not a load-time execution surface; the
-	// signal is code that reaches an EXEC capability the instant it is imported.
-	if !containsCap(caps, CapExec) {
+	// The load-time context is JS/TS library code, where scanCaps' shell /
+	// multi-language exec markers over-fire (a template literal, a regex
+	// `.exec(`, a `.fetch(` method, a `system(` substring). Gate on a JS-precise
+	// execution signal so those do not fabricate a load-time hook — the
+	// warning-tax false-positive class the meshclaw live-fire surfaced — while a
+	// genuine loader (child_process / eval / Function / vm, or a package runner)
+	// still passes.
+	if !loadTimeExecJS(clean, ev) {
 		return s
+	}
+	// A method call named fetch (e.g. lru-cache's cache.fetch()) is not network
+	// reach; drop the capability when no real JS network signal is present so a
+	// legitimate loader is not mislabeled as reaching the network at import.
+	if containsCap(caps, CapNetwork) && !loadTimeNetworkJS(clean) {
+		caps, ev = dropCap(caps, CapNetwork, ev, "fetch(")
 	}
 	h := Hook{
 		Name:     "module-load:" + entryRel,

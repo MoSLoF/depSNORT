@@ -3898,3 +3898,41 @@ unchanged. Live-fire recovery: open-webui's isolated uv.lock went from TOTAL FAI
 edges (depths 0–4); the full re-scan resolved 3/3 projects (was 1 failed), recovering +129 pypi package
 nodes and +30 previously-unsurfaced findings. Full suite green (33/0), -race clean, vet/fmt clean. D-10 and
 D-24 preserved.
+
+## D-104 — OPU-31 (follow-up): load-time marker precision (JS-context exec/network gate)
+
+A meshclaw live-fire (dependency tree materialized via `npm install --ignore-scripts` — files on disk, no
+lifecycle scripts run) exposed a false-positive class in the OPU-31 load-time analysis (D-99). `scanCaps`
+is a substring scanner over shell / Ruby / PHP / PowerShell markers; `AnalyzeLoadTime` reused it directly,
+and applied to ordinary bundled JS entry modules it mis-read library code as an execution surface. Because
+the load-time hook gates on CapExec, each false EXEC fabricated a `module-load:` hook and dragged its
+network/obfuscation facts along — escalating benign packages to a HIGH VC-002e. Observed: `ms` (a
+`RegExp.exec()` read as exec), `lru-cache` (its own `.fetch()` method read as network), `buffer` /
+`mqtt` / `@meshtastic/core` (`String.fromCharCode` + a backtick template literal + a JS bitwise `&` matched
+as the PowerShell call operator → obfusc+exec HIGH). 11 load-time hooks, most false.
+
+Fix (load-time gate ONLY — install-script/lifecycle analysis, which legitimately reads PowerShell/Ruby/npx,
+is untouched, as is VC-002j): re-decide the load-time execution surface with JS-precise signals instead of
+the shell markers.
+
+- `jsLoadTimeExecRe` — a real JS exec reachable at import: `child_process`, `eval(`, `new Function(`,
+  `vm.runIn` / `node:vm` / `require('vm')`. It deliberately OMITS the substring markers that FP on JS: a
+  backtick template literal, a regex `.exec(`, a `system(` substring, a lone `spawn(`.
+- Structural evidence markers are filtered to those meaningful in JS (`wildcard-exe:`, `download-cradle:`);
+  a PowerShell call operator (`ps-call-operator:`, matching a JS bitwise `&`) and a package runner
+  (`pkg-runner:`, a shell construct needing child_process to run — already covered) are excluded.
+- `jsLoadTimeNetworkRe` — a bare global `fetch(` (NOT a `.fetch(` method call such as lru-cache's
+  `cache.fetch()`), an http/https/net/tls/dgram/http2 module, WebSocket/XMLHttpRequest, or a known HTTP
+  client; URL literals still count. When a load-time hook carries CapNetwork but no real JS network signal,
+  the capability (and its `fetch(` marker) is dropped via `dropCap`.
+
+The RedC2 path is preserved: `node:child_process` + a bundled native binary still gates true → VC-002j.
+
+Proof: `loadtime_fp_test.go` — benign JS (regex `.exec`, template literal, method `.fetch`,
+`String.fromCharCode`, bitwise `&`) yields NO hook; real exec (`child_process` / `eval` / `new Function`)
+still fires with CapExec; a `.fetch()` method is not network while a bare `fetch(url)` is. All original
+OPU-31 load-time tests (incl. the bundled-native-binary RedC2 shape and the esbuild `fromCharCode`
+regression) still pass. meshclaw result: load-time hooks 11 → 0 (all were false), verdict 0/14/2 → 0/6/0,
+while every real signal is preserved (the 4 VC-002a lockfile hook facts and the 2 genuine prepublish
+`npm install -g` network hooks on smart-buffer / socks). Full suite green (33/0), -race clean, vet/fmt
+clean. D-04 / D-10 preserved.
