@@ -4212,3 +4212,37 @@ no-EPSS run is unchanged) and two `osv.CVEAliases` tests (resolve + CVE-only fil
 call; offline cold cache is empty-with-no-error). Mutation-proven: reversing the rank comparator and
 corrupting the annotation format each fail the VC-008 test; restore green. Full suite green (34 packages),
 -race clean on check/datasource/cmd, go vet silent, gofmt no diffs. No live network in CI.
+
+## D-114 — EPSS enrichment, Increment 3: report output + gating posture
+
+Completes the EPSS arc. Two additions, both building on the D-112 client and D-113 wiring.
+
+Report output — the peak exploit-prediction score is now STRUCTURED data, not only prose. A new
+dependency-free `finding.ExploitScore{Peak, Percentile, CVE}` and a `Finding.EPSS *ExploitScore` field carry
+the peak CVE across a finding's advisories; VC-008 populates it alongside the existing evidence note, so the
+JSON report (via the Finding MarshalJSON alias) and the SARIF result properties (`epss`, `epssPercentile`,
+`epssCVE`) expose exploit probability as a field a dashboard can rank or threshold on without parsing text.
+`ExploitScore` lives in the `finding` package rather than importing `datasource/epss`, keeping `finding` at the
+bottom of the import graph (the data source produces per-CVE scores; a check distills them to a per-finding
+peak).
+
+Gating posture — a new `-epss-gate <threshold>` (0..1) escalates a VC-008 finding from advisory to
+gate-eligible when its peak EPSS is at or above the threshold (inclusive `>=`). This is the payoff of the whole
+arc: CVE noise stays advisory by default (VC-008's DefaultGate is unchanged), but a team can opt into failing
+the build — via the existing `-fail-on-eligible` — on ONLY the handful of vulnerabilities that are actually
+being exploited in the wild. `-epss-gate` implies `-epss` (a threshold is meaningless without scores), and an
+out-of-range value is a usage error.
+
+The escalation is deliberately performed IN THE CHECK (VC-008 sets GateEligible when ctx.EPSSGate is met), not
+in the verdict. This preserves the load-bearing D-06 invariant that `verdict.Evaluate` never gates on an
+advisory finding: by the time the verdict runs, a high-EPSS finding is already classified gate-eligible, so no
+advisory finding ever changes the exit code. It also means the escalated finding is still subject to the
+verdict's presumed-version demotion — a version this tool presumed rather than observed (D-44) is demoted back
+to advisory and can never gate, proven by the pre-existing `TestPresumedNodeCannotGate` (which already uses a
+gate-eligible VC-008 finding on a presumed node).
+
+Proof: VC-008 tests extended for the structured field (present when scored, nil otherwise) and gating
+(escalates at/above threshold, stays advisory below, boundary inclusive, no escalation without `-epss-gate`); a
+SARIF test asserts the three epss properties. Mutation-proven: `>=`→`>` fails the boundary test, dropping the
+structured field fails the annotation test; restore green. CLI smoke: out-of-range exits 64, `-epss-gate`
+implies `-epss`. Full suite green (34 packages), -race clean, go vet silent, gofmt no diffs.

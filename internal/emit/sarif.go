@@ -188,6 +188,14 @@ func (SARIF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo)
 		if f.Remediation != "" {
 			props["remediation"] = f.Remediation
 		}
+		// Exploit-prediction summary as structured properties (from -epss), so a
+		// code-scanning dashboard can rank or threshold on exploit probability
+		// without parsing the evidence prose.
+		if f.EPSS != nil {
+			props["epss"] = fmt.Sprintf("%.5f", f.EPSS.Peak)
+			props["epssPercentile"] = fmt.Sprintf("%.5f", f.EPSS.Percentile)
+			props["epssCVE"] = f.EPSS.CVE
+		}
 		// The root→node dependency chain answers "why is this package here?" for a
 		// deep transitive finding (OPU-12 D-3).
 		if len(f.DepPath) > 1 {
