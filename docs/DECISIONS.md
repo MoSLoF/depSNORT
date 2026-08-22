@@ -4498,3 +4498,44 @@ What v0.8.0 carries over v0.7.5, by arc:
 Validated: `make build` derives v0.8.0 from pyproject.toml and `depsnort version` reports it; full suite green
 (34 packages); no other file hard-codes the version (test fixtures using "v0.7.5" as arbitrary strings, the
 PERFORMANCE.md historical baseline, and D-39's own text are records, not claims, and stay).
+
+## D-123 — README sweep: close the documentation gap behind v0.8.0
+
+A full sweep of every repo document against the actual binary (usage text, `checks` registry output) and source
+tree found README.md describing roughly the v0.7.5 feature set, six increments and one whole ecosystem-surface
+arc behind. docs/RELEASING.md, docs/PERFORMANCE.md, NOTICE.md, SECURITY.md, and docs/DECISIONS.md itself were
+clean — the version-literal guard test (`TestREADMEVersionLiteralsMatchPyproject`) already passed at v0.8.0, and
+PERFORMANCE.md's "Baseline (v0.7.5)" header is a correctly-dated historical record, not a claim about current
+behavior.
+
+README.md gaps, each verified against the running binary or source before editing (not assumed from memory):
+
+  - Ecosystem table: PyPI was missing uv/poetry/pdm/pylock/Pipfile; npm was missing pnpm/bun; NuGet still
+    described only the three legacy lockfiles, omitting the entire D-118 modern .NET surface; the Go row
+    FALSELY claimed install-surface was "not yet extracted" when go:generate/cgo-flag/init-evasion/package-
+    runner/cache-attribution extraction has shipped since OPU-28.
+  - VC-check coverage: VC-002g/h/i/j and VC-012 were entirely absent from both the summary list and the
+    Install-surface extraction section. Each new bullet's gate class was verified against the actual
+    `check.Meta` in vc002_family.go / vc012_yanklure.go rather than asserted — this caught a wording error of
+    my own (VC-002j was drafted as "reaches network/shell" before checking; the code says "bundled native
+    binary at import time").
+  - Zero mention anywhere of the EPSS arc (`-epss`/`-epss-gate`, D-112..117), the post-expansion advisory pass
+    (D-119), or the adjudication doctrine (`-real-roots` containment, RepoGuard `--verify`, D-120/121).
+  - The "recognized manifest no adapter can resolve" example list named `.csproj`/`.vcxproj` and `Pipfile` as
+    UNRESOLVABLE — exactly the manifests D-118 and the D-97 Increment 4 patch fixed. Left uncorrected, this
+    would have told a reader the opposite of what the tool now does.
+  - Roadmap: pnpm/Poetry/uv were listed under "⬜ planned, not implemented" — false, all three ship. Missing
+    entirely: pylock/Pipfile/bun/NuGet-modern, VC-002g..j, VC-012, the post-expansion pass, EPSS, and the
+    adjudication mechanisms.
+  - Project layout omitted `internal/versiondrift`, `internal/ciactions`, `internal/securefs`, `internal/
+    semver`, `internal/pep508`, and `tools/` (RepoGuard + the org/priority scan drivers) — all real,
+    referenced-elsewhere-in-this-file directories with no line in the tree diagram.
+  - New sections added: an EPSS paragraph under Threat-intelligence tiers; a containment-adjudication paragraph
+    under Coverage is part of the verdict; a full "Repo-open execution surface (RepoGuard)" section (the tool,
+    `--verify`, the Miasma/Hades IOC feed, and the recommended quarantine workflow) — none of which had any
+    home in the document before.
+
+Proof: `TestREADMEVersionLiteralsMatchPyproject` still passes (the edits didn't touch either version literal);
+every file path introduced in new prose (`tools/ihbv-repoguard.py`, `tools/ihbv-authentic.sha256`,
+`docs/ioc-miasma-hades.json`) resolves on disk; markdown code-fence count is balanced; full suite green (34
+packages), gofmt clean. No Go code changed — this is a documentation-only correction.
