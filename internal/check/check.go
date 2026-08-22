@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ihbv.io/depsnort/internal/datasource"
+	"ihbv.io/depsnort/internal/datasource/epss"
 	"ihbv.io/depsnort/internal/datasource/ioc"
 	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
@@ -43,6 +44,10 @@ type Context struct {
 	Graph      *graph.Graph
 	Now        time.Time
 	Advisories map[string][]datasource.Advisory
+	// EPSS maps a CVE ID to its FIRST.org exploit-prediction score. Populated
+	// only when -epss is set and the network is reachable; empty otherwise, in
+	// which case VC-008 simply omits the prioritization note.
+	EPSS map[string]epss.Score
 	// Releases is publish-time history keyed by node ID — the substrate of the
 	// temporal axis. Empty when the registry source is disabled or offline with
 	// a cold cache; temporal checks then simply do not fire.

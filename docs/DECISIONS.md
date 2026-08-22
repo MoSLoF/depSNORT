@@ -4181,3 +4181,34 @@ resolution. Two options — a cached, deduplicated OSV `/v1/query` per unique no
 change to the OSV core), or capturing aliases during the existing OSV pass. The former is recommended; the
 finding attachment would add peak EPSS to each VC-008 finding's evidence + a sortable field, gated behind a
 `-no-epss` flag and skipped when offline / `-no-osv`.
+
+## D-113 — EPSS enrichment, Increment 2: VC-008 wiring + advisory→CVE resolution
+
+Wires the D-112 client into the report. VC-008 now annotates each known-vulnerability finding with the PEAK
+EPSS across its CVEs and orders the whole set by that peak, so the vulnerabilities most likely to be exploited
+in the wild surface first — the difference between "96 vulnerable packages" and "the 4 that matter this week".
+The evidence gains a suffix `; peak EPSS 0.999 (CVE-2021-44228, 100th pct)`; findings with no scored CVE keep
+their SortedNodes position (the sort is `sort.SliceStable` on peak descending, so ties and no-EPSS entries
+retain the existing deterministic order — D-09/D-13 preserved). When `ctx.EPSS` is empty (the default, and
+whenever offline) VC-008 is byte-for-byte what it was before this increment.
+
+Advisory→CVE resolution takes the isolated option floated in D-112, not the alternative: a new
+`(*osv.Client).CVEAliases` issues a cached, de-duplicated `/v1/query` per unique vulnerable coordinate and
+maps advisory ID → its CVE aliases (CVE-only; PYSEC/OSV/GHSA aliases dropped since EPSS cannot use them). This
+is necessary because depSNORT's core path uses OSV `/v1/querybatch`, which returns GHSA-/GO- IDs with NO
+aliases — a GHSA-primary advisory otherwise carries no CVE and EPSS (CVE-keyed) cannot score it. The core
+querybatch path is untouched; `CVEAliases` runs only under `-epss`. Offline is cache-only and a miss is a
+silent gap (never an error), matching the datasource contract.
+
+Reversal from D-112's stated plan: the flag is opt-in `-epss` (default off), not the previously-floated
+`-no-epss` (default on). EPSS enrichment costs one extra `/v1/query` per vulnerable coordinate plus the EPSS
+batch call, all live network — making it opt-in keeps the default scan's network profile unchanged and honors
+`-offline`/`-no-osv` (the whole block is skipped when `!*offline` is false). The enrichment merges resolved
+CVE aliases back into `ctx.Advisories[*].Aliases` so downstream consumers see them too, and registers an
+`emit.DataSourceCoverage` entry for EPSS so gaps are disclosed (D-24 honesty).
+
+Proof: two VC-008 tests (peak-EPSS annotation resolved through a GHSA→CVE alias + ranking highest-first;
+no-EPSS run is unchanged) and two `osv.CVEAliases` tests (resolve + CVE-only filter + per-coord dedup to one
+call; offline cold cache is empty-with-no-error). Mutation-proven: reversing the rank comparator and
+corrupting the annotation format each fail the VC-008 test; restore green. Full suite green (34 packages),
+-race clean on check/datasource/cmd, go vet silent, gofmt no diffs. No live network in CI.
