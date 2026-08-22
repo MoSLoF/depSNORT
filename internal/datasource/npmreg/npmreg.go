@@ -97,9 +97,35 @@ type packument struct {
 
 type packumentVersion struct {
 	NpmUser              maintainer        `json:"_npmUser"`
-	Scripts              map[string]string `json:"scripts"`
+	Scripts              scriptMap         `json:"scripts"`
 	Dependencies         map[string]string `json:"dependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
+}
+
+// scriptMap is a package.json "scripts" map that tolerates the non-string values
+// some legacy packuments carry. npm requires script bodies to be strings, but the
+// registry preserves historical junk: joi 0.1.x, for example, stored the
+// blanket / travis-cov CONFIG OBJECTS under "scripts". A strict map[string]string
+// aborts the ENTIRE packument unmarshal on one such entry — silently degrading
+// registry coverage for every version of that package. This keeps the
+// string-valued entries (the real script bodies installHooksOf cares about) and
+// drops the rest.
+type scriptMap map[string]string
+
+func (s *scriptMap) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	m := make(scriptMap, len(raw))
+	for k, v := range raw {
+		var str string
+		if json.Unmarshal(v, &str) == nil {
+			m[k] = str // a real script body; non-string config values are skipped
+		}
+	}
+	*s = m
+	return nil
 }
 
 type maintainer struct {
