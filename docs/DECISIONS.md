@@ -4048,3 +4048,36 @@ Mutation-proven: reverting to the whole-file scan makes both FP cases wrongly fi
 feeds the finding (`caps, _ := scanCaps(...)`), so scan-text order does not affect output (D-09 safe). Live-
 fire: elastic-agent VC-002i 1 → 0, verdict 0/1/43 → 0/0/43, everything else identical. Full suite green
 (33/0), -race clean, vet/fmt clean.
+
+## D-109 — OPU-19 (follow-up): persistence markers match on word boundaries (beats live-fire)
+
+A beats live-fire exposed another VC-002g persistence false positive (sibling of D-105's `startup` fix). The
+identifier-shaped persistence markers were matched with `strings.Contains`, so `systemd` (Linux init) matched
+as a raw substring of the mkwinsyscall Windows system-DLL flag in a go:generate directive —
+`//go:generate mkwinsyscall.exe -systemdll -output …` — firing VC-002g HIGH on the beats root.
+
+Fix: identifier-shaped persistence markers (`systemd`, `crontab`, `systemctl`, `launchctl`, `launchd`,
+`LaunchDaemons`, `LaunchAgents`) now match on WORD BOUNDARIES via a lightweight `containsWord` (a `\bword\b`
+bounded by non-identifier chars or string edges, both args pre-lowercased); `isWordMarker` selects them (all
+chars are letters/digits/`_`). Punctuation-anchored markers (`.bashrc`, `/etc/`, `$PROFILE`,
+`core.hooksPath`, `.git/hooks/`, …) are specific enough to stay raw substring matches. Only the persistence
+marker scan changed; the other capability scans (`installWriteMarkers`, cradle/obfuscation, …) are untouched.
+
+Blind-spot guard: bare `launchd` previously caught the macOS auto-run dirs `LaunchDaemons`/`LaunchAgents` by
+substring; word-boundary matching would break that (`launchd` inside `launchdaemons` is not a word), so those
+two dirs are added as explicit markers — macOS auto-run coverage is preserved and `LaunchAgents` (never
+caught before) is a bonus gain. `IsPersistenceMarker` recognizes them automatically (they are in
+`persistenceMarkers`, matched case-insensitively).
+
+Proof: `TestPersistenceWordBoundary` — `-systemdll`, `import crontabber`, `systemdConfigParser` stay SILENT;
+`/etc/systemd/system/`, `systemctl enable`, `crontab -e`, `~/Library/LaunchAgents/`,
+`~/Library/LaunchDaemons/`, `.bashrc` all FIRE. `TestContainsWord` pins the boundary semantics (incl.
+`launchdaemons` not matching `launchd`). Existing persistence/OPU-19/git-hook tests unchanged.
+Mutation-proven: reverting to pure `strings.Contains` makes all three FP cases wrongly fire. Only the
+capability SET feeds the finding, so evidence-order is irrelevant (D-09 safe). beats: VC-002g HIGH 1 → 0,
+verdict 0/4/38 → 0/3/38, everything else identical. Full suite green (33/0), -race clean, vet/fmt clean.
+
+Noted, offered next (separate): the 3 remaining gate-eligible on beats are VC-002b "setup.py reaches
+network" on backoff/deprecated/pyasn1 — URLs + network words matched inside the setup.py long_description
+README string and `url=` metadata, not an actual egress call; a distinct fix would require a real network
+call, not string-literal content.

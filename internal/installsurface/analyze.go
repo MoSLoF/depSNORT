@@ -315,6 +315,9 @@ var (
 	persistenceMarkers = []string{
 		".bashrc", ".bash_profile", ".zshrc", ".profile", "/etc/",
 		"crontab", "systemd", "systemctl", "launchctl", "launchd",
+		// macOS auto-run dirs, listed explicitly so word-boundary matching (below)
+		// still covers them once bare "launchd" stops matching inside them.
+		"LaunchDaemons", "LaunchAgents",
 		// The Windows Startup FOLDER (matched precisely by startupFolderRe below,
 		// emitted as the "startup-folder" marker). A bare "startup" substring was
 		// removed: it matched benign identifiers and prose — coverage.py's
@@ -474,6 +477,49 @@ func stripCodeComments(src string) string {
 	return src
 }
 
+// isIdentByte reports whether b is an identifier character (letter, digit, _).
+func isIdentByte(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// isWordMarker reports whether a marker is a bare identifier-shaped token
+// (letters/digits/_ only), which must be matched on word boundaries rather than
+// as a raw substring so it does not fire inside a larger identifier.
+func isWordMarker(m string) bool {
+	if m == "" {
+		return false
+	}
+	for i := 0; i < len(m); i++ {
+		if !isIdentByte(m[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// containsWord reports whether word occurs in hay bounded by non-identifier
+// characters (or the string edges) on both sides — a lightweight `\bword\b`.
+// Both arguments are expected pre-lowercased.
+func containsWord(hay, word string) bool {
+	if word == "" {
+		return false
+	}
+	for from := 0; ; {
+		i := strings.Index(hay[from:], word)
+		if i < 0 {
+			return false
+		}
+		i += from
+		beforeOK := i == 0 || !isIdentByte(hay[i-1])
+		after := i + len(word)
+		afterOK := after >= len(hay) || !isIdentByte(hay[after])
+		if beforeOK && afterOK {
+			return true
+		}
+		from = i + 1
+	}
+}
+
 // scanCaps classifies a blob of text (a command line or a file's source).
 func scanCaps(text string) ([]Capability, []string) {
 	var caps []Capability
@@ -505,7 +551,21 @@ func scanCaps(text string) ([]Capability, []string) {
 	// Persistence and ordinary install writes are both CapFilesystem; the
 	// persistence/benign distinction lives in the marker (IsPersistenceMarker),
 	// read by VC-002g, so the capability output is unchanged (OPU-19).
-	scan(persistenceMarkers, CapFilesystem)
+	// Identifier-shaped persistence markers (systemd, crontab, launchd, ...) match
+	// on WORD BOUNDARIES so they do not fire inside a larger token — `systemd` no
+	// longer matches the mkwinsyscall `-systemdll` flag (a beats live-fire FP),
+	// nor `crontab` inside `crontabber`. Punctuation-anchored markers (.bashrc,
+	// /etc/, .git/hooks/) are specific enough to stay raw substring matches.
+	for _, m := range persistenceMarkers {
+		lm := strings.ToLower(m)
+		matched := strings.Contains(lower, lm)
+		if matched && isWordMarker(m) {
+			matched = containsWord(lower, lm)
+		}
+		if matched {
+			add(CapFilesystem, m)
+		}
+	}
 	scan(installWriteMarkers, CapFilesystem)
 	// The Windows Startup FOLDER, matched precisely (shell:startup, or a
 	// ...\Programs\Startup path) rather than the bare word "startup", which
