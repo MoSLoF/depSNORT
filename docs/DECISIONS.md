@@ -4464,3 +4464,37 @@ fails the attribution test. RepoGuard demonstrated live: authentic target -> bot
 adjudicated false, exit 0; one appended line -> CRITICAL TAMPERED, exit 1; no --verify -> behavior unchanged.
 Self-scan with -real-roots ihbv.io reproduces the manual containment proof automatically: 32/32 findings
 contained, counts and exit 1 unchanged. Full suite green (34 packages), -race clean, vet silent, gofmt clean.
+
+## D-122 — v0.8.0: the overdue cut
+
+v0.7.5 was cut at D-39. Eighty-two decisions have landed since — the largest span any release of this project
+has carried — and every one is backwards-compatible: new opt-in flags, additive report fields, wider coverage.
+Semver says minor; v0.8.0 it is (a 1.0 declaration is a product decision, deliberately not smuggled into a
+routine bump). The bump is one line in pyproject.toml (F-06: the Go binary, the wheel, and `depsnort version`
+all derive from it) plus the two README examples that name the current release.
+
+What v0.8.0 carries over v0.7.5, by arc:
+
+  - Drift axis (D-40..): baseline capability/publisher-lineage comparison (VC-010/VC-011).
+  - Install-surface families: VC-002f..j (composer cradles, VC-002g persistence, VC-002h cgo flag injection,
+    VC-002i build-tag-gated init evasion with AST reachability, VC-002j load-time native exec), package-runner
+    and manager-install extraction across ecosystems, per-dependency vendor/module-cache attribution.
+  - Resolution: static pruned Go MVS proven against the go list oracle, per-ecosystem asserted-tier dispatch,
+    deps.dev asserted resolver, full-send recursive defaults with honest gap disclosure.
+  - Lockfile/manifest coverage sweep: uv.lock (incl. rootless), poetry.lock, pdm.lock, pylock.toml (PEP 751),
+    Pipfile, pnpm-lock.yaml, bun.lock, build-backend disclosure — and the modern .NET surface (D-118):
+    PackageReference, Central Package Management, Directory.Build.props, .nuspec, dotnet-tools.json,
+    project.json, paket.dependencies, project.assets.json.
+  - Live-fire precision hardening (meshclaw, OpenShell, Kibana, open-webui, elastic-agent, beats): every fix
+    principled and mutation-proven, never an allowlist (D-96..D-111).
+  - Advisory correctness: post-expansion OSV pass closing the prefetch/expansion false-clean gap (D-119),
+    tolerant npm packument parsing, snapshot import/export, bundled fallback discipline.
+  - EPSS exploit-prediction arc (D-112..D-117): FIRST.org client, VC-008 annotation + ranking via cached OSV
+    /v1/query alias resolution, structured scores in JSON/SARIF/PDF, opt-in -epss-gate, coverage notes.
+  - Adjudication doctrine (D-120/D-121): the Miasma/Hades companions (RepoGuard, IOC feed) and the two
+    proof mechanisms — RepoGuard --verify tamper adjudication and -real-roots containment with complete
+    root attribution — so a finding is proven true or false, never exempted.
+
+Validated: `make build` derives v0.8.0 from pyproject.toml and `depsnort version` reports it; full suite green
+(34 packages); no other file hard-codes the version (test fixtures using "v0.7.5" as arbitrary strings, the
+PERFORMANCE.md historical baseline, and D-39's own text are records, not claims, and stay).
