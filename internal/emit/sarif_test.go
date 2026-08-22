@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/verdict"
 )
@@ -140,5 +141,48 @@ func TestSARIFCleanRunHasNoNotifications(t *testing.T) {
 	}
 	if notes, ok := inv["toolExecutionNotifications"]; ok {
 		t.Errorf("clean run should omit toolExecutionNotifications, got %v", notes)
+	}
+}
+
+// A finding carrying an exploit-prediction summary surfaces it as structured
+// SARIF result properties, so a dashboard can rank/threshold on EPSS without
+// parsing the evidence prose.
+func TestSARIFExposesEPSSProperties(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "pkg:npm/hot@1", Kind: graph.KindPackage, Name: "hot"})
+	g.MarkRoot("pkg:npm/hot@1")
+	res := verdict.Result{
+		Findings: []finding.Finding{{
+			CheckID:   "VC-008",
+			Axis:      finding.AxisVuln,
+			Severity:  finding.SevMedium,
+			GateClass: finding.GateEligible,
+			NodeID:    "pkg:npm/hot@1",
+			Title:     "1 known vulnerability",
+			EPSS:      &finding.ExploitScore{Peak: 0.90123, Percentile: 0.99, CVE: "CVE-2021-44228"},
+		}},
+	}
+	var b bytes.Buffer
+	if err := (SARIF{}).Emit(&b, g, res, RunInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(b.Bytes(), &parsed); err != nil {
+		t.Fatalf("SARIF is not valid JSON: %v", err)
+	}
+	run := parsed["runs"].([]any)[0].(map[string]any)
+	results := run["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	props := results[0].(map[string]any)["properties"].(map[string]any)
+	if props["epss"] != "0.90123" {
+		t.Errorf("epss property = %v, want 0.90123", props["epss"])
+	}
+	if props["epssCVE"] != "CVE-2021-44228" {
+		t.Errorf("epssCVE property = %v, want CVE-2021-44228", props["epssCVE"])
+	}
+	if props["epssPercentile"] != "0.99000" {
+		t.Errorf("epssPercentile property = %v, want 0.99000", props["epssPercentile"])
 	}
 }

@@ -48,6 +48,14 @@ type Context struct {
 	// only when -epss is set and the network is reachable; empty otherwise, in
 	// which case VC-008 simply omits the prioritization note.
 	EPSS map[string]epss.Score
+	// EPSSGate is the exploit-probability threshold (0..1) at or above which a
+	// VC-008 finding escalates from advisory to gate-eligible — the difference
+	// between "here are the CVEs" and "these are being exploited, fail the build".
+	// 0 (the default) disables escalation, keeping VC-008 purely advisory. Set
+	// only when -epss-gate is passed; meaningless without -epss (no scores to
+	// compare). The escalation composes with -fail-on-eligible for the exit code
+	// and is still subject to presumed-version demotion in the verdict.
+	EPSSGate float64
 	// Releases is publish-time history keyed by node ID — the substrate of the
 	// temporal axis. Empty when the registry source is disabled or offline with
 	// a cold cache; temporal checks then simply do not fire.

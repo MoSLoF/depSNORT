@@ -105,6 +105,23 @@ type Finding struct {
 	// it is present (OPU-12 D-3). Empty for a root or a node reachable by no
 	// depends-on edge (e.g. an install-hook subject).
 	DepPath []string `json:"dep_path,omitempty"`
+	// EPSS is the exploit-prediction summary for this finding, when one applies —
+	// the peak FIRST.org score across the finding's CVEs. Populated only by VC-008
+	// under -epss; nil otherwise. Carried as structured data (not only in the
+	// evidence prose) so a JSON/SARIF consumer can rank and threshold on it
+	// without parsing text.
+	EPSS *ExploitScore `json:"epss,omitempty"`
+}
+
+// ExploitScore is a finding's peak exploit-prediction summary: the single
+// highest-scoring CVE among all the CVEs the finding covers. It is kept in the
+// dependency-free finding package (not the epss data-source package) so that
+// finding stays at the bottom of the import graph; the data source produces
+// per-CVE scores, a check distills them to this per-finding peak.
+type ExploitScore struct {
+	Peak       float64 `json:"peak"`       // peak EPSS across the finding's CVEs, 0..1
+	Percentile float64 `json:"percentile"` // FIRST.org percentile of the peak CVE, 0..1
+	CVE        string  `json:"cve"`        // the CVE carrying the peak score
 }
 
 // Score composes severity, confidence, and recency into a single ordering

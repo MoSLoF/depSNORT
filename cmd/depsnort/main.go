@@ -157,6 +157,13 @@ scan flags:
                            closure is disclosed as such in the report
   -no-expand               alias for -expand=false: only what the files state
   -no-install-surface      skip static install-hook extraction (VC-002b..e)
+  -epss                    enrich VC-008 findings with FIRST.org EPSS
+                           exploit-prediction scores and rank them by peak score
+                           (opt-in; needs network + OSV)
+  -epss-gate float         escalate VC-008 findings with peak EPSS >= this
+                           threshold (0..1) from advisory to gate-eligible;
+                           combine with -fail-on-eligible to fail only on
+                           vulnerabilities being exploited (implies -epss)
   -no-recursive            scan only the given directory, not its subdirectories
                            (default is full-send: every project beneath the path,
                            every ecosystem, every depth, build dirs included)
@@ -852,6 +859,7 @@ func cmdScan(args []string) int {
 	exportPath := fs.String("osv-export", "", "write this scan's OSV results to path as a JSON snapshot for later -osv-snapshot import; requires live network access (incompatible with -offline/-no-osv)")
 	noBundled := fs.Bool("no-osv-bundled", false, "never use the compiled-in fallback advisory dataset, even when the network is unreachable")
 	epssOn := fs.Bool("epss", false, "enrich VC-008 findings with FIRST.org EPSS exploit-prediction scores and order them by peak score (opt-in; needs network + OSV)")
+	epssGate := fs.Float64("epss-gate", 0, "escalate VC-008 findings with peak EPSS >= this threshold (0..1) from advisory to gate-eligible; combine with -fail-on-eligible to fail on exploited vulnerabilities only (implies -epss)")
 	regCacheDir := fs.String("registry-cache", defaultCacheDir("registry"), "registry metadata cache directory")
 	noRegistry := fs.Bool("no-registry", false, "skip registry-metadata source (disables VC-004/VC-005)")
 	expandTree := fs.Bool("expand", true, "discover transitive layers past what the lockfile recorded; presumed versions are labelled and never gate")
@@ -878,6 +886,15 @@ func cmdScan(args []string) int {
 	if *exportPath != "" && (*offline || *noOSV) {
 		fmt.Fprintln(os.Stderr, "depsnort: -osv-export requires live network access; incompatible with -offline and -no-osv")
 		return exitUsage
+	}
+	if *epssGate < 0 || *epssGate > 1 {
+		fmt.Fprintln(os.Stderr, "depsnort: -epss-gate must be between 0 and 1")
+		return exitUsage
+	}
+	// -epss-gate is meaningless without scores to compare, so it implies -epss.
+	if *epssGate > 0 && !*epssOn {
+		*epssOn = true
+		fmt.Fprintln(os.Stderr, "depsnort: -epss-gate implies -epss; enabling EPSS enrichment")
 	}
 	path := "."
 	if fs.NArg() > 0 {
@@ -1001,7 +1018,7 @@ func cmdScan(args []string) int {
 	if *noExpand {
 		*expandTree = false
 	}
-	ctx := &check.Context{Graph: g, Now: time.Now(), Config: check.Config{
+	ctx := &check.Context{Graph: g, Now: time.Now(), EPSSGate: *epssGate, Config: check.Config{
 		InternalScopes: splitCSV(*internalScopes),
 		InternalNames:  splitCSV(*internalNames),
 	}}

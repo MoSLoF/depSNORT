@@ -46,10 +46,19 @@ const maxListedAdvisories = 8
 // its own kind of failure.
 //
 // When EPSS scores are present (ctx.EPSS, populated by -epss), each finding is
-// annotated with the PEAK exploit-prediction score across its CVEs and the whole
+// annotated with the PEAK exploit-prediction score across its CVEs — carried as
+// structured data (Finding.EPSS) as well as in the evidence prose — and the whole
 // set is ordered by that peak, so the vulnerabilities most likely to be exploited
 // in the wild surface first — the difference between "96 vulnerable packages" and
 // "the 4 that matter this week".
+//
+// Gating posture: VC-008 is advisory by default (CVE noise never fails a build).
+// When ctx.EPSSGate is set (-epss-gate) and a finding's peak EPSS is at or above
+// it, that ONE finding is escalated to gate-eligible, so a team can opt into
+// failing the build (-fail-on-eligible) on the handful of vulnerabilities that
+// are actually being exploited while the rest stay advisory. The escalation is
+// per-finding and still subject to presumed-version demotion in the verdict — a
+// version this tool presumed rather than observed can never gate (D-44).
 func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 	type scored struct {
 		f    finding.Finding
@@ -84,10 +93,17 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 		evidence := fmt.Sprintf("%s@%s is affected by %s%s", n.Name, n.Version, strings.Join(listed, ", "), suffix)
 
 		peak := -1.0
+		var es *finding.ExploitScore
+		gate := finding.GateAdvisory
 		if len(ctx.EPSS) > 0 {
-			if note, p, ok := epssNote(advs, ctx.EPSS); ok {
-				evidence += note
-				peak = p
+			if score, ok := peakEPSS(advs, ctx.EPSS); ok {
+				es = &score
+				peak = score.Peak
+				evidence += fmt.Sprintf("; peak EPSS %.3f (%s, %.0fth pct)", score.Peak, score.CVE, score.Percentile*100)
+				if ctx.EPSSGate > 0 && score.Peak >= ctx.EPSSGate {
+					gate = finding.GateEligible
+					evidence += fmt.Sprintf("; gate-eligible (>= %.3f exploit-probability threshold)", ctx.EPSSGate)
+				}
 			}
 		}
 
@@ -96,12 +112,13 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 				CheckID:     "VC-008",
 				Axis:        finding.AxisVuln,
 				Severity:    finding.SevMedium,
-				GateClass:   finding.GateAdvisory,
+				GateClass:   gate,
 				Confidence:  1.0,
 				NodeID:      n.ID,
 				Title:       title,
 				Evidence:    evidence,
 				Remediation: "upgrade to a release that is not covered by these advisories",
+				EPSS:        es,
 			},
 			peak: peak,
 		})
@@ -118,28 +135,25 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 	return out
 }
 
-// epssNote returns the evidence suffix and peak EPSS across an advisory set's
+// peakEPSS returns the peak exploit-prediction summary across an advisory set's
 // CVEs (an advisory contributes its ID if it is a CVE, plus any CVE aliases).
 // ok is false when none of the advisories has a scored CVE.
-func epssNote(advs []datasource.Advisory, scores map[string]epss.Score) (note string, peak float64, ok bool) {
-	var peakCVE string
-	var peakScore epss.Score
+func peakEPSS(advs []datasource.Advisory, scores map[string]epss.Score) (finding.ExploitScore, bool) {
+	var out finding.ExploitScore
+	ok := false
 	for _, adv := range advs {
 		for _, cve := range advisoryCVEs(adv) {
 			s, found := scores[cve]
 			if !found {
 				continue
 			}
-			if !ok || s.EPSS > peakScore.EPSS {
-				ok, peakScore, peakCVE = true, s, cve
+			if !ok || s.EPSS > out.Peak {
+				ok = true
+				out = finding.ExploitScore{Peak: s.EPSS, Percentile: s.Percentile, CVE: cve}
 			}
 		}
 	}
-	if !ok {
-		return "", -1, false
-	}
-	return fmt.Sprintf("; peak EPSS %.3f (%s, %.0fth pct)", peakScore.EPSS, peakCVE, peakScore.Percentile*100),
-		peakScore.EPSS, true
+	return out, ok
 }
 
 // advisoryCVEs returns the CVE IDs an advisory maps to: its own ID if it is a
