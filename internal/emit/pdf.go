@@ -419,10 +419,13 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 		depth               int
 		gateRank            int     // 0 block, 1 gate-eligible, 2 advisory-only
 		score               float64 // highest composed score on the package
+		peakEPSS            float64 // highest EPSS across the package's findings
+		hasEPSS             bool    // any finding carried an EPSS score
 		truth               string  // version_truth, when not observed
 	}
 	var rows []row
 	var clean int
+	anyEPSS := false
 	for _, n := range g.SortedNodes() {
 		if n.Kind != graph.KindPackage {
 			continue
@@ -453,6 +456,15 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 			if s := f.Score(); s > r.score {
 				r.score = s
 			}
+			// Peak exploit-probability across this package's findings — the same
+			// per-finding EPSS score the findings section shows (D-115), rolled up
+			// to a per-package column so the risk table can be scanned for "what is
+			// actually being exploited" without cross-referencing each finding.
+			if f.EPSS != nil && (!r.hasEPSS || f.EPSS.Peak > r.peakEPSS) {
+				r.hasEPSS = true
+				r.peakEPSS = f.EPSS.Peak
+				anyEPSS = true
+			}
 		}
 		rows = append(rows, r)
 	}
@@ -475,6 +487,10 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 		if rows[i].score != rows[j].score {
 			return rows[i].score > rows[j].score
 		}
+		// Among otherwise-equal rows, the more exploitable package floats up.
+		if rows[i].peakEPSS != rows[j].peakEPSS {
+			return rows[i].peakEPSS > rows[j].peakEPSS
+		}
 		return rows[i].name < rows[j].name
 	})
 
@@ -489,9 +505,11 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 		d.gap(3)
 
 		// Header uses the SAME monospace font and format string as the rows —
-		// a proportional header over monospace rows will not line up.
-		const riskRowFmt = "%-9s %-34s %-14s %s"
-		d.text(fmt.Sprintf(riskRowFmt, "RISK", "PACKAGE", "VERSION", "DEPTH"),
+		// a proportional header over monospace rows will not line up. The EPSS
+		// column carries each package's peak exploit-probability (blank when no
+		// finding on the package was scored, e.g. -epss was off).
+		const riskRowFmt = "%-9s %-32s %-14s %-6s %s"
+		d.text(fmt.Sprintf(riskRowFmt, "RISK", "PACKAGE", "VERSION", "EPSS", "DEPTH"),
 			fontMono, 8, colFaint, 8, 12)
 
 		shown := 0
@@ -523,14 +541,28 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 				ver = "?" + defaultIfEmpty(ver, "unresolved")
 				anyPresumed = true
 			}
+			epssCell := "-"
+			if r.hasEPSS {
+				epssCell = fmt.Sprintf("%.3f", r.peakEPSS)
+			}
 			d.space(11)
 			d.rect(marginLeft, 2.5, 9, c)
 			d.text(fmt.Sprintf(riskRowFmt,
 				strings.ToUpper(r.risk),
-				truncateRunes(r.name, 34),
+				truncateRunes(r.name, 32),
 				truncateRunes(ver, 14),
+				epssCell,
 				fmt.Sprintf("%d", r.depth)),
 				fontMono, 8, colInk, 8, 11)
+		}
+		if anyEPSS {
+			d.gap(3)
+			d.wrapped(
+				"The EPSS column is the peak FIRST.org exploit-probability (0-1) across a "+
+					"package's scored CVEs — the likelihood it is exploited in the wild in the "+
+					"next 30 days. A dash means no finding on the package carried a score (no "+
+					"CVE, or -epss was off).",
+				fontRegular, 8.5, colFaint, 8, 11)
 		}
 		if anyPresumed {
 			d.gap(3)
