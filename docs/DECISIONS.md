@@ -4152,3 +4152,32 @@ comment / docstring / wget-in-print cases wrongly fire. D-110's setup.py tests a
 green (33/0), -race clean, vet/fmt clean. beats is now clean of gate-eligible findings (VC-002b setup.py-
 network 3 → 0; verdict 0/4/38 → 0/0/38; VC-008/VC-004 advisories unchanged). This also closes the long-open
 Python-comment-stripping thread for setup.py.
+
+## D-112 — EPSS enrichment, Increment 1: the FIRST.org data source
+
+Adds a new, self-contained data source `internal/datasource/epss` that fetches FIRST.org EPSS scores — the
+Exploit Prediction Scoring System probability (0..1) that a CVE will be exploited in the wild in the next 30
+days, plus a percentile rank. The purpose is to turn a flat VC-008 list ("96 vulnerable packages") into a
+prioritized one ("these few have EPSS > 0.5"): of beats' 33 or Kibana's 96 vulnerable packages, which are
+actually being exploited (Log4Shell CVE-2021-44228 → 0.99999 / 100th pct; a typical stale-but-quiet CVE
+< 0.01).
+
+The client mirrors the osv/depsdev shape (`Client{HTTP, Cache, Endpoint, Offline, Now, Stats}`, `New`,
+`Name`, tiered cache → live → gap): `epss.New(cache, offline).Scores(ctx, cves) → map[CVE]{EPSS,
+Percentile, Date}`. Batches by 100 CVEs/call (the API page limit; 96 → 1 call, 250 → 3). Stdlib-only (D-10);
+read-only (D-04); cached per-CVE; offline-aware — offline serves cached scores and discloses the rest as
+gaps, never invents a score. Input is normalized: upper-cased, de-duplicated, deterministically sorted, and
+restricted to CVE-shaped IDs (GHSA/GO/PYSEC are ignored — EPSS is CVE-keyed). A CVE with no published score
+is a gap, not an error; a partial-batch fetch error returns what succeeded plus the first error.
+
+This increment is the reusable client ONLY — it touches no existing file and wires into no check yet, so it
+is inert until Increment 2. Proof: six unit tests over a fake transport (parse + gaps, batch-by-100, cache
+reuse, offline-from-cache, offline-cold-cache-is-gap-not-error, CVE normalization); full suite green (34
+packages, 33 + the new one), -race clean, go vet silent, gofmt no diffs. No live network in CI.
+
+Increment 2 (wiring into VC-008) is DEFERRED pending a design confirmation: EPSS is CVE-keyed, but OSV's
+querybatch (what depSNORT uses) returns GHSA/GO IDs with NO aliases, so the wiring needs advisory→CVE
+resolution. Two options — a cached, deduplicated OSV `/v1/query` per unique non-CVE advisory ID (isolated, no
+change to the OSV core), or capturing aliases during the existing OSV pass. The former is recommended; the
+finding attachment would add peak EPSS to each VC-008 finding's evidence + a sortable field, gated behind a
+`-no-epss` flag and skipped when offline / `-no-osv`.
