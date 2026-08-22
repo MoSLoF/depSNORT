@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "source": "iHBV / ThreatLocker Miasma-Hades campaign (2026-06-05 Azure/durabletask)",
+  "generated": "2026-08-22",
+  "indicators": [
+    {"ecosystem":"pypi","name":"durabletask","version":"1.4.1","severity":"critical","category":"malware","reference":"iHBV-IOC-MIASMA-01","note":"Miasma/Hades worm - poisoned release from Azure/durabletask compromise; repo since disabled by GitHub"},
+    {"ecosystem":"pypi","name":"durabletask","version":"1.4.2","severity":"critical","category":"malware","reference":"iHBV-IOC-MIASMA-01","note":"Miasma/Hades worm - poisoned release"},
+    {"ecosystem":"pypi","name":"durabletask","version":"1.4.3","severity":"critical","category":"malware","reference":"iHBV-IOC-MIASMA-01","note":"Miasma/Hades worm - poisoned release"},
+    {"ecosystem":"pypi","name":"durabletask","severity":"high","category":"compromised-upstream","reference":"iHBV-IOC-MIASMA-02","note":"Any durabletask version: upstream repo was compromised 2026-06-05. Pin to a verified-clean release and confirm sdist/wheel SHA256 out-of-band before use."}
+  ]
+}

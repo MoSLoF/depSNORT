@@ -4399,3 +4399,30 @@ Proof: two selection/coverage tests pin the predicate and the zero-coverage dete
 unit-testable, so these pin the logic that drives it, matching the codebase's existing main-package test
 pattern); an offline end-to-end scan runs the new path with no regression. Full suite green (34 packages),
 -race clean, go vet silent, gofmt no diffs.
+
+## D-120 — Miasma/Hades companion artifacts: RepoGuard, IOC feed, detection writeup
+
+The Miasma/Hades campaign (Azure/durabletask, 2026-06-05) executes the moment a developer OPENS a repository in
+an editor or AI coding agent — via checked-in configuration (an obfuscated setup.js, a VS Code folderOpen task,
+agent hook settings) — not at dependency install time. depSNORT answers "what happens when I INSTALL these
+dependencies?"; this on-open surface is out of that scope by construction, so three companion artifacts are
+added rather than bent into the scanner:
+
+  - tools/ihbv-repoguard.py — a standalone, read-only, stdlib-only Python triage tool that grades a
+    freshly-cloned repo's on-open / on-attach execution surface (.vscode/tasks.json runOn:folderOpen,
+    devcontainer initializeCommand, .claude / .cursor / .gemini hooks, .mcp.json, .envrc, git hooks) by whether
+    it also reaches the network or obfuscates its payload, and checks every candidate file against
+    campaign-specific IOCs. It never executes, installs, or imports anything from the target and discloses what
+    it could not read (mirroring depSNORT's own D-04 / D-24 discipline). It lives in tools/ alongside the
+    existing Python helpers rather than in the Go binary, keeping the scanner stdlib-only (D-10).
+
+  - docs/ioc-miasma-hades.json — a ready-to-use depSNORT IOC feed (the -ioc / VC-003 format): durabletask
+    1.4.1/1.4.2/1.4.3 as critical malware, plus a version-less high "compromised-upstream" indicator for any
+    durabletask release. Validated end-to-end: a requirements.txt pinning durabletask==1.4.1 scanned with
+    -ioc produces the expected VC-003 BLOCK finding (exit 1).
+
+  - docs/iHBV_Miasma_Hades_protection_detection.pdf — the campaign protection/detection writeup.
+
+No Go code changed. Proof: RepoGuard py_compiles, and on a crafted fixture flags a folderOpen VS Code task and
+a Miasma C2 IOC (exit 1) while staying silent on an install-time-only fixture; the IOC feed loads through
+depSNORT and matches the poisoned coordinate. go build clean.
