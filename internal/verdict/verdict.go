@@ -20,6 +20,8 @@ package verdict
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"ihbv.io/depsnort/internal/finding"
 	"ihbv.io/depsnort/internal/graph"
@@ -43,6 +45,14 @@ type Policy struct {
 	// but whether it stops a pipeline is a policy question, not a fact about
 	// the dependency tree.
 	FailOnIncomplete bool
+	// RealRoots designates which scan roots the operator actually builds and
+	// ships, as case-insensitive substrings matched against root node IDs
+	// (-real-roots). When non-empty, every finding whose node is reachable
+	// from NO designated root is labeled Contained — an adjudication with the
+	// proof attached (ReachableRoots), never a suppression: the finding keeps
+	// its severity, its gate class, and its effect on the exit code. Empty
+	// (the default) labels nothing.
+	RealRoots []string
 }
 
 // Counts summarizes findings by gate class.
@@ -212,6 +222,95 @@ func applyPresumedDemotion(g *graph.Graph, findings []finding.Finding) []finding
 	return out
 }
 
+// maxListedReachableRoots caps how many roots the containment evidence note
+// spells out. The complete list is always on the finding (ReachableRoots); only
+// the prose is capped, and the remainder is counted rather than hidden.
+const maxListedReachableRoots = 3
+
+// reachableRootsByNode computes, for every node, the sorted set of scan roots
+// that reach it over ANY edge type. All edges count — a hook, a referenced
+// artifact, or a sink is attributed to the root whose subtree declared it, even
+// though no depends-on path exists. This is the complete attribution fact that
+// DepPath (one shortest chain) cannot carry, and the substrate of the
+// containment adjudication.
+func reachableRootsByNode(g *graph.Graph) map[string][]string {
+	adj := map[string][]string{}
+	for _, e := range g.Edges {
+		adj[e.From] = append(adj[e.From], e.To)
+	}
+	byNode := map[string][]string{}
+	roots := append([]string(nil), g.Roots...)
+	sort.Strings(roots) // deterministic append order => sorted lists (D-13)
+	for _, root := range roots {
+		seen := map[string]bool{root: true}
+		byNode[root] = append(byNode[root], root)
+		queue := append([]string(nil), adj[root]...)
+		for len(queue) > 0 {
+			id := queue[0]
+			queue = queue[1:]
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			byNode[id] = append(byNode[id], root)
+			queue = append(queue, adj[id]...)
+		}
+	}
+	return byNode
+}
+
+// applyContainment stamps every finding with its complete root attribution
+// (ReachableRoots) and, when the policy designates real roots, adjudicates
+// containment: a finding no designated root can reach is labeled Contained,
+// with the proof in its evidence. Nothing is dropped, softened, or re-gated —
+// the label rides on top of an otherwise unchanged finding (the counts and
+// exit code computed later see exactly the same gate classes).
+func applyContainment(g *graph.Graph, findings []finding.Finding, realRoots []string) []finding.Finding {
+	if len(findings) == 0 {
+		return findings
+	}
+	reach := reachableRootsByNode(g)
+	out := make([]finding.Finding, len(findings))
+	copy(out, findings)
+	for i := range out {
+		f := &out[i]
+		f.ReachableRoots = reach[f.NodeID]
+		if len(realRoots) == 0 {
+			continue
+		}
+		reachedByReal := false
+		for _, root := range f.ReachableRoots {
+			for _, want := range realRoots {
+				if want != "" && strings.Contains(strings.ToLower(root), strings.ToLower(want)) {
+					reachedByReal = true
+					break
+				}
+			}
+			if reachedByReal {
+				break
+			}
+		}
+		if reachedByReal {
+			continue
+		}
+		f.Contained = true
+		listed := f.ReachableRoots
+		suffix := ""
+		if len(listed) > maxListedReachableRoots {
+			suffix = fmt.Sprintf(", +%d more", len(listed)-maxListedReachableRoots)
+			listed = listed[:maxListedReachableRoots]
+		}
+		note := " [contained: no designated real root reaches this node"
+		if len(listed) > 0 {
+			note += "; reachable only from " + strings.Join(listed, ", ") + suffix
+		} else {
+			note += "; reachable from no root at all"
+		}
+		f.Evidence += note + "]"
+	}
+	return out
+}
+
 // Evaluate attaches findings to their nodes, computes each node's risk state,
 // and derives the exit code, using ONLY the graph's own resolution coverage. It
 // is EvaluateWithCoverage with no scan-level gaps folded in — the right entry
@@ -235,6 +334,12 @@ func EvaluateWithCoverage(g *graph.Graph, findings []finding.Finding, cov graph.
 	// Both run before counting, so the gate-class tallies the report prints are
 	// the classes that actually govern the exit code.
 	findings = applyPresumedDemotion(g, findings)
+	// Every finding is stamped with its complete root attribution, and — when
+	// the policy designates real roots — adjudicated for containment. Unlike
+	// the two demotions above this NEVER changes a gate class: containment is a
+	// label with a proof attached, and the counts below are identical with or
+	// without it.
+	findings = applyContainment(g, findings, pol.RealRoots)
 
 	res := Result{
 		Coverage: cov,

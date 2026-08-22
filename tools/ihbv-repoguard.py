@@ -24,11 +24,36 @@ USAGE
 -----
     python3 ihbv-repoguard.py /path/to/freshly-cloned-repo
     python3 ihbv-repoguard.py /path/to/repo --json
+    python3 ihbv-repoguard.py /path/to/repo --verify authentic.sha256
 
-Exit codes:  0 = nothing found   1 = findings   2 = usage/error
+VERIFY (adjudication, not exemption)
+------------------------------------
+--verify takes a sha256sum-format manifest of KNOWN-AUTHENTIC files
+("<sha256>  <relative/path>" per line, '#' comments allowed). For each listed
+path present in the target:
+
+  hash matches   -> every finding on that file is ADJUDICATED FALSE (authentic,
+                    hash-verified). The finding stays in the output with its
+                    evidence — it is labeled, never hidden — but it no longer
+                    counts toward the exit code, because the adjudication IS
+                    the proof.
+  hash differs   -> a new CRITICAL "TAMPERED" finding: a file wearing a
+                    known-authentic name whose content is not the authentic
+                    content is precisely the planted-lookalike threat.
+
+This replaces path exemption with evidence: an allowlist would make the tool
+blind to a tampered copy of itself; --verify makes that copy the loudest thing
+in the report. TRUST NOTE: a manifest checked into the repo it verifies can be
+tampered alongside the files. Run YOUR trusted copy of this tool with YOUR
+out-of-band copy of the manifest against the quarantine clone.
+
+Exit codes:  0 = nothing found (or every finding adjudicated false)
+             1 = findings that survived adjudication (incl. any TAMPERED)
+             2 = usage/error
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -108,6 +133,71 @@ def read_text(path):
         return None, str(exc)
 
 
+def sha256_file(path):
+    """Full-file SHA256 (chunked; NOT capped at MAX_READ — a hash of a prefix
+    would let a payload appended past the cap verify as authentic)."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest(), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def load_manifest(path):
+    """Parse a sha256sum-format manifest: '<64-hex>  <relative/path>' per line."""
+    entries = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) != 2 or not re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+                raise ValueError(f"{path}:{lineno}: not a '<sha256>  <path>' line: {line!r}")
+            entries.append((parts[0].lower(), parts[1].strip().replace(os.sep, "/")))
+    return entries
+
+
+def apply_verification(root, manifest, findings):
+    """Adjudicate findings against a known-authentic manifest.
+
+    Returns (findings, verified, tampered, absent, unhashable):
+      - findings on hash-verified files gain entry["adjudicated"] (labeled,
+        never removed);
+      - a hash mismatch appends a CRITICAL "TAMPERED" finding;
+      - listed files absent from the target, or unreadable, are disclosed.
+    """
+    verified, tampered, absent, unhashable = [], [], [], []
+    for want, rel in manifest:
+        ap = os.path.join(root, rel.replace("/", os.sep))
+        if not os.path.isfile(ap):
+            absent.append(rel)
+            continue
+        got, err = sha256_file(ap)
+        if got is None:
+            unhashable.append((rel, err))
+            continue
+        if got == want:
+            verified.append(rel)
+        else:
+            tampered.append(rel)
+            findings.append({
+                "file": rel, "severity": "critical", "watched": True,
+                "reasons": [("critical", "TAMPERED",
+                             "file wears a known-authentic name but its SHA256 differs from the manifest",
+                             f"want {want[:16]}.., got {got[:16]}..")],
+            })
+    vset = set(verified)
+    for f in findings:
+        if f["file"] in vset:
+            f["adjudicated"] = "false-positive: authentic (sha256 verified against manifest)"
+    findings.sort(key=lambda e: (SEV_ORDER[e["severity"]], e["file"]))
+    return findings, verified, tampered, absent, unhashable
+
+
 def scan_content(text, rules):
     hits = []
     for pattern, sev, why in rules:
@@ -184,6 +274,9 @@ def main():
     ap = argparse.ArgumentParser(description="iHBV RepoGuard — repo-open execution surface triage")
     ap.add_argument("path")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--verify", metavar="MANIFEST",
+                    help="sha256sum-format manifest of known-authentic files; "
+                         "matching findings are adjudicated false, hash mismatches become CRITICAL TAMPERED findings")
     args = ap.parse_args()
 
     if not os.path.isdir(args.path):
@@ -192,24 +285,49 @@ def main():
 
     findings, unreadable = triage(args.path)
 
+    verified, tampered, absent, unhashable = [], [], [], []
+    if args.verify:
+        try:
+            manifest = load_manifest(args.verify)
+        except Exception as exc:
+            print(f"repoguard: cannot load manifest: {exc}", file=sys.stderr)
+            return 2
+        findings, verified, tampered, absent, unhashable = apply_verification(
+            args.path, manifest, findings)
+
+    # Only findings that survived adjudication drive the exit code; adjudicated
+    # ones remain in every output, labeled with their proof.
+    counting = [f for f in findings if "adjudicated" not in f]
+
     if args.json:
         print(json.dumps({
             "target": args.path,
             "findings": [
                 {"file": f["file"], "severity": f["severity"],
+                 **({"adjudicated": f["adjudicated"]} if "adjudicated" in f else {}),
                  "reasons": [{"severity": s, "kind": k, "why": w, "sample": x} for s, k, w, x in f["reasons"]]}
                 for f in findings
             ],
             "unreadable": [{"file": f, "error": e} for f, e in unreadable],
+            "verification": {
+                "manifest": args.verify,
+                "authentic": verified,
+                "tampered": tampered,
+                "listed_but_absent": absent,
+                "unhashable": [{"file": f, "error": e} for f, e in unhashable],
+            } if args.verify else None,
         }, indent=2))
-        return 1 if findings else 0
+        return 1 if counting else 0
 
     print(f"iHBV RepoGuard — {args.path}")
     print("=" * 72)
     if not findings:
         print("No repo-open execution surface found.")
     for f in findings:
-        print(f"\n[{f['severity'].upper():8s}] {f['file']}")
+        tag = f['severity'].upper()
+        print(f"\n[{tag:8s}] {f['file']}")
+        if "adjudicated" in f:
+            print(f"    ADJUDICATED FALSE — {f['adjudicated']}")
         for sev, kind, why, sample in f["reasons"]:
             line = f"    - ({sev}) {kind}: {why}"
             if sample:
@@ -219,10 +337,18 @@ def main():
         print(f"\nUNREAD ({len(unreadable)}) — disclosed, not assumed clean:")
         for rel, err in unreadable[:10]:
             print(f"    {rel}: {err}")
+    if args.verify:
+        print(f"\nVERIFICATION ({args.verify}): {len(verified)} authentic, "
+              f"{len(tampered)} TAMPERED, {len(absent)} listed-but-absent, {len(unhashable)} unhashable")
+        for rel, err in unhashable:
+            print(f"    unhashable (disclosed, not assumed clean): {rel}: {err}")
     print("\n" + "=" * 72)
-    print(f"{len(findings)} file(s) with on-open execution surface. "
-          "This is a TRIAGE aid, not proof of safety — review before opening in an editor or agent.")
-    return 1 if findings else 0
+    adjudicated = len(findings) - len(counting)
+    summary = f"{len(findings)} file(s) with on-open execution surface"
+    if adjudicated:
+        summary += f"; {adjudicated} adjudicated false (hash-verified authentic), {len(counting)} count toward the exit code"
+    print(summary + ". This is a TRIAGE aid, not proof of safety — review before opening in an editor or agent.")
+    return 1 if counting else 0
 
 
 if __name__ == "__main__":

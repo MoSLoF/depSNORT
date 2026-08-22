@@ -4426,3 +4426,41 @@ added rather than bent into the scanner:
 No Go code changed. Proof: RepoGuard py_compiles, and on a crafted fixture flags a folderOpen VS Code task and
 a Miasma C2 IOC (exit 1) while staying silent on an install-time-only fixture; the IOC feed loads through
 depSNORT and matches the poisoned coordinate. go build clean.
+
+## D-121 — Adjudication mechanisms: prove findings true or false, never exempt them
+
+The self-assessment run under D-120's quarantine workflow surfaced two standing detections on depSNORT's own
+repo: RepoGuard flagging its own signature table as campaign IOCs, and the self-scan flagging the adversarial
+fixtures. The cheap fix — exempt the tool's path, exclude testdata/ — is the allowlist anti-pattern this
+project has rejected at every prior fork (D-104, D-108, D-110/111): every exemption is a place a real attack
+can hide. The goal is never to silence a finding; it is to go further and PROVE it true or false, with the
+proof recorded. Two mechanisms:
+
+RepoGuard --verify (tamper adjudication). Takes a sha256sum-format manifest of known-authentic files
+(tools/ihbv-authentic.sha256 ships the repo's three Python tools). A listed file whose full-file hash matches
+has its findings ADJUDICATED FALSE — they remain in every output with their evidence, labeled with the proof,
+and stop counting toward the exit code, because the adjudication IS the evidence. A hash MISMATCH becomes a
+new CRITICAL TAMPERED finding: a file wearing a known-authentic name with non-authentic content is precisely
+the planted-lookalike threat, and the file's other findings keep counting (a failed verification revokes
+nothing-to-hide status, it never grants it). Hashing is full-file and chunked — a MAX_READ-capped hash would
+let a payload appended past the cap verify as authentic. Trust caveat stated in the tool and the manifest: a
+manifest inside the repo it verifies can be tampered alongside the files; the real chain is YOUR trusted
+repoguard + YOUR out-of-band manifest against the quarantine clone. Where an exemption would have made the
+tool blind to a tampered copy of itself, --verify makes that copy the loudest thing in the report.
+
+depSNORT containment (reachability adjudication). Every finding now carries ReachableRoots — the complete,
+sorted set of scan roots that reach its node over ANY edge type (hooks and artifacts attribute through their
+declaring subtree; DepPath's single shortest chain cannot carry this). With -real-roots (comma-separated
+substrings naming the roots the operator actually builds/ships), a finding NO designated root reaches is
+labeled Contained, with the proof in its evidence and in the structured field (JSON reachable_from_roots /
+contained; SARIF reachableRoots / contained properties). The invariant, test-pinned: containment NEVER changes
+a gate class, a count, or the exit code — a contained block still blocks. It is an adjudication label riding
+on an otherwise untouched finding, unlike the recency/presumed demotions which deliberately re-gate.
+
+Proof: three verdict tests (complete multi-root attribution incl. hook edges; adjudicates only unreachable
+findings, with evidence; gate/counts/exit byte-identical with and without the label). Mutation-proven:
+softening a contained finding's gate fails the invariant test; truncating reachability to direct children
+fails the attribution test. RepoGuard demonstrated live: authentic target -> both standing findings
+adjudicated false, exit 0; one appended line -> CRITICAL TAMPERED, exit 1; no --verify -> behavior unchanged.
+Self-scan with -real-roots ihbv.io reproduces the manual containment proof automatically: 32/32 findings
+contained, counts and exit 1 unchanged. Full suite green (34 packages), -race clean, vet silent, gofmt clean.

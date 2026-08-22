@@ -188,6 +188,15 @@ func (SARIF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo)
 		if f.Remediation != "" {
 			props["remediation"] = f.Remediation
 		}
+		// Complete root attribution and containment adjudication. reachableRoots
+		// is the proof; contained is the verdict a dashboard can filter on —
+		// while the result itself keeps its level, so nothing disappears.
+		if len(f.ReachableRoots) > 0 {
+			props["reachableRoots"] = strings.Join(f.ReachableRoots, ", ")
+		}
+		if f.Contained {
+			props["contained"] = "true"
+		}
 		// Exploit-prediction summary as structured properties (from -epss), so a
 		// code-scanning dashboard can rank or threshold on exploit probability
 		// without parsing the evidence prose.
