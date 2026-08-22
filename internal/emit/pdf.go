@@ -44,6 +44,45 @@ func gateColor(g finding.GateClass) rgb {
 	}
 }
 
+// epssLabel renders a finding's exploit-prediction summary as a scannable,
+// colour-coded line — the same peak score the JSON and SARIF outputs carry
+// (Increment 3), given a first-class place in the human report rather than being
+// buried in the evidence prose. The colour tracks magnitude so a reader scanning
+// the page sees the hot ones without reading the numbers: >= 0.5 in the block
+// accent, >= 0.1 in the gate accent, the long tail muted. escalated appends the
+// reason a finding was raised to gate-eligible (its score met the -epss-gate
+// threshold).
+func epssLabel(es *finding.ExploitScore, escalated bool) (string, rgb) {
+	c := colMuted
+	switch {
+	case es.Peak >= 0.5:
+		c = colBlock
+	case es.Peak >= 0.1:
+		c = colGate
+	}
+	s := fmt.Sprintf("Exploit prediction (EPSS): %.3f  -  %.1fth percentile  -  %s",
+		es.Peak, es.Percentile*100, es.CVE)
+	if escalated {
+		s += "  -  escalated to gate-eligible"
+	}
+	return s, c
+}
+
+// evidenceForDisplay strips the "; peak EPSS …" tail VC-008 appends to its
+// evidence when a structured EPSS score is present, so the PDF shows that score
+// once — on its own dedicated line — instead of twice. The invariant is exact:
+// VC-008 sets f.EPSS and appends that suffix in the same branch, so the marker is
+// present whenever f.EPSS is. Other formats keep the full evidence string.
+func evidenceForDisplay(f finding.Finding) string {
+	if f.EPSS == nil {
+		return f.Evidence
+	}
+	if i := strings.Index(f.Evidence, "; peak EPSS "); i >= 0 {
+		return f.Evidence[:i]
+	}
+	return f.Evidence
+}
+
 // gateLabel is the human label for a gate class.
 func gateLabel(g finding.GateClass) string {
 	switch g {
@@ -339,8 +378,16 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 			meta += fmt.Sprintf("  -  score %.3f", score)
 			d.text(meta, fontMono, 8, colMuted, 8, 11)
 
-			if f.Evidence != "" {
-				d.wrapped("Evidence: "+f.Evidence, fontRegular, 8.5, colMuted, 8, 10.5)
+			// Exploit-prediction line, when the finding carries an EPSS score.
+			// Placed right under the scoring line so the "how likely to be
+			// exploited" axis reads alongside "how bad / how sure".
+			if f.EPSS != nil {
+				epssText, epssCol := epssLabel(f.EPSS, f.GateClass == finding.GateEligible)
+				d.text(epssText, fontMono, 8, epssCol, 8, 11)
+			}
+
+			if ev := evidenceForDisplay(f); ev != "" {
+				d.wrapped("Evidence: "+ev, fontRegular, 8.5, colMuted, 8, 10.5)
 			}
 			if f.Remediation != "" {
 				d.wrapped("Remediation: "+f.Remediation, fontRegular, 8.5, colMuted, 8, 10.5)
@@ -372,10 +419,13 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 		depth               int
 		gateRank            int     // 0 block, 1 gate-eligible, 2 advisory-only
 		score               float64 // highest composed score on the package
+		peakEPSS            float64 // highest EPSS across the package's findings
+		hasEPSS             bool    // any finding carried an EPSS score
 		truth               string  // version_truth, when not observed
 	}
 	var rows []row
 	var clean int
+	anyEPSS := false
 	for _, n := range g.SortedNodes() {
 		if n.Kind != graph.KindPackage {
 			continue
@@ -406,6 +456,15 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 			if s := f.Score(); s > r.score {
 				r.score = s
 			}
+			// Peak exploit-probability across this package's findings — the same
+			// per-finding EPSS score the findings section shows (D-115), rolled up
+			// to a per-package column so the risk table can be scanned for "what is
+			// actually being exploited" without cross-referencing each finding.
+			if f.EPSS != nil && (!r.hasEPSS || f.EPSS.Peak > r.peakEPSS) {
+				r.hasEPSS = true
+				r.peakEPSS = f.EPSS.Peak
+				anyEPSS = true
+			}
 		}
 		rows = append(rows, r)
 	}
@@ -428,6 +487,10 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 		if rows[i].score != rows[j].score {
 			return rows[i].score > rows[j].score
 		}
+		// Among otherwise-equal rows, the more exploitable package floats up.
+		if rows[i].peakEPSS != rows[j].peakEPSS {
+			return rows[i].peakEPSS > rows[j].peakEPSS
+		}
 		return rows[i].name < rows[j].name
 	})
 
@@ -442,9 +505,11 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 		d.gap(3)
 
 		// Header uses the SAME monospace font and format string as the rows —
-		// a proportional header over monospace rows will not line up.
-		const riskRowFmt = "%-9s %-34s %-14s %s"
-		d.text(fmt.Sprintf(riskRowFmt, "RISK", "PACKAGE", "VERSION", "DEPTH"),
+		// a proportional header over monospace rows will not line up. The EPSS
+		// column carries each package's peak exploit-probability (blank when no
+		// finding on the package was scored, e.g. -epss was off).
+		const riskRowFmt = "%-9s %-32s %-14s %-6s %s"
+		d.text(fmt.Sprintf(riskRowFmt, "RISK", "PACKAGE", "VERSION", "EPSS", "DEPTH"),
 			fontMono, 8, colFaint, 8, 12)
 
 		shown := 0
@@ -476,14 +541,28 @@ func (PDF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo) e
 				ver = "?" + defaultIfEmpty(ver, "unresolved")
 				anyPresumed = true
 			}
+			epssCell := "-"
+			if r.hasEPSS {
+				epssCell = fmt.Sprintf("%.3f", r.peakEPSS)
+			}
 			d.space(11)
 			d.rect(marginLeft, 2.5, 9, c)
 			d.text(fmt.Sprintf(riskRowFmt,
 				strings.ToUpper(r.risk),
-				truncateRunes(r.name, 34),
+				truncateRunes(r.name, 32),
 				truncateRunes(ver, 14),
+				epssCell,
 				fmt.Sprintf("%d", r.depth)),
 				fontMono, 8, colInk, 8, 11)
+		}
+		if anyEPSS {
+			d.gap(3)
+			d.wrapped(
+				"The EPSS column is the peak FIRST.org exploit-probability (0-1) across a "+
+					"package's scored CVEs — the likelihood it is exploited in the wild in the "+
+					"next 30 days. A dash means no finding on the package carried a score (no "+
+					"CVE, or -epss was off).",
+				fontRegular, 8.5, colFaint, 8, 11)
 		}
 		if anyPresumed {
 			d.gap(3)
