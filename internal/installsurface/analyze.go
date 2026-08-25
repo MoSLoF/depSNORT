@@ -613,6 +613,26 @@ func isIdentByte(b byte) bool {
 	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
+// boundaryCheckedPunctuationMarkers are punctuation-anchored persistence
+// markers (isWordMarker is false for them, since they contain non-identifier
+// characters) that STILL need the dual-boundary containsWord check, unlike
+// the rest of that class (.bashrc, /etc/, .git/hooks/). Found via an FP sweep
+// (D-130): ".profile" is simultaneously the shell dotfile AND the generic
+// suffix of any object-property access — `user.profileImage`,
+// `settings.profileData`, `options.profile` all contain the literal
+// substring ".profile" with nothing to do with the dotfile technique. Unlike
+// most punctuation-anchored markers, "profile" alone is a common enough
+// identifier stem that "specific enough to stay a raw substring" does not
+// hold. The real technique always writes/references ".profile" as a
+// complete path component — preceded by a quote, path separator, or
+// whitespace, followed by a quote, separator, whitespace, or end of string —
+// never continued by, or continuing from, another identifier character,
+// which is exactly what containsWord already checks on both sides for
+// identifier-shaped markers. Costs nothing against the real technique.
+var boundaryCheckedPunctuationMarkers = map[string]bool{
+	".profile": true,
+}
+
 // isWordMarker reports whether a marker is a bare identifier-shaped token
 // (letters/digits/_ only), which must be matched on word boundaries rather than
 // as a raw substring so it does not fire inside a larger identifier.
@@ -686,11 +706,13 @@ func scanCaps(text string) ([]Capability, []string) {
 	// on WORD BOUNDARIES so they do not fire inside a larger token — `systemd` no
 	// longer matches the mkwinsyscall `-systemdll` flag (a beats live-fire FP),
 	// nor `crontab` inside `crontabber`. Punctuation-anchored markers (.bashrc,
-	// /etc/, .git/hooks/) are specific enough to stay raw substring matches.
+	// /etc/, .git/hooks/) are specific enough to stay raw substring matches —
+	// except boundaryCheckedPunctuationMarkers (D-130), which need the same
+	// dual-boundary check despite containing punctuation.
 	for _, m := range persistenceMarkers {
 		lm := strings.ToLower(m)
 		matched := strings.Contains(lower, lm)
-		if matched && isWordMarker(m) {
+		if matched && (isWordMarker(m) || boundaryCheckedPunctuationMarkers[m]) {
 			matched = containsWord(lower, lm)
 		}
 		if matched {
