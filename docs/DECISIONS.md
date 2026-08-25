@@ -5005,3 +5005,79 @@ Validation: full suite green (34 packages), `-race` clean on `internal/installsu
 `gofmt` no diffs. Live CLI validation: a synthetic install hook doing only `require('./etc/templates/
 config.js')` now scores clean of `VC-002g`. A real `fs.writeFileSync('/etc/cron.d/evil', ...)` combined with
 a piped-curl cradle still fires both `VC-002f` and `VC-002g` correctly, unaffected by the fix.
+
+## D-132 — OPU-38: analyze a publishable package's own install hook (not just its consumers')
+
+**Trigger:** scanning `github.com/Medium/phantomjs` (`phantomjs-prebuilt@2.1.16`) as its own repo produced
+zero install-hook findings despite `"install": "node install.js"` — a script that downloads a native binary,
+SHA-256-verifies it, and extracts it with `extract-zip`. depSNORT's install-surface main loop is keyed on a
+node's `npm.path` attribute (set to `.` for the root or `node_modules/name` for a dependency by every
+lockfile-based resolver); a root node built from a bare `package.json` with no lockfile carries no `npm.path`
+at all, so the main loop's `if relDir == "" { continue }` guard silently skips it. Correct for the common
+case (scanning your own application — your own scripts are dev tooling, not supply-chain risk), wrong for
+evaluating a package's own risk profile before adding it as a dependency, or before publishing it — exactly
+the install hook that runs on every consumer's `npm install`.
+
+**The fix:** a new pass after the main loop, gated on three conditions — the node is a registered graph root
+(`g.Roots`), it has no `npm.path` (not already handled by the main loop), and its `package.json` does NOT
+carry `"private": true` (application roots' `postinstall`/`prepare` scripts are build steps, not
+consumer-facing install hooks, and would FP at a high rate under the same scrutiny). When all three hold, the
+root's install scripts and load-time entry module are analyzed exactly the way a lockfile-resolved
+dependency's are, attributed to the existing root node.
+
+**Review correction to the handoff's own stated scope.** The write-up claims this "does not affect
+lockfile-based scanning," citing that "the root project node gets `npm.path = '.'` from the lockfile-aware
+code paths (v1, v2/v3 lockfile formats)." True for `package-lock.json` (`npm.go`), `bun.lock`
+(`bunlock.go`), and `yarn.lock`'s own root (`yarn.go`) — confirmed by reading each resolver directly. **Not
+true for `pnpm-lock.yaml`**: `pnpmlock.go`'s synthesized root (`"Synthesized project root (pnpm-lock.yaml
+records no root name/version)"`) sets `npm.source` and `npm.version_source` but never `npm.path`. Built a
+live pnpm-lock.yaml fixture (adapted from the repo's own `pnpmlock_test.go` sample) in both a `private: true`
+and a publishable shape: the publishable one now correctly fires `VC-002b` on a network-reaching install
+script, previously silent; the private one stays clean. This is a genuine, correctly-functioning bonus —
+pnpm-based publishable packages had exactly the same undisclosed gap — but it means the patch's actual
+impact surface is one ecosystem-format wider than claimed, and the FP calibration set (four VS Code
+extension repos, all `package-lock.json`-based per the handoff) never exercised the pnpm code path at all.
+Documented here rather than left for the next person to rediscover.
+
+**Review finding — a real misattribution bug the shipped tests don't catch, mutation-proven.** The new
+section reads `absRoot/package.json` unconditionally for every node satisfying the npm.path-empty condition,
+gated on `roots[n.ID]` to restrict this to registered graph roots only. `yarn.go`'s own documented design —
+*"a yarn tree contributes no npm.path [for its dependency nodes either] and surfaces as source-unavailable"*
+— means a yarn.lock-resolved graph can contain **dependency** nodes with an equally empty `npm.path`,
+sitting in the same graph as the root. Without the `roots[n.ID]` gate, every one of those dependency nodes
+would ALSO have the root's own `package.json`/install.js content read and misattributed to it. The gate is
+present and correct in the shipped diff — but no shipped test builds a multi-node graph to prove it, so a
+future refactor dropping it silently would go uncaught. Added
+`TestOPU38DoesNotMisattributeToNonRootNodes` (a root plus a yarn-shaped dependency node, both npm.path-less);
+mutation-proven — removing the `roots[n.ID]` check reproduces the exact misattribution (the dependency node
+gains a hook node sourced from the root's `install.js`).
+
+**Review finding — a vacuous test, for a benign reason.** The shipped `TestOPU38LockfileRootNotDuplicated`
+claims to verify the OPU-38 section doesn't double-analyze an already-lockfile-resolved root. Mutation-tested
+by removing the `npm.path != ""` skip: the test still passed. Root cause, confirmed by reading `graph.go`:
+`AddNode` and `AddEdge` are both idempotent by ID (`if existing, ok := g.Nodes[n.ID]; ok { return existing }`;
+an edge key already in `edgeSeen` is a no-op), so re-running `Analyze`/`addSurfaceToGraph` on identical
+content converges to the same graph state regardless of whether this specific guard exists — the assertion
+cannot, by construction, distinguish "ran once" from "ran twice, deduplicated." Unlike the `roots[n.ID]`
+guard above, this one is not a correctness bug hiding behind a bad test: the guard is real and worth keeping
+purely as a performance optimization (skips a redundant read + re-parse + re-analysis on every scan of an
+already-resolved root), but the test's own claim overstated what it proves. Left the guard in place, added a
+code comment on the test explaining the idempotency (so the next person doesn't over-trust a passing
+mutation-tested-looking assertion that structurally can't fail for the reason it claims), and pointed to the
+new, genuinely discriminating test instead.
+
+Validation: full suite green (34 packages), `-race` clean on `internal/ecosystem/npm`. Live CLI validation
+against a faithful reproduction of the real `phantomjs-prebuilt` install chain (download via `request`,
+SHA-256 verification, `extract-zip` — built independently from the repo's actual `install.js` structure, not
+copied from the handoff's own claims) confirms `VC-002b` fires (network egress) and `VC-002f` does not (the
+download-then-extract-a-shipped-binary shape is the same non-cradle pattern esbuild's D-25/D-28 regression
+already protects — no shell pipe, no cradle signal) — exit 0 without `-fail-on-eligible`, exit 2 with it,
+matching the handoff's own before/after table exactly. A live pnpm fixture (see above) confirms the
+previously-undisclosed pnpm impact surface behaves correctly in both directions.
+
+Residual limitations, carried forward from the handoff: only the npm ecosystem is covered (PyPI/RubyGems/
+Cargo have the analogous root-hook gap, unaddressed here); `"private": true` is npm's own convention for
+"not meant to be published," not a semantic guarantee — a package that sets it for unrelated internal
+reasons would be excluded, and a workspace root that omits it (however unusual) is included; a bare
+`package.json` with no lockfile still leaves the project's OWN declared dependencies unresolved as a
+separate, pre-existing coverage gap this patch does not touch.

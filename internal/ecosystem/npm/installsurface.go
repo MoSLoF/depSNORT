@@ -21,6 +21,11 @@ type pkgManifest struct {
 	// script can still run a payload the instant it is imported.
 	Main   string `json:"main"`
 	Module string `json:"module"`
+	// Private is the npm "private": true flag — set on application roots that
+	// are not meant to be published as installable packages (OPU-38). When true,
+	// the project's own install scripts are developer tooling, not consumer-facing
+	// install hooks, and are excluded from the publishable-package hook analysis.
+	Private bool `json:"private"`
 }
 
 // npmEntryCandidates returns the entry modules an import of this package could
@@ -208,6 +213,86 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			addSurfaceToGraph(g, rootPkg, surface)
 		}
 	}
+	// OPU-38: Root-package install-hook analysis (publishable package mode).
+	//
+	// The main loop above is keyed on npm.path, which lockfile-resolved packages
+	// carry as "." (root) or "node_modules/name" (dependency). Root project nodes
+	// created from a bare package.json (no lockfile) carry npm.source but NOT
+	// npm.path, so they are silently skipped by the `relDir == ""` guard above.
+	// That gap is intentional for the common case (scanning your own project: your
+	// own install scripts are developer tooling, not supply-chain risk), but wrong
+	// for the specific use case this scan was run on: evaluating a PUBLISHABLE npm
+	// package before adding it as a dependency. A package's install hook is exactly
+	// what runs on every consumer's machine during `npm install` — the canonical
+	// supply-chain attack surface.
+	//
+	// Condition for publishable-package mode (OPU-38):
+	//   1. The node is a registered graph root (g.Roots).
+	//   2. It has no npm.path (was NOT already analyzed in the main loop).
+	//   3. Its package.json does NOT carry "private": true. Private packages are
+	//      application roots — their postinstall/prepare scripts are build steps
+	//      (next build, husky install) that would FP at high rate if scored with
+	//      the same lens as a dependency's install hook.
+	//
+	// Validated against: Medium/phantomjs (phantomjs-prebuilt@2.1.16, no lockfile,
+	// publishable, install: "node install.js" — download + SHA-256 verify + exec).
+	// FP calibration: four large VS Code extension repos (all have "private": true)
+	// and the vscode-eslint/gitlens repos — none triggered under this condition.
+	roots := make(map[string]bool, len(g.Roots))
+	for _, id := range g.Roots {
+		roots[id] = true
+	}
+	for _, n := range g.SortedNodes() {
+		if !roots[n.ID] {
+			continue // not a root
+		}
+		if n.Attr["npm.path"] != "" {
+			continue // already handled in the main loop (lockfile path)
+		}
+		manifestPath := filepath.Join(absRoot, "package.json")
+		raw, err := reader.ReadFile(manifestPath)
+		if err != nil {
+			continue // unreadable or absent — not an error for OPU-38's purpose
+		}
+		var m pkgManifest
+		if err := json.Unmarshal(raw, &m); err != nil {
+			continue
+		}
+		if m.Private {
+			// Application root. install scripts are developer tooling, not consumer
+			// hooks. Leave them unscored to avoid FPs on build steps.
+			continue
+		}
+		if len(m.Scripts) == 0 {
+			continue // nothing to analyze
+		}
+		// Publishable package with install scripts. Analyze them the same way the
+		// main loop analyzes a dependency's hooks.
+		read := func(rel string) ([]byte, bool) {
+			clean := filepath.Clean(filepath.FromSlash(rel))
+			if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+				return nil, false
+			}
+			b, err := reader.ReadFile(filepath.Join(absRoot, clean))
+			if err != nil {
+				return nil, false
+			}
+			return b, true
+		}
+		surface := installsurface.Analyze(m.Scripts, read)
+		addSurfaceToGraph(g, n, surface)
+		// Load-time (entry-module) analysis: the same gap that exists for
+		// lockfile-resolved packages also exists here (OPU-31).
+		for _, cand := range npmEntryCandidates(m) {
+			src, err := reader.ReadFile(filepath.Join(absRoot, filepath.FromSlash(cand)))
+			if err != nil {
+				continue
+			}
+			lt := installsurface.AnalyzeLoadTime(cand, string(src), read)
+			addSurfaceToGraph(g, n, lt)
+		}
+	}
+
 	return gaps.Err()
 }
 
