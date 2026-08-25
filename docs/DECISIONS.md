@@ -4620,3 +4620,79 @@ negative tests (hex ENCODE no longer suppressed) and the now-faithful esbuild fi
 Live end-to-end: the sweep's cited shape now scores exit 2 with only the legitimate VC-002b (real network
 egress) firing — VC-002e no longer trips. Full suite green (34 packages), -race clean, go vet silent, gofmt no
 diffs.
+
+## D-126 — OPU-34: VC-002f (the cradle block) didn't generalize past the sample it was tuned against
+
+Found during a true-positive generalization sweep requested after OPU-32/33 merged: built faithful structural
+reproductions (IOCs replaced with inert RFC 5737/.invalid placeholders) of three independently-disclosed 2026
+npm campaigns — axios/plain-crypto-js (UNC1069/Sapphire Sleet, March 2026), Mastra/easy-day-js (Sapphire
+Sleet, June 2026), and a Yandex-linked dependency-confusion cluster (May 2026) — and ran them through the
+OPU-32/33 binary. VC-002e (obfuscation+exec) generalized cleanly, 3 for 3. VC-002f (critical/block, the
+cradle check) generalized 0 for 3.
+
+Two distinct structural causes: (1) `asyncCradleRe`'s window stopped at the first `;` after the fetch call —
+real callbacks routinely run several statements (`res.on('data', ...)`, buffering) before the actual spawn,
+the norm rather than the exception, confirmed on both Mastra and the dependency-confusion cluster. (2)
+`interpreterSpawnRe` only matched `spawn`/`spawnSync` with the interpreter name as an *isolated* literal
+argument; axios's real technique is `child_process.execSync(\`cscript.exe //nologo //B "${path}"\`, ...)` —
+wrong function name and wrong argument shape, both missed.
+
+Fix, and a false start worth recording: the first attempt widened the window to a flat character count
+calibrated against a real esbuild `install.js` fetch (~1,544 chars to the nearest unrelated exec call). It
+passed the new tests and immediately failed the repo's own `esbuild_regression_test.go` — the condensed
+901-char fixture puts the same shape only 294 characters apart, well inside that window. Character distance
+isn't a stable signal; it depends on how much unrelated code sits between two calls, which varies by an order
+of magnitude between a real file and a same-shape test double. The suite caught it before it shipped.
+
+Actual fix is structural, not distance-based: `asyncCradleCandidateRe` captures a broad candidate span (fetch
+call → callback introducer → up to 1,000 chars, now just a sanity bound) and a new Go-level check,
+`namedFunctionDeclRe` (`\bfunction\s+[A-Za-z_$][\w$]*\s*\(`), rejects any candidate whose span crosses into a
+*named* function declaration — the shape esbuild's real installer uses (the exec call lives in a separately
+declared, separately called function; Mastra and the dependency-confusion cluster nest everything as
+anonymous arrows directly inside the original callback, crossing no named declaration). Same
+regex-candidate-plus-Go-filter pattern the codebase already uses for OPU-27's runner-target check.
+`interpreterSpawnRe` was broadened to the full `exec`/`execSync`/`execFile(Sync)?`/`spawn(Sync)?` family,
+matching the interpreter name as a whole-word token anywhere inside the first quoted/backtick argument (the
+argument must still open with a quote/backtick — a variable-built command still doesn't match, a documented
+residual gap, not claimed as closed).
+
+Independent review before merge, mutation-proving all three claimed mechanisms individually (revert the
+mechanism, confirm the expected test subset fails, restore, reconfirm green):
+
+- The window widening (Gap A) and `interpreterSpawnRe` broadening (Gap B) are both genuine and independently
+  load-bearing — reverting Gap A breaks Mastra/dep-confusion only (both use bare `spawn`, unaffected by Gap
+  B); reverting Gap B breaks axios only (Mastra/dep-confusion don't depend on it).
+- The named-function structural filter is genuine — but only after discarding two vacuous proof attempts
+  first. A self-authored corrected test using `execSync(` as the trigger verb never matched at all
+  (`asyncCradleCandidateRe`'s alternation requires the literal `child_process.exec` immediately followed by
+  `\s*\(` — `execSync(` inserts `Sync` in between). More importantly, the *shipped* `opu34_test.go`'s own
+  esbuild-shape negative test passed for the wrong reason: its fixture pads 1,500 bytes of filler between the
+  fetch and the exec call, which by itself pushes the span past `asyncCradleCandidateRe`'s 1,000-char capture
+  window — the test never reaches `namedFunctionDeclRe` at all. Confirmed by removing the named-function
+  rejection in `scanCaps` and observing the shipped test still passed.
+
+Fix for the review finding: rather than patch the shipped synthetic (following the OPU-32/33 precedent of
+anchoring regression proof to a real fixture over a synthetic stand-in), added
+`TestEsbuildInstallerNamedFunctionExcludesCradle` to `esbuild_regression_test.go` against the real, un-padded
+`esbuildLikeInstallJS` fixture, where the nearest exec call sits ~294 characters from the fetch call — well
+within the 1,000-char window, so exclusion can only come from the named-function filter itself. Mutation-
+proven: removing the filter's rejection fails this new test while leaving the shipped (window-distance-based)
+test passing, isolating exactly what each test does and doesn't prove. The shipped test's own comment was
+extended to document this distinction rather than leave a misleading claim standing.
+
+Live end-to-end, same binary, npm project + lockfile-resolved dependency with a real postinstall hook (not
+just Go-level unit tests): BRIDGEHEAD (the OPU-32 sample) still blocks (VC-002a/e/f, exit 1) — unchanged. The
+esbuild FP shape still scores clean of cradle/obfuscation (VC-002a/b only, exit 0) — unchanged. All three
+2026-campaign reproductions (axios, Mastra, dependency-confusion) now block (VC-002a/e/f, exit 1) — reversing
+the 0/3 pre-patch result. Full suite green (34 packages), `-race` clean on `internal/installsurface`, `go
+vet` silent, `gofmt` no diffs.
+
+Residual limitations, disclosed rather than closed: variable-built exec commands
+(`command.push('powershell.exe'); exec(command, ...)`, sudo-prompt's real pattern) still evade
+`interpreterSpawnRe` — closing this needs light dataflow tracking, a bigger change than this patch attempts.
+The 1,000-char candidate window is a sanity bound, not a real parser — an adversarial or unusually long
+callback could in principle push a real spawn outside it. The named-function filter has a known inverse
+failure mode: a cradle whose author deliberately wraps the spawn in a named (not anonymous) helper —
+`function launch(cmd) { spawn(cmd); }` called from inside the fetch callback — would now be excluded, even
+though it's genuinely part of the same cradle. Not observed in any of the three real samples tested; worth a
+note for the next FP/TP sweep.

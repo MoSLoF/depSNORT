@@ -319,20 +319,60 @@ var (
 	// single-line shell/PowerShell pipe idioms (`curl ... | sh`), which don't
 	// exist in a JS-native installer. BRIDGEHEAD's native-Windows branch
 	// fetches with a callback and spawns from INSIDE that callback instead of
-	// a shell pipe: `https.get(url, () => spawn(dest))`. Gated to an
-	// exec-family token appearing as an ARGUMENT within the same statement as
-	// the fetch call (bounded at the next `;`) so a fetch and an unrelated
-	// LATER spawn elsewhere in the hook — esbuild's install-then-run shape,
-	// the FP this package was already written to avoid (Decision D-28) —
-	// does not match.
-	asyncCradleRe = regexp.MustCompile(`(?is)(?:https?\.(?:get|request)|fetch|axios\.(?:get|post))\s*\([^;]{0,400}?(?:spawn|execFile|execFileSync|child_process\.exec)\s*\(`)
+	// a shell pipe: `https.get(url, () => spawn(dest))`.
+	//
+	// OPU-34: the original version bounded the window at the next `;`, which
+	// excludes a callback with more than one statement before the actual
+	// spawn — the norm, not the exception, confirmed on 2 of 3 real 2026
+	// campaigns tested (Mastra/easy-day-js, a dependency-confusion cluster).
+	// A first fix tried widening to a flat character count instead, but
+	// character distance is NOT a reliable proxy: the same esbuild shape
+	// (Decision D-28's stated FP target) sits 294 characters apart in the
+	// existing condensed regression fixture and 1,544 characters apart in
+	// the real 300-line file — no single window threshold survives both.
+	//
+	// The real distinguishing signal is structural, not distance-based:
+	// esbuild's exec call always lives inside a separately-declared NAMED
+	// function (`function installUsingNPM(...) {`/`function validate(...)
+	// {`), reached only because that function is called elsewhere — it is
+	// never inside the fetch call's own anonymous callback. Mastra and the
+	// dependency-confusion cluster nest everything as anonymous arrows
+	// directly inside the original callback; no named function declaration
+	// ever sits between the callback and the spawn. asyncCradleCandidateRe
+	// finds the candidate span (generously bounded, since distance itself
+	// no longer needs to do the discriminating work); the Go loop below
+	// rejects any candidate whose captured span contains a named function
+	// declaration.
+	asyncCradleCandidateRe = regexp.MustCompile(`(?is)(?:https?\.(?:get|request)|fetch|axios\.(?:get|post))\s*\([\s\S]{0,80}?(?:=>|function)([\s\S]{0,1000}?)(?:spawn|execFile|execFileSync|child_process\.exec)\s*\(`)
+
+	// A NAMED function declaration — `function foo(...)`, name required.
+	// An anonymous callback (`function(res) {...}` or `(res) => {...}`) does
+	// NOT match this: only a genuinely separate, independently-invoked
+	// function does, which is exactly the esbuild-vs-Mastra distinction.
+	namedFunctionDeclRe = regexp.MustCompile(`\bfunction\s+[A-Za-z_$][\w$]*\s*\(`)
 
 	// OPU-32: a spawned scripting interpreter (powershell, cmd, wscript,
 	// cscript, mshta). On its own this is just CapExec — legitimate installers
 	// occasionally shell out to one of these. It only becomes a cradle signal
 	// in combination with CapObfuscation below (decode-then-invoke-interpreter),
 	// which is checked after this text has been fully scanned.
-	interpreterSpawnRe = regexp.MustCompile(`(?i)spawn(?:Sync)?\s*\(\s*['"](?:powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|wscript(?:\.exe)?|cscript(?:\.exe)?|mshta(?:\.exe)?)['"]`)
+	//
+	// OPU-34: the original version only matched spawn/spawnSync with the
+	// interpreter as an ISOLATED literal argument (spawn('powershell.exe',
+	// ...)). Real malware (axios/plain-crypto-js, March 2026) invokes via
+	// execSync with a shell COMMAND-LINE STRING containing the interpreter
+	// name as a substring (execSync(`cscript.exe //nologo //B "..."`)) —
+	// wrong function name AND wrong argument shape, both missed. Broadened
+	// to the full exec family and to matching the interpreter as a
+	// whole-word token anywhere within the first quoted/backtick argument,
+	// not just as that argument's entire content. Still requires the
+	// argument to open with a quote/backtick immediately (allowing only
+	// whitespace before it) — a variable-built command
+	// (`exec(command, ...)` where `command` was assembled elsewhere, e.g.
+	// sudo-prompt's real `command.push('powershell.exe')` pattern) does not
+	// match; that further indirection is a known residual gap, not
+	// something this fix claims to close.
+	interpreterSpawnRe = regexp.MustCompile(`(?i)(?:spawn(?:Sync)?|exec(?:Sync|File(?:Sync)?)?)\s*\(\s*[` + "`" + `'"][^` + "`" + `'"]{0,200}\b(?:powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|wscript(?:\.exe)?|cscript(?:\.exe)?|mshta(?:\.exe)?)\b`)
 
 	// psCallOperatorRe detects the PowerShell CALL operator — a single `&` that
 	// invokes a command by quoted path, scriptblock, or variable (`& "C:\p.exe"`,
@@ -691,11 +731,18 @@ func scanCaps(text string) ([]Capability, []string) {
 	if m := xorCharCodeRe.FindString(text); m != "" {
 		add(CapObfuscation, "xor-charcode:"+strings.TrimSpace(m))
 	}
-	// Async fetch-then-exec cradle (OPU-32): a network fetch whose own
-	// statement spawns a process — the JS-native analog of `curl ... | sh`.
-	// See asyncCradleRe above.
-	if m := asyncCradleRe.FindString(text); m != "" {
-		add(CapCradle, "async-cradle:"+strings.TrimSpace(m))
+	// Async fetch-then-exec cradle (OPU-32, structural filter added
+	// OPU-34): a network fetch whose own callback spawns a process — the
+	// JS-native analog of `curl ... | sh`. Reject any candidate whose span
+	// crosses into a separately-declared named function (see
+	// namedFunctionDeclRe above) — that signals the exec call belongs to
+	// an unrelated function, not this fetch's own callback.
+	for _, m := range asyncCradleCandidateRe.FindAllStringSubmatch(text, -1) {
+		if namedFunctionDeclRe.MatchString(m[1]) {
+			continue
+		}
+		add(CapCradle, "async-cradle:"+strings.TrimSpace(m[0][:min(len(m[0]), 80)]))
+		break
 	}
 	// Decode-then-invoke-interpreter (OPU-32): obfuscation immediately feeding
 	// a spawned script interpreter is a cradle even when the decoded command

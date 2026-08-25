@@ -99,6 +99,25 @@ func TestEsbuildRemotesExcludeCommentURLs(t *testing.T) {
 	}
 }
 
+// TestEsbuildInstallerNamedFunctionExcludesCradle covers OPU-34's structural
+// cradle filter (namedFunctionDeclRe) against the real esbuildLikeInstallJS
+// fixture, not a synthetic stand-in. In this fixture, downloadDirectlyFromNPM
+// fetches via fetch().then(...), and the nearest exec-family call
+// (execFileSync in validate()) sits inside its own separately-declared named
+// function, ~294 characters after the fetch call — well WITHIN
+// asyncCradleCandidateRe's 1,000-char window, so this is a genuine test of
+// the named-function structural filter itself, not of window-distance
+// exclusion (verified by direct regex inspection: the candidate span is
+// captured and correctly rejected only because it crosses into
+// "function verifyChecksum(" / "function validate("). Mutation-tested:
+// removing namedFunctionDeclRe's rejection in scanCaps causes this to fail.
+func TestEsbuildInstallerNamedFunctionExcludesCradle(t *testing.T) {
+	h := analyzeOneHookCaps(t, esbuildLikeInstallJS)
+	if hasCap(h, CapCradle) {
+		t.Error("esbuild's real install.js shape (fetch, then exec in a separately-named function) must not read as CapCradle (OPU-34)")
+	}
+}
+
 // Control: a genuinely obfuscated dropper — char-code ASSEMBLY feeding eval —
 // must still trip obfuscation, or the fix would be a blindfold.
 func TestCharCodeAssemblyStillDetected(t *testing.T) {
