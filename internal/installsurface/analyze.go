@@ -292,6 +292,36 @@ var (
 	// cmd.exe delayed expansion — enables !var! substitution for evasion.
 	delayedExpansionRe = regexp.MustCompile(`(?i)/v:on\b`)
 
+	// OPU-32 (BRIDGEHEAD, Aug 2026): a byte XORed against a key-derived byte
+	// and fed straight into fromCharCode. Functionally a decode — this is
+	// literally how the BRIDGEHEAD dropper unpacked its C2 URL and PowerShell
+	// bridge — but it shares no tokens with the base64/hex markers above and
+	// matches none of the three charCodeAssemblyRe shapes: it is ONE
+	// fromCharCode call per loop iteration (a hand-rolled cipher loop), not an
+	// assembled batch. Gated on the `^` appearing INSIDE the fromCharCode
+	// argument list so an incidental XOR used for something unrelated
+	// (checksum math, RNG mixing) elsewhere in the file does not match.
+	xorCharCodeRe = regexp.MustCompile(`(?i)fromCharCode\s*\([^)]*\^[^)]*\)`)
+
+	// OPU-32: async fetch-then-exec cradle. cradleRe (D-28) only matches
+	// single-line shell/PowerShell pipe idioms (`curl ... | sh`), which don't
+	// exist in a JS-native installer. BRIDGEHEAD's native-Windows branch
+	// fetches with a callback and spawns from INSIDE that callback instead of
+	// a shell pipe: `https.get(url, () => spawn(dest))`. Gated to an
+	// exec-family token appearing as an ARGUMENT within the same statement as
+	// the fetch call (bounded at the next `;`) so a fetch and an unrelated
+	// LATER spawn elsewhere in the hook — esbuild's install-then-run shape,
+	// the FP this package was already written to avoid (Decision D-28) —
+	// does not match.
+	asyncCradleRe = regexp.MustCompile(`(?is)(?:https?\.(?:get|request)|fetch|axios\.(?:get|post))\s*\([^;]{0,400}?(?:spawn|execFile|execFileSync|child_process\.exec)\s*\(`)
+
+	// OPU-32: a spawned scripting interpreter (powershell, cmd, wscript,
+	// cscript, mshta). On its own this is just CapExec — legitimate installers
+	// occasionally shell out to one of these. It only becomes a cradle signal
+	// in combination with CapObfuscation below (decode-then-invoke-interpreter),
+	// which is checked after this text has been fully scanned.
+	interpreterSpawnRe = regexp.MustCompile(`(?i)spawn(?:Sync)?\s*\(\s*['"](?:powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|wscript(?:\.exe)?|cscript(?:\.exe)?|mshta(?:\.exe)?)['"]`)
+
 	// psCallOperatorRe detects the PowerShell CALL operator — a single `&` that
 	// invokes a command by quoted path, scriptblock, or variable (`& "C:\p.exe"`,
 	// `& {…}`, `& $payload`, and the no-space `&"p.exe"`/`&$payload` forms). It
@@ -643,6 +673,34 @@ func scanCaps(text string) ([]Capability, []string) {
 	if m := goRunRemoteRe.FindString(text); m != "" {
 		add(CapNetwork, "pkg-runner:"+strings.TrimSpace(m))
 		add(CapExec, "pkg-runner:"+strings.TrimSpace(m))
+	}
+	// XOR-keyed decode idiom (OPU-32): a byte XORed with a key-derived byte,
+	// fed straight into fromCharCode. See xorCharCodeRe above.
+	if m := xorCharCodeRe.FindString(text); m != "" {
+		add(CapObfuscation, "xor-charcode:"+strings.TrimSpace(m))
+	}
+	// Async fetch-then-exec cradle (OPU-32): a network fetch whose own
+	// statement spawns a process — the JS-native analog of `curl ... | sh`.
+	// See asyncCradleRe above.
+	if m := asyncCradleRe.FindString(text); m != "" {
+		add(CapCradle, "async-cradle:"+strings.TrimSpace(m))
+	}
+	// Decode-then-invoke-interpreter (OPU-32): obfuscation immediately feeding
+	// a spawned script interpreter is a cradle even when the decoded command
+	// itself is not statically resolvable. BRIDGEHEAD's WSL branch is exactly
+	// this shape: the actual fetch-and-run only exists inside a PowerShell
+	// string assembled at runtime from four decoded fragments, so it never
+	// appears as literal source text for cradleRe or asyncCradleRe to match.
+	// This does not decode or reason about that string (Decision D-04) — it
+	// scores the co-occurrence of "this hook decodes something" and "this hook
+	// hands a decoded value to a script interpreter" as itself the finding.
+	if interpreterSpawnRe.MatchString(text) {
+		for _, c := range caps {
+			if c == CapObfuscation {
+				add(CapCradle, "decode-then-interpreter-spawn")
+				break
+			}
+		}
 	}
 	return caps, dedupe(ev)
 }
