@@ -415,7 +415,42 @@ var (
 		// (never for a consumer's tarball install), and listing it would be the
 		// warning tax the persistence-vs-benign split exists to avoid (OPU-19).
 		"core.hooksPath", ".git/hooks/", ".git\\hooks\\",
+
+		// AI-coding-agent / editor auto-run configuration (OPU-35): VS Code's
+		// `.vscode/tasks.json` (a task with `runOn: folderOpen` fires the instant
+		// the folder is opened, no user action) and Claude Code's
+		// `.claude/settings.json` / `.claude/settings.local.json` (a `SessionStart`
+		// hook fires on every session, surviving `npm uninstall` entirely since it
+		// lives in project config, not node_modules). This is the actual mechanism
+		// the Mini Shai-Hulud SAP CAP wave used (April 2026, StepSecurity/Socket) —
+		// a dependency's postinstall hook WRITING these files into the consuming
+		// project is the persistence step, exactly analogous to a shell-profile or
+		// cron write above. As with those, a library's install hook has no
+		// legitimate reason to write either path; a PROJECT'S OWN checked-in
+		// tasks.json (an extremely common, benign pattern — vscode-eslint and
+		// vscode-gitlens both ship one with `runOn: folderOpen` on an ordinary
+		// build-watch task) is never at risk of matching here, because this marker
+		// set only scans an install HOOK'S OWN source text, never the rest of the
+		// project tree — confirmed against both of those real repos' actual
+		// postinstall source before this landed.
+		".vscode/tasks.json", ".claude/settings.json", ".claude/settings.local.json",
 	}
+
+	// claudeSettingsJoinRe / vscodeTasksJoinRe (OPU-35): the SAME two targets
+	// above, constructed via path.join()-style adjacent quoted segments rather
+	// than a single combined string — e.g.
+	// path.join(cwd, '.claude', 'settings.json'). This is the idiomatic
+	// Node.js path-construction style, arguably more common than a hardcoded
+	// combined string, and the flat substring markers above miss it entirely:
+	// confirmed empirically while validating this patch — a faithful
+	// reproduction of the real Mini Shai-Hulud mechanism using
+	// path.join(dir, '.claude', 'settings.json') did not fire until this was
+	// added. Deliberately narrow: catches the two segments as sibling
+	// arguments (the common case), not a variable holding the directory
+	// constructed on an earlier line — that crosses a statement boundary this
+	// static, zero-execution pass does not track (Decision D-04).
+	claudeSettingsJoinRe = regexp.MustCompile(`(?i)['"]\.claude['"]\s*,\s*['"]settings(\.local)?\.json['"]`)
+	vscodeTasksJoinRe    = regexp.MustCompile(`(?i)['"]\.vscode['"]\s*,\s*['"]tasks\.json['"]`)
 
 	// installWriteMarkers are ordinary filesystem writes an install legitimately
 	// makes (site-packages, .pth, gem dirs, locating the home directory). They are
@@ -654,6 +689,23 @@ func scanCaps(text string) ([]Capability, []string) {
 	// over-matched benign identifiers/prose (process_startup, "on startup").
 	if startupFolderRe.MatchString(text) {
 		add(CapFilesystem, "startup-folder")
+	}
+	// path.join()-split forms of the AI-agent-hook persistence targets
+	// (OPU-35): emits the SAME canonical marker string the flat substring
+	// match above would, so IsPersistenceMarker recognizes either shape
+	// identically — VC-002g does not need to know which form matched. The
+	// settings-vs-settings.local distinction (group 1) is preserved in the
+	// emitted marker so a finding's evidence names the file that was
+	// actually written, not always the non-local variant.
+	if m := claudeSettingsJoinRe.FindStringSubmatch(text); m != nil {
+		if m[1] != "" {
+			add(CapFilesystem, ".claude/settings.local.json")
+		} else {
+			add(CapFilesystem, ".claude/settings.json")
+		}
+	}
+	if vscodeTasksJoinRe.MatchString(text) {
+		add(CapFilesystem, ".vscode/tasks.json")
 	}
 
 	// A URL anywhere is a network reach even without a named client.
