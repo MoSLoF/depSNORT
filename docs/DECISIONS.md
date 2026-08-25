@@ -4846,3 +4846,63 @@ word-bounded, following the codebase's existing precedent for punctuation-anchor
 `.git/hooks/`) scanned only against install-hook source text, never the project tree — a install hook that
 merely mentions either string in passing (e.g. writing a legitimate default MCP config) is a theoretical,
 not yet observed, false-positive source worth watching in the next FP sweep.
+
+## D-129 — mcp.json FP sweep: no real FP found; a real one found instead, for a pre-existing marker, and left as-is
+
+Follow-up to D-128's disclosed residual: the `mcp.json` marker's raw-substring match (not word-bounded,
+scanned only against install-hook source text) was flagged as a theoretical, not-yet-observed FP source.
+Swept it against real npm packages before writing this off further.
+
+**mcp.json: no FP found.** Checked the published `package.json` "scripts" of ten real, actively-maintained
+MCP-ecosystem packages (`@modelcontextprotocol/server-filesystem`, `chrome-devtools-mcp`,
+`@notionhq/notion-mcp-server`, `@playwright/mcp`, `mongodb-mcp-server`, `@sentry/mcp-server`,
+`@cloudflare/mcp-server-cloudflare`, `@upstash/context7-mcp`, `add-mcp`, `@smithery/cli`) via the npm registry
+API. None reference `mcp.json` in any of the seven scripts `installsurface.Analyze` actually scans
+(`InstallHookNames`: preinstall/install/postinstall/preprepare/prepare/postprepare/prepublish) — most define no
+lifecycle scripts at all. The one real tool found that legitimately WRITES `mcp.json`-shaped config
+(`add-mcp`, via `npx add-mcp`) is invoked directly by end users, ships no lifecycle scripts of its own, and so
+is never in a position to be scanned by this marker regardless. No code change; the residual stays disclosed
+as theoretical, now on stronger empirical footing.
+
+**A real FP found instead, for a different, pre-existing marker.** `@smithery/cli`'s published `prepare`
+script (the MCP marketplace/installer CLI, a genuinely popular package) is:
+
+```
+git config core.hooksPath .githooks 2>/dev/null; pnpm run build
+```
+
+Confirmed directly against the scanner: `scanCaps` on that exact string returns `evidence: [core.hooksPath]`,
+and `IsPersistenceMarker("core.hooksPath")` is true — this trips `VC-002g` (high/gate-eligible) on a project
+depending on `@smithery/cli`. `core.hooksPath` predates this work (OPU-19/27); the finding is unrelated to
+mcp.json but surfaced during the same sweep.
+
+**Investigated whether to narrow the marker to close this FP — decided not to, deliberately.** The two
+narrowing options both cost more than they save:
+
+- *Exclude by target value* (e.g. only flag non-relative or unusual-looking hooks paths): defeated on
+  inspection. `core.hooksPath` exists specifically because the redirect TARGET is attacker-controllable —
+  that is the entire threat. A malicious install hook aiming to hijack a consumer's git hooks would use
+  exactly the same shape (a plain relative path, a conventional-sounding name like `.githooks`, `2>/dev/null`
+  suppression) precisely to blend in with the legitimate pattern; there is no textual feature separating "my
+  own repo's dev-hooks setup" from "attacker's bundled hooks directory, given a benign-looking name" — unlike
+  OPU-34's named-function filter, the two cases are the same string shape with a different (unobservable)
+  intent behind the target path, not two structurally different shapes.
+- *Exclude by hook type* (drop `prepare` from this marker specifically): this is the one that would open a
+  real hole. `prepare` was deliberately included in `InstallHookNames` because it is the hook npm actually
+  runs for a git-URL or local-path dependency — exactly the vector attackers use to ship malware while
+  dodging npm registry publish-time scanning. Excluding `prepare` to quiet this FP would blind the specific
+  attack `prepare`'s inclusion exists to catch, in exchange for reducing noise on a case that is itself
+  benign only because of npm install semantics the static scanner cannot observe (D-04): `prepare` does not
+  run for a normal registry-tarball consumer install, so Smithery's own line never actually executes against
+  a consumer's repo — a runtime fact, not a textual one.
+
+This is the same tradeoff the codebase already made once, in the opposite direction: bare `husky` was
+EXCLUDED from `persistenceMarkers` (OPU-19) because its payload is fixed and well-known — high frequency, low
+danger. `core.hooksPath` was kept explicit for the opposite reason — its target is arbitrary, so it is low
+frequency but high danger when real. Narrowing it to match husky's treatment would erase exactly the
+property that makes it worth having.
+
+**Decision: leave `core.hooksPath` as-is; record this as an investigated, confirmed, and accepted false
+positive.** No code change. The operational cost is bounded — `VC-002g` is gate-eligible, not block-tier, so
+this FP surfaces as a reviewable line item under `-fail-on-eligible`, never a blocked build. Noted here so a
+future FP sweep doesn't re-discover and re-litigate the same tradeoff from scratch.
