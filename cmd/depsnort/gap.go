@@ -117,6 +117,40 @@ var adapterHandledLocks = map[string]bool{
 	"bun.lock":      true, // npm (text lockfile; parsed by parseBunLock)
 }
 
+// aiAgentConfigIndicators are AI-coding-agent / editor auto-run configuration
+// file names that, when found in a directory, indicate an AI-agent persistence
+// surface exists there — even if no supported dependency manifest is also present
+// (OPU-37). Keeping them separate from gapManifestByName ensures they are not
+// mixed with dependency-manifest gaps: the disclosure is accurate about WHAT
+// kind of surface was found, not just "something unresolved exists here."
+//
+// This makes a lockfile-less directory that only contains, say,
+// .vscode/tasks.json discoverable as "incomplete coverage" rather than
+// "nothing to scan" — the same principle D-59 applied to unsupported dependency
+// manifests, applied now to AI-agent persistence artifacts.
+var aiAgentConfigIndicators = []string{
+	// These match the subset of installsurface.AIAgentConfigFiles that have
+	// simple single-component names (not directory-relative paths), so they
+	// can be matched against a directory listing with filepath.Base.
+	".cursorrules",
+	".windsurfrules",
+	"mcp.json",
+	".aider.conf.yml",
+}
+
+// aiAgentConfigDirIndicators are DIRECTORY-relative paths (slash-joined)
+// whose presence anywhere under a directory indicates an AI-agent surface.
+// The path is relative so a path.Join against the target directory works.
+var aiAgentConfigDirIndicators = []string{
+	".vscode/tasks.json",
+	".claude/settings.json",
+	".claude/settings.local.json",
+	".claude/setup.mjs",
+	".cursor/rules",
+	".gemini/settings.json",
+	".github/copilot-instructions.md",
+}
+
 // unreadManifest names one recognized-but-unresolved manifest and the ecosystem
 // it belongs to.
 type unreadManifest struct {
@@ -149,6 +183,22 @@ func recognizedGapManifests(path string) []unreadManifest {
 		}
 		if eco, ok := classifyGapManifest(e.Name()); ok {
 			out = append(out, unreadManifest{File: e.Name(), Ecosystem: eco})
+		}
+		// AI-agent config indicators (OPU-37): a flat file like .cursorrules or
+		// mcp.json in this directory signals an AI-agent persistence surface.
+		for _, ind := range aiAgentConfigIndicators {
+			if e.Name() == ind {
+				out = append(out, unreadManifest{File: e.Name(), Ecosystem: "ai-agent-config"})
+			}
+		}
+	}
+	// AI-agent dir-relative indicators: check for subdirectory paths like
+	// .vscode/tasks.json that only show up as directory+file pairs, not as a
+	// flat entry (OPU-37).
+	for _, rel := range aiAgentConfigDirIndicators {
+		candidate := filepath.Join(path, filepath.FromSlash(rel))
+		if _, err := os.Stat(candidate); err == nil {
+			out = append(out, unreadManifest{File: rel, Ecosystem: "ai-agent-config"})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].File < out[j].File })

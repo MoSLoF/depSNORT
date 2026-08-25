@@ -162,6 +162,52 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			addSurfaceToGraph(g, n, lt)
 		}
 	}
+
+	// Project-root AI-agent config scan (OPU-37): scan any AI-coding-agent /
+	// editor auto-run configuration files found at the project root. These are
+	// the files that Miasma-family malware writes via a package's postinstall
+	// hook (caught by OPU-35/36's persistenceMarkers when the hook is scanned).
+	// This pass catches a different case: the file is already committed to the
+	// repo — either because an earlier install wrote it before the package was
+	// removed, or because the attack placed it directly. Both cases leave a file
+	// that survives npm uninstall and re-executes on every session/folder-open.
+	// Only files whose content carries suspicious capability markers (network
+	// egress, obfuscation, persistence writes — the same signals install hooks
+	// are flagged for) produce findings; a legitimate watch command or a simple
+	// rule file with no capability markers scores nothing (OPU-35 FP reasoning
+	// applies here too — confirmed against vscode-eslint and vscode-gitlens
+	// before landing).
+	for _, rel := range installsurface.AIAgentConfigFiles {
+		// absRoot, not root: root may be a relative path (e.g. a bare directory
+		// name passed on the command line), and filepath.Join(root, rel) then
+		// produces a relative candidate that reader.ReadFile re-joins onto its
+		// OWN absolute root — doubling the directory component and silently
+		// missing every file except when root happens to be "." or already
+		// absolute (found via live-fire testing: `depsnort scan someRelativeDir`
+		// scanned clean while `depsnort scan .` from inside the same directory,
+		// or an absolute path to it, correctly found the same fixture).
+		candidate := filepath.Join(absRoot, filepath.FromSlash(rel))
+		src, err := reader.ReadFile(candidate)
+		if err != nil {
+			continue // absent or unreadable — normal
+		}
+		if surface := installsurface.AnalyzeAIAgentConfig(rel, string(src)); len(surface.Hooks) > 0 {
+			// Attribute the finding to the project root, not to any individual
+			// package (the file is project-level, not inside node_modules). We
+			// use a synthetic root node ID, keyed on absRoot so the same project
+			// scanned via a relative or absolute path yields the same node.
+			rootPkg := g.Get("project-root:" + absRoot)
+			if rootPkg == nil {
+				rootPkg = g.AddNode(&graph.Node{
+					ID:        "project-root:" + absRoot,
+					Kind:      graph.KindPackage,
+					Ecosystem: "npm",
+					Name:      "(project root)",
+				})
+			}
+			addSurfaceToGraph(g, rootPkg, surface)
+		}
+	}
 	return gaps.Err()
 }
 

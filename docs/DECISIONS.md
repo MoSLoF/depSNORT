@@ -4763,3 +4763,86 @@ approach. **No coverage for other editors/agents' equivalent config** (Cursor's 
 Code's `.vscode/settings.json` as opposed to `tasks.json`) — scoped to the two paths the one real disclosed
 campaign actually used; extending to the broader class is a reasonable follow-up once there's a second real
 sample to calibrate against.
+
+## D-128 — OPU-36/37: full Miasma persistence target list + project-root AI-agent config scan
+
+Two open items OPU-35 explicitly left out of scope for a single patch.
+
+**OPU-36 — the remaining Miasma targets.** OPU-35 covered the three files from the Mini Shai-Hulud SAP CAP
+wave (`.vscode/tasks.json`, `.claude/settings.json`, `.claude/settings.local.json`). The broader Miasma worm
+family (June 2026) wrote a wider set — `.cursor/rules/`, `.cursorrules`, `.windsurfrules`,
+`.gemini/settings.json`, `.github/copilot-instructions.md`, `mcp.json`, `.aider.conf.yml` — independently
+confirmed by JFrog Security Research, StepSecurity, and Ossprey. Fix: extend `persistenceMarkers` with those
+targets, plus `cursorRulesJoinRe` for `.cursor/rules`' three-segment `path.join()` form (it's a directory, so
+the real payload writes `path.join(cwd, '.cursor', 'rules', 'setup.mdc')` — three segments, not the two
+OPU-35's regexes cover). Same regex-candidate-plus-Go-filter precedent as `claudeSettingsJoinRe`/
+`vscodeTasksJoinRe`. Mutation-proven independently: removing the eight flat markers fails only the flat-form
+tests; removing `cursorRulesJoinRe`'s evaluation fails only the three-segment join-form test — each mechanism
+load-bearing on its own.
+
+**OPU-37 — project-root AI-agent config scan.** Two surfaces OPU-35/36's install-hook source scanning cannot
+reach: (1) a project's own root may already carry an AI-agent config file from a prior install — the package
+that wrote it removed, the file surviving — with nothing checking its content; (2) a directory with only an
+AI-agent config file and no supported ecosystem manifest (the real `test-repo-runon-only` PoC's exact shape)
+returned "nothing to scan" at exit 0, a silent false-clean. Fix, two independent, conservative mechanisms:
+`AnalyzeAIAgentConfig`/`AIAgentConfigFiles` in `analyze.go` reads a raw AI-agent config file and runs it
+through the same `scanCaps` machinery install hooks use — a benign `npm run watch` task carries no capability
+markers and produces nothing; only content with its own network egress, obfuscation, or persistence writes
+scores. Wired into `npm.ExtractInstallSurface` as a second pass over the project root after the per-package
+loop. `aiAgentConfigIndicators`/`aiAgentConfigDirIndicators` in `gap.go` extend `recognizedGapManifests`
+(the same D-59 principle already applied to unsupported dependency manifests) so a lockfile-less directory
+carrying only `.vscode/tasks.json` is now disclosed as incomplete coverage rather than silently skipped.
+
+**Review finding, before merge — a silent, load-bearing bug in the shipped project-root scan.** The
+`npm.ExtractInstallSurface` wiring built its candidate read path as
+`filepath.Join(root, filepath.FromSlash(rel))`, where `root` is the adapter's own (possibly relative)
+`ExtractInstallSurface` argument — not `absRoot` (`reader.Root()`, already computed one line earlier and used
+by every other path in the same function for exactly this reason). `securefs.Reader.ReadFile` re-joins any
+relative argument onto its own absolute root, so a relative `root` doubles the directory component and every
+read silently fails (the "absent or unreadable — normal" branch swallows it with no gap or warning). Live-fire
+testing found this doesn't affect an absolute scan path, and doesn't affect the literal `.` shortcut
+(`filepath.Join(".", rel)` lexically strips the leading `.`, hiding the bug) — but silently blinds the entire
+OPU-37 project-root scan for the ordinary case of naming a directory on the command line
+(`depsnort scan someProject`), the ecosystem-standard way most of this codebase's own tests already invoke
+`ExtractInstallSurface` (`TestExtractInstallSurfaceBuildsSubgraph` calls it with `"testdata/wormy"`, a relative
+path — the exact shape that would have caught this had a project-root fixture existed there before shipping).
+Fixed by using `absRoot` for both the candidate path and the synthetic `project-root:` node ID (the latter also
+now stable across a relative vs. absolute invocation of the same directory, rather than producing two
+different node IDs for the same project). New regression,
+`TestExtractInstallSurfaceProjectRootAIAgentConfigRelativePath` (new `testdata/aiagentconfig` fixture,
+including a real malicious `.vscode/tasks.json`), calls `Resolve`/`ExtractInstallSurface` with a relative
+testdata path exactly like the file's other tests; mutation-proven — reverting to `root` reproduces the exact
+failure (zero hook nodes) this review found live. The repo's own `.gitignore` excludes `.vscode/` — the new
+fixture's `.vscode/tasks.json` was force-added (`git add -f`), or the fixture itself would have silently
+vanished for anyone cloning fresh, breaking the test in CI while passing locally.
+
+A second, smaller gap: the shipped patch had no direct unit test for `gap.go`'s own `aiAgentConfigIndicators`/
+`aiAgentConfigDirIndicators` logic (only for the `installsurface`-package half — `IsPersistenceMarker`/
+`AnalyzeAIAgentConfig`). Added `TestRecognizedGapManifestsAIAgentConfig`, covering both the flat-indicator and
+directory-relative-indicator shapes plus a negative control; mutation-proven by removing the new
+`recognizedGapManifests` block and confirming the test fails.
+
+Validation: full suite green (34 packages), `-race` clean on `internal/installsurface`,
+`internal/ecosystem/npm`, and `cmd/depsnort`, `go vet` silent, `gofmt` no diffs. Live end-to-end CLI validation
+(real npm project + lockfile + postinstall hook, both absolute AND relative scan-path invocations after the
+fix): BRIDGEHEAD unchanged (exit 1). The esbuild FP fixture unchanged, including a newly-added real,
+benign project-root `.vscode/tasks.json` (vscode-eslint-shaped) producing zero new findings via the project-
+root scan path specifically, not just the install-hook path already covered by OPU-35's review. The OPU-35
+Mini Shai-Hulud reproduction still fires `VC-002g` (gate-eligible) under both absolute and relative paths. A
+lockfile-less directory containing only `.vscode/tasks.json` now discloses
+"discovered 0 project(s) ... (+1 with a recognized but unresolved manifest, disclosed as incomplete coverage)"
+instead of exiting clean in silence. A fresh project-root reproduction (a committed, already-malicious
+`.vscode/tasks.json` with no install hook involved at all) correctly fires `VC-002b` via the relative-path CLI
+invocation, confirmed only after the `absRoot` fix — it silently produced zero findings before it.
+
+Residual limitations, disclosed rather than closed: variable-held directory paths across statement boundaries
+(unchanged from OPU-35). OPU-37 only wires `AnalyzeAIAgentConfig` into the npm ecosystem; PyPI/Cargo/RubyGems
+don't call it yet — the function and `AIAgentConfigFiles` are exported so each is a one-line addition, not
+done here. The `gap.go` discovery fix makes a lockfile-less AI-agent-config tree visible as incomplete
+coverage but does not analyze its content (no ecosystem adapter drives a scan of it) — a minimal
+`aiAgentConfig` adapter is a reasonable follow-on, left out here since the disclosure alone is a meaningful,
+self-contained improvement. `mcp.json` and the bare `.gemini/` directory marker are raw substrings (not
+word-bounded, following the codebase's existing precedent for punctuation-anchored markers like `.bashrc`/
+`.git/hooks/`) scanned only against install-hook source text, never the project tree — a install hook that
+merely mentions either string in passing (e.g. writing a legitimate default MCP config) is a theoretical,
+not yet observed, false-positive source worth watching in the next FP sweep.
