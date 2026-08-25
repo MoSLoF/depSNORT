@@ -4696,3 +4696,70 @@ failure mode: a cradle whose author deliberately wraps the spawn in a named (not
 `function launch(cmd) { spawn(cmd); }` called from inside the fetch callback — would now be excluded, even
 though it's genuinely part of the same cradle. Not observed in any of the three real samples tested; worth a
 note for the next FP/TP sweep.
+
+## D-127 — OPU-35: AI-coding-agent / editor auto-run config as a persistence target
+
+Found via the real `test-repo-runon-only` PoC (built for Miasma cleanup-script validation), surfaced during
+true-positive generalization work following OPU-34. The Mini Shai-Hulud SAP CAP wave (April 29 2026,
+StepSecurity/Socket) used a compromised package's postinstall hook to write two files into the **consuming
+project's root**, not its own package tree: `.vscode/tasks.json` (a `runOn: folderOpen` task, firing the
+instant the folder is opened) and `.claude/settings.json` (a `SessionStart` hook, firing on every Claude Code
+session). Both survive `npm uninstall` — they live in project configuration, not `node_modules`. Neither path
+was in `persistenceMarkers`, the mechanism `VC-002g` (high/gate-eligible) already uses for shell profiles,
+cron, systemd/launchd, the Windows Startup folder, and git hooks (OPU-19/OPU-27). A hook writing either file
+registered as ordinary `CapFilesystem`, not persistence — the same class of miss OPU-32 found for BRIDGEHEAD,
+in a newer technique.
+
+Fix, two layers (the first turned out insufficient on its own, caught during the patch's own validation, not
+after shipping): **Layer 1** adds `.vscode/tasks.json`, `.claude/settings.json`, `.claude/settings.local.json`
+as flat substring entries to `persistenceMarkers`, the same pattern every existing entry there already uses —
+a library's install hook has no legitimate reason to write any of them. **Layer 2**: validating Layer 1
+against a faithful, IOC-neutered reproduction of the real mechanism using
+`fs.writeFileSync(path.join(cwd, '.claude', 'settings.json'), ...)` — the idiomatic Node.js path-construction
+style — it didn't fire. The flat marker requires the literal combined string to appear in source;
+`path.join()` with the directory and filename as separate arguments never produces that substring, regardless
+of what runs at execution time. Splitting path segments across `path.join()` arguments is arguably *more*
+common in real Node.js code than a hardcoded combined string, so this needed a second mechanism, not a
+disclosed limitation. Added `claudeSettingsJoinRe`/`vscodeTasksJoinRe`, narrow regexes matching the two path
+segments as adjacent quoted arguments; a match emits the same canonical marker string the flat match would,
+so `IsPersistenceMarker`/`VC-002g` don't need to know which shape fired — following the precedent
+`startupFolderRe` already established for the Windows Startup folder. Deliberately narrow (Decision D-04):
+catches the two segments as sibling arguments in the same call, not a variable holding the directory built on
+an earlier line — a real, disclosed residual gap, not silently swept under the flat-marker fix.
+
+Independent review before merge found one more gap in the shipped patch itself, not just its own tests:
+`claudeSettingsJoinRe`'s `(?:\.local)?` group matches both `settings.json` and `settings.local.json` shapes,
+but the code path emitted the literal marker `".claude/settings.json"` unconditionally on any match —
+confirmed by direct `scanCaps` inspection: a `path.join(cwd, '.claude', 'settings.local.json')` write produced
+evidence `[.claude/settings.json]`, silently misnaming which file the source actually referenced. Not a
+detection gap (`IsPersistenceMarker` returns true for either literal, so `VC-002g` still gates correctly) but
+a forensic-accuracy one: an analyst reading the finding's evidence would be told the wrong file was written.
+Fixed by capturing the `.local` group and branching the emitted marker on it. Mutation-proven: a new test
+(`TestClaudeSettingsJoinEvidenceNamesTheRealFile`) fails against the pre-fix code (asserts the *local* marker
+where the pre-fix code always emits the non-local one) and passes after; separately confirmed both patch
+layers are independently load-bearing by reverting each in isolation (removing the three flat markers fails
+only the flat-form tests while the join-form tests keep passing; removing the join-regex evaluation fails only
+the join-form tests while the flat-form tests keep passing).
+
+Validation: full suite green (34 packages), `-race` clean on `internal/installsurface`, `go vet` silent,
+`gofmt` no diffs. Live end-to-end CLI validation (real npm project + lockfile-resolved dependency with an
+actual postinstall hook): BRIDGEHEAD unchanged (exit 1, `VC-002f` block). The esbuild FP shape unchanged
+(`VC-002a`/`VC-002b` only, no `VC-002g` — the pre-existing medium/gate-eligible `VC-002b` still makes
+`-fail-on-eligible` exit 2 on this fixture, identical to pre-OPU-35 baseline, confirmed not a new regression).
+A faithful `path.join()`-split reproduction of the real Mini Shai-Hulud mechanism (writing both
+`.vscode/tasks.json` and `.claude/settings.json` into the consuming project root via sibling-argument
+`path.join()` calls) now fires `VC-002g` high/gate-eligible with both files correctly named in evidence — exit
+0 by default (as expected: `VC-002g` is gate-eligible, not block-tier, so it does not affect exit code without
+`-fail-on-eligible`), exit 2 under `-fail-on-eligible`. Did not fire at all before Layer 2 was added.
+
+Residual limitations, disclosed rather than closed: **project discovery for a lockfile-less tree** (the exact
+shape of `test-repo-runon-only` in isolation — a bare `.vscode/tasks.json` with no accompanying
+`package-lock.json`) is invisible to depSNORT before any check runs at all, confirmed with full flags, not
+just `-offline` — this is architectural (project discovery, not the install-surface marker taxonomy) and a
+materially bigger change; flagged as a separate, larger candidate, not folded into this patch. **Variable-held
+directory paths** (`const dir = path.join(cwd, '.claude'); ...` referenced on a later line) evade both the
+flat marker and the join-regex — needs light dataflow tracking, out of scope for this patch's regex-only
+approach. **No coverage for other editors/agents' equivalent config** (Cursor's `.cursor/hooks.json`, VS
+Code's `.vscode/settings.json` as opposed to `tasks.json`) — scoped to the two paths the one real disclosed
+campaign actually used; extending to the broader class is a reasonable follow-up once there's a second real
+sample to calibrate against.
