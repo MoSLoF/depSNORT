@@ -4539,3 +4539,55 @@ Proof: `TestREADMEVersionLiteralsMatchPyproject` still passes (the edits didn't 
 every file path introduced in new prose (`tools/ihbv-repoguard.py`, `tools/ihbv-authentic.sha256`,
 `docs/ioc-miasma-hades.json`) resolves on disk; markdown code-fence count is balanced; full suite green (34
 packages), gofmt clean. No Go code changed — this is a documentation-only correction.
+
+## D-124 — OPU-32: BRIDGEHEAD (XOR decode-to-exec, async/PowerShell cradle)
+
+CloudSEK's BRIDGEHEAD writeup (Aug 20 2026) describes an npm typosquatting campaign whose 40-package dropper
+(`scripts/postinstall.js`) does two things depSNORT's install-surface analyzer did not catch: decodes its C2
+URL and PowerShell bridge with a hand-rolled XOR-over-fromCharCode loop (not base64/hex/gzip, not the
+existing charCodeAssemblyRe batch-assembly shapes — one fromCharCode call per cipher-loop iteration), and
+fetches-then-execs in two JS-native shapes cradleRe's single-line shell-pipe idiom cannot see: a callback-based
+`https.get(url, () => spawn(dest))` on native Windows, and — inside WSL — a PowerShell command string
+assembled at RUNTIME from decoded fragments, so the actual fetch+run cradle never exists as literal source
+text for any regex to match, encoded or not. A byte-faithful reproduction (live IOCs replaced with RFC 5737 /
+`.invalid` placeholders) scored exit 0 on default flags and topped out at exit 2 (gate-eligible, never
+flagged) even under `-fail-on-eligible` — no flag combination pre-patch blocked it.
+
+Three new structural markers in `internal/installsurface/analyze.go`, all zero-execution / regex-based (D-04
+— detecting the obfuscation IS the finding, never decoding and reasoning about the payload):
+
+  - `xorCharCodeRe` — a `^` INSIDE a `fromCharCode(...)` argument list. Gated tightly so an XOR used for
+    something unrelated elsewhere in the file (checksum math, RNG mixing) does not match. Sets CapObfuscation.
+  - `asyncCradleRe` — a network fetch call with an exec-family token as an argument WITHIN THE SAME STATEMENT
+    (bounded at the next `;`). The JS-native analog of `curl ... | sh`. Deliberately same-statement-scoped to
+    avoid re-triggering the D-25/D-28 esbuild FP (fetch in one statement, exec of an already-downloaded binary
+    in an unrelated LATER one) — verified directly against the actual esbuild_regression_test.go fixture, not
+    a synthetic stand-in (see Proof). Sets CapCradle -> VC-002f, block-tier.
+  - `interpreterSpawnRe` + co-occurrence — a spawned scripting interpreter (powershell/pwsh/cmd/wscript/
+    cscript/mshta) is CapExec alone (some legitimate installers shell out to one for benign reasons); it only
+    escalates to CapCradle when CapObfuscation is ALSO present in the same hook. This is what closes the WSL
+    branch: it cannot decode or resolve a runtime-assembled command string (D-04 forbids trying), so it scores
+    the co-occurrence of "this hook decodes something" and "this hook hands something to a script interpreter"
+    as itself the finding — detecting indirection, not payload semantics, consistent with the package's stated
+    philosophy.
+
+Proof: five unit tests (opu32_test.go) covering all three markers' positive and negative cases, including the
+D-25 esbuild-FP guard the two exec/fetch markers must not re-trip. One gap found in the handoff's own test
+suite during review — its shipped asyncCradleRe negative used a synthetic `downloadPrebuiltBinary(url)`
+wrapper that never reaches any of the four matched network verbs, so it never actually exercised the
+same-statement boundary it claimed to guard — closed by adding a test against the REAL
+esbuild_regression_test.go fixture (fetch in one function, execFileSync in a separate later one), which
+passes. Swept the full existing testdata/ corpus for any file combining an interpreter spawn with a decode-ish
+token: none found, confirming no FP regression from the co-occurrence marker. Live end-to-end: a byte-faithful
+BRIDGEHEAD fixture (inert placeholders) scores exit 0 pre-patch, **exit 1 (VC-002f block/critical, VC-002e
+gate-eligible/high)** post-patch, matching the handoff's claimed table exactly. Full suite green (34
+packages), -race clean, go vet silent, gofmt no diffs.
+
+Residual, disclosed rather than silently accepted: the interpreterSpawnRe co-occurrence check is a heuristic
+(decode + separate interpreter-spawn scored together, not a resolved cradle) and asyncCradleRe's bounded
+window is a heuristic bound, not an AST-balanced statement parser (RE2 has no backreferences or lookaround for
+real statement boundaries) — both worth a pass against a larger live-fire corpus if FP reports surface. The C2
+octet-array assembly (`['193','70',...].join('.')`) was investigated and confirmed NOT a gap (CapNetwork
+detection was never string-literal-only). The WSL-detection triad itself is not escalated as a standalone
+signal — it still reads as ordinary CapEnv, same as any other env read; a dedicated WSL-fingerprint +
+payload-fetch/exec co-occurrence check is scoped out as a distinct future increment.
