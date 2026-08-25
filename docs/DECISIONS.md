@@ -4591,3 +4591,32 @@ octet-array assembly (`['193','70',...].join('.')`) was investigated and confirm
 detection was never string-literal-only). The WSL-detection triad itself is not escalated as a standalone
 signal — it still reads as ordinary CapEnv, same as any other env read; a dedicated WSL-fingerprint +
 payload-fetch/exec co-occurrence check is scoped out as a distinct future increment.
+
+## D-125 — OPU-33: decodeRe's hex alternative matched an ENCODE, not a decode
+
+Found during an independent FP sweep of the OPU-32 markers against real-world install scripts (esbuild,
+edge-js, ntsuspend, all under `-fail-on-eligible`). All three new OPU-32 markers came back clean — none fired
+anywhere in the sweep, including on esbuild, the exact package D-25/D-28's own design comments already cite as
+the FP case to avoid. The sweep's one hit was VC-002e on esbuild, and it traced to `decodeRe`
+(`internal/installsurface/analyze.go`), pre-existing since the initial public release (commit `e3dd322`) —
+confirmed by `git blame` and by reproducing the identical finding against the pre-OPU-32 binary.
+
+`decodeRe`'s hex alternative was a bare `['"]hex['"]\s*\)` — it matched the literal string `hex")` anywhere in
+a file. esbuild's real `install.js` computes `crypto.createHash("sha256").update(bytes).digest("hex")` to
+verify the downloaded binary's checksum: an ENCODE (bytes -> hex string, for display/comparison — the thing a
+security-conscious installer SHOULD do), not a decode. The bare literal can't distinguish that from
+`Buffer.from(x, 'hex')`, a genuine decode.
+
+Fix: tightened to the same context-required shape the base64 alternative in the same regex already used —
+`Buffer\.from\s*\([^)]*['"]hex['"]|from_?hex|hex::decode` — mirroring base64's `Buffer\.from(...,'base64')`
+plus the naming-convention alternatives already present for Rust (`base64::decode`/`base64::engine`). No
+existing test depended on the old bare shape (verified before touching it).
+
+The repo's own D-25 esbuild regression fixture (`esbuildLikeInstallJS`) was a faithful REDUCTION that did not
+include this real line — extended it with the actual checksum-verify idiom so the existing regression test
+(`TestEsbuildInstallerNotObfuscated`) exercises the real FP directly, rather than adding a parallel synthetic
+test that would prove less. Mutation-proven: reverting the regex to its pre-fix shape fails both the new
+negative tests (hex ENCODE no longer suppressed) and the now-faithful esbuild fixture test; restore green.
+Live end-to-end: the sweep's cited shape now scores exit 2 with only the legitimate VC-002b (real network
+egress) firing — VC-002e no longer trips. Full suite green (34 packages), -race clean, go vet silent, gofmt no
+diffs.

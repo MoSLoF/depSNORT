@@ -15,10 +15,16 @@ import (
 
 // A faithful reduction of esbuild's install.js: a comment block naming external
 // hosts, a real fetch to the npm registry via a variable, a child_process exec
-// of the downloaded binary, and one incidental String.fromCharCode.
+// of the downloaded binary, one incidental String.fromCharCode, and — added
+// under OPU-33 — the real integrity-check idiom the package uses: a SHA-256
+// digest formatted to hex for comparison against a known checksum. This is an
+// ENCODE (bytes -> hex string for display/comparison), not a decode, and
+// tripped VC-002e via decodeRe's old bare `['"]hex['"]\s*\)` alternative —
+// confirmed against the real published package by an OPU-32 FP sweep.
 const esbuildLikeInstallJS = `
 var https = require("https");
 var child_process = require("child_process");
+var crypto = require("crypto");
 // The "esbuild" package downloads a prebuilt binary. Some sandboxes block this:
 //   - https://snapcraft.io/ (what the Snap Store is)
 //   - https://nodejs.org/dist/ (the official version of node)
@@ -26,6 +32,10 @@ var child_process = require("child_process");
 function downloadDirectlyFromNPM(pkg, subpath, binPath) {
   const url = "https://registry.npmjs.org/" + pkg + "/-/" + pkg + ".tgz";
   fetch(url).then(res => writeFileSync(binPath, res));
+}
+function verifyChecksum(bytes, expected) {
+  var actual = crypto.createHash("sha256").update(bytes).digest("hex");
+  return actual === expected;
 }
 function validate(bin) {
   var stamp = String.fromCharCode(0x2d); // format a single dash for the banner

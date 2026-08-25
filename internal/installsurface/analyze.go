@@ -246,7 +246,19 @@ var (
 	}
 
 	// base64/hex decode idioms, matched structurally rather than by substring.
-	decodeRe = regexp.MustCompile(`(?i)(Buffer\.from\s*\([^)]*['"]base64['"]|from_?base64|b64decode|['"]hex['"]\s*\)|toString\s*\(\s*['"]utf-?8['"]\s*\)|base64\.b64decode|base64\.decodebytes|base64::decode|base64::engine|general_purpose::[A-Za-z_]+\.decode)`)
+	//
+	// OPU-33: the hex alternative used to be a bare `['"]hex['"]\s*\)` — it
+	// matched the string "hex")" ANYWHERE, including .digest('hex') and
+	// .toString('hex'), which ENCODE bytes to a hex string for display or
+	// comparison (the thing a security-conscious installer should do), not
+	// decode one. esbuild's install.js does exactly this
+	// (crypto.createHash(...).digest("hex")) and tripped VC-002e on it —
+	// confirmed pre-existing (predates OPU-32, commit 570eb395/initial
+	// release) via an OPU-32 FP sweep. Tightened to the same
+	// context-required shape the base64 alternative already uses:
+	// Buffer.from(...,'hex') is a real decode; from_?hex/hex::decode cover
+	// the Rust-style naming convention already present for base64 below.
+	decodeRe = regexp.MustCompile(`(?i)(Buffer\.from\s*\([^)]*['"]base64['"]|from_?base64|b64decode|Buffer\.from\s*\([^)]*['"]hex['"]|from_?hex|hex::decode|toString\s*\(\s*['"]utf-?8['"]\s*\)|base64\.b64decode|base64\.decodebytes|base64::decode|base64::engine|general_purpose::[A-Za-z_]+\.decode)`)
 
 	// A long unbroken base64-ish run — the classic embedded blob.
 	blobRe = regexp.MustCompile(`[A-Za-z0-9+/=]{160,}`)
