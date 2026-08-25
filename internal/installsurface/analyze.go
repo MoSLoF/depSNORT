@@ -416,24 +416,31 @@ var (
 		// warning tax the persistence-vs-benign split exists to avoid (OPU-19).
 		"core.hooksPath", ".git/hooks/", ".git\\hooks\\",
 
-		// AI-coding-agent / editor auto-run configuration (OPU-35): VS Code's
-		// `.vscode/tasks.json` (a task with `runOn: folderOpen` fires the instant
-		// the folder is opened, no user action) and Claude Code's
-		// `.claude/settings.json` / `.claude/settings.local.json` (a `SessionStart`
-		// hook fires on every session, surviving `npm uninstall` entirely since it
-		// lives in project config, not node_modules). This is the actual mechanism
-		// the Mini Shai-Hulud SAP CAP wave used (April 2026, StepSecurity/Socket) —
-		// a dependency's postinstall hook WRITING these files into the consuming
-		// project is the persistence step, exactly analogous to a shell-profile or
-		// cron write above. As with those, a library's install hook has no
-		// legitimate reason to write either path; a PROJECT'S OWN checked-in
-		// tasks.json (an extremely common, benign pattern — vscode-eslint and
-		// vscode-gitlens both ship one with `runOn: folderOpen` on an ordinary
-		// build-watch task) is never at risk of matching here, because this marker
-		// set only scans an install HOOK'S OWN source text, never the rest of the
-		// project tree — confirmed against both of those real repos' actual
-		// postinstall source before this landed.
+		// AI-coding-agent / editor auto-run configuration (OPU-35/OPU-36): an
+		// install hook writing any of these files into the consuming project
+		// establishes auto-execution persistence that survives `npm uninstall`
+		// entirely, since the files live in project config, not node_modules.
+		// The full list below is the exact set the Miasma/Shai-Hulud worm family
+		// used (JFrog Security Research, StepSecurity, Ossprey — June 2026,
+		// corroborated by three independent analyses):
+		//   .vscode/tasks.json     — VS Code task with runOn:folderOpen (OPU-35)
+		//   .claude/settings.json  — Claude Code SessionStart hook (OPU-35)
+		//   .claude/settings.local.json — ditto, local override (OPU-35)
+		//   .cursor/rules/         — Cursor AI custom rules dir (alwaysApply:true)
+		//   .cursorrules           — Cursor older single-file rules format
+		//   .windsurfrules         — Windsurf IDE rules file
+		//   .gemini/settings.json  — Google Gemini CLI settings
+		//   .github/copilot-instructions.md — GitHub Copilot workspace instructions
+		//   mcp.json               — MCP (Model Context Protocol) server config
+		//   .aider.conf.yml        — Aider AI coding assistant config
+		// The same FP-safety argument applies for all: this set only scans an
+		// install hook's OWN source text (never the project tree), so a project's
+		// own legitimately checked-in rules file never matches here.
 		".vscode/tasks.json", ".claude/settings.json", ".claude/settings.local.json",
+		// OPU-36: the remaining confirmed Miasma targets
+		".cursor/rules/", ".cursorrules", ".windsurfrules",
+		".gemini/settings.json", ".gemini/", ".github/copilot-instructions.md",
+		"mcp.json", ".aider.conf.yml",
 	}
 
 	// claudeSettingsJoinRe / vscodeTasksJoinRe (OPU-35): the SAME two targets
@@ -451,6 +458,13 @@ var (
 	// static, zero-execution pass does not track (Decision D-04).
 	claudeSettingsJoinRe = regexp.MustCompile(`(?i)['"]\.claude['"]\s*,\s*['"]settings(\.local)?\.json['"]`)
 	vscodeTasksJoinRe    = regexp.MustCompile(`(?i)['"]\.vscode['"]\s*,\s*['"]tasks\.json['"]`)
+
+	// cursorRulesJoinRe (OPU-36): .cursor/rules is a DIRECTORY, so the real
+	// Miasma payload writes with three-segment path.join (e.g.
+	// path.join(cwd, '.cursor', 'rules', 'setup.mdc')) — not two. Extend the
+	// join-regex pattern to three sibling segments: match '.cursor' adjacent
+	// to 'rules' with an optional third segment for the filename inside.
+	cursorRulesJoinRe = regexp.MustCompile(`(?i)['"]\.cursor['"]\s*,\s*['"]rules['"]`)
 
 	// installWriteMarkers are ordinary filesystem writes an install legitimately
 	// makes (site-packages, .pth, gem dirs, locating the home directory). They are
@@ -706,6 +720,11 @@ func scanCaps(text string) ([]Capability, []string) {
 	}
 	if vscodeTasksJoinRe.MatchString(text) {
 		add(CapFilesystem, ".vscode/tasks.json")
+	}
+	// path.join() split form for .cursor/rules (OPU-36): three-segment join
+	// pattern (.cursor + rules + filename) that the flat marker misses.
+	if cursorRulesJoinRe.MatchString(text) {
+		add(CapFilesystem, ".cursor/rules/")
 	}
 
 	// A URL anywhere is a network reach even without a named client.
@@ -2578,4 +2597,75 @@ func truncateStr(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// AIAgentConfigFiles are the filesystem paths of AI-coding-agent / editor
+// auto-run configuration files that install-time hooks can write as a
+// persistence mechanism (OPU-35/OPU-36). They are also scanned DIRECTLY
+// when found at the project root (OPU-37) — a separate check from the
+// install-hook source scan, covering the case where the file is already
+// committed to the repo (either as a pre-existing attack artifact or because
+// an earlier install wrote it and the package was subsequently removed while
+// the config file survived).
+var AIAgentConfigFiles = []string{
+	// VS Code (OPU-35)
+	".vscode/tasks.json",
+	// Claude Code (OPU-35)
+	".claude/settings.json",
+	".claude/settings.local.json",
+	// Claude Code setup hook (Miasma variant — OPU-36)
+	".claude/setup.mjs",
+	// Cursor AI (OPU-36)
+	".cursor/rules",
+	".cursorrules",
+	// Windsurf (OPU-36)
+	".windsurfrules",
+	// Google Gemini CLI (OPU-36)
+	".gemini/settings.json",
+	// GitHub Copilot (OPU-36)
+	".github/copilot-instructions.md",
+	// MCP (OPU-36)
+	"mcp.json",
+	// Aider (OPU-36)
+	".aider.conf.yml",
+}
+
+// AnalyzeAIAgentConfig reads a raw AI-coding-agent / editor configuration
+// file and returns a Surface whose hooks represent any auto-run command it
+// declares. This is the project-root half of the AI-agent persistence
+// detection (OPU-37): it scans files that already exist in the repo rather
+// than scanning install-hook source text that WRITES those files (OPU-35/36).
+//
+// Detection is deliberately conservative: only strings that look like shell
+// commands or URLs are extracted and scanned. This is not a JSON/YAML/TOML
+// parser — it hands the raw bytes to scanCaps, the same routine that reads
+// install-hook source text, so a persistence-marker string or a C2 URL in a
+// tasks.json command is caught by the existing machinery without any format-
+// specific parsing. This means it cannot distinguish a legitimate watch command
+// from a malicious one based on structure alone; it relies on the same
+// capability markers (network egress, obfuscation, filesystem writes to
+// persistence locations) that distinguish hostile from benign install hooks.
+// A project's OWN legitimate tasks.json with a plain `npm run watch` command
+// carries no markers and produces no findings. Only one with an explicit
+// network call, obfuscation, or persistence write of its own scores.
+//
+// hookName is used as the pseudo-hook name in the resulting Surface (e.g.
+// "tasks.json[folderOpen]"), so findings accurately name the source artifact.
+func AnalyzeAIAgentConfig(hookName, fileSource string) Surface {
+	clean := stripCodeComments(fileSource)
+	caps, ev := scanCaps(clean)
+	if len(caps) == 0 {
+		return Surface{}
+	}
+	h := Hook{
+		Name:     hookName,
+		Command:  truncateStr(fileSource, 400),
+		Caps:     caps,
+		Evidence: ev,
+		Sinks:    findSinks(clean),
+	}
+	for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
+		h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
+	}
+	return Surface{Hooks: []Hook{h}}
 }

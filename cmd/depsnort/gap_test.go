@@ -95,6 +95,46 @@ func TestRecognizedGapManifestsInDir(t *testing.T) {
 	}
 }
 
+// TestRecognizedGapManifestsAIAgentConfig covers OPU-37's discovery half: a
+// lockfile-less directory carrying only an AI-coding-agent config file (the
+// exact shape of the real test-repo-runon-only PoC) must be disclosed as an
+// "ai-agent-config" gap rather than read as "nothing to scan". Covers both
+// indicator shapes: a flat single-component name (aiAgentConfigIndicators)
+// and a directory-relative path (aiAgentConfigDirIndicators) — the shipped
+// patch added no direct test for either at this layer (only for the
+// installsurface-package half: IsPersistenceMarker / AnalyzeAIAgentConfig).
+func TestRecognizedGapManifestsAIAgentConfig(t *testing.T) {
+	// Flat indicator: a bare .cursorrules file with nothing else present.
+	flatDir := t.TempDir()
+	writeGapFile(t, filepath.Join(flatDir, ".cursorrules"), "some rules")
+	got := recognizedGapManifests(flatDir)
+	if len(got) != 1 || got[0].File != ".cursorrules" || got[0].Ecosystem != "ai-agent-config" {
+		t.Fatalf("recognizedGapManifests = %+v, want one .cursorrules (ai-agent-config)", got)
+	}
+
+	// Directory-relative indicator: .vscode/tasks.json, the real
+	// test-repo-runon-only shape — a subdirectory + file pair, not a flat
+	// top-level entry.
+	dirRelDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dirRelDir, ".vscode"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGapFile(t, filepath.Join(dirRelDir, ".vscode", "tasks.json"), "{}")
+	got = recognizedGapManifests(dirRelDir)
+	if len(got) != 1 || got[0].File != ".vscode/tasks.json" || got[0].Ecosystem != "ai-agent-config" {
+		t.Fatalf("recognizedGapManifests = %+v, want one .vscode/tasks.json (ai-agent-config)", got)
+	}
+
+	// A directory with neither a dependency manifest nor any AI-agent config
+	// indicator must still yield no gap — this marker set must not fire on
+	// an ordinary, unrelated file.
+	clean := t.TempDir()
+	writeGapFile(t, filepath.Join(clean, "README.md"), "# hi")
+	if g := recognizedGapManifests(clean); len(g) != 0 {
+		t.Errorf("an unrelated file must not be an ai-agent-config gap: %+v", g)
+	}
+}
+
 // OPU-17 hail-mary: a directory whose only dependency artifact is a lockfile for
 // an ecosystem depsnort has no name-table entry or recognizer for is disclosed as
 // an unknown-ecosystem gap through the discovery loop, not skipped in silence.

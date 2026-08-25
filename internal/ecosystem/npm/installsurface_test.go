@@ -79,6 +79,37 @@ func artifactHasCap(g *graph.Graph, hookID, cap string) bool {
 	return false
 }
 
+// TestExtractInstallSurfaceProjectRootAIAgentConfigRelativePath is a review-
+// found regression (OPU-37): the project-root AI-agent config scan built its
+// candidate read path by joining installsurface.AIAgentConfigFiles onto the
+// adapter's `root` variable directly, rather than the already-computed
+// absolute reader.Root(). Every OTHER call site in ExtractInstallSurface
+// builds an absolute path first (see pkgDir/absPkgDir above) specifically
+// because securefs.Reader.ReadFile re-joins a relative argument onto its own
+// absolute root — so passing a relative root back in doubles the directory
+// component and the read silently fails. This test calls Resolve/
+// ExtractInstallSurface with a RELATIVE testdata path — "testdata/
+// aiagentconfig", mirroring every other test in this file (e.g.
+// TestExtractInstallSurfaceBuildsSubgraph's "testdata/wormy") — which is
+// exactly the invocation shape that went silently blind: it passed with an
+// absolute path or the bare "." (where filepath.Join happens to strip the
+// leading "." and the bug is invisible) and produced zero findings for any
+// other relative directory name, including this one.
+func TestExtractInstallSurfaceProjectRootAIAgentConfigRelativePath(t *testing.T) {
+	a := &Adapter{}
+	g, err := a.Resolve("testdata/aiagentconfig")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := a.ExtractInstallSurface("testdata/aiagentconfig", g); err != nil {
+		t.Fatalf("ExtractInstallSurface: %v", err)
+	}
+	if got := g.CountByKind()[graph.KindInstallHook]; got == 0 {
+		t.Fatal("expected a hook node from the project-root .vscode/tasks.json scan, got none — " +
+			"the project-root AI-agent config scan did not fire for a relative scan path")
+	}
+}
+
 func TestExtractInstallSurfaceNoNodeModulesIsQuiet(t *testing.T) {
 	a := &Adapter{}
 	g, err := a.Resolve("testdata/proj") // fixture has no node_modules on disk
