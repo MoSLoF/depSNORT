@@ -4906,3 +4906,56 @@ property that makes it worth having.
 positive.** No code change. The operational cost is bounded — `VC-002g` is gate-eligible, not block-tier, so
 this FP surfaces as a reviewable line item under `-fail-on-eligible`, never a blocked build. Noted here so a
 future FP sweep doesn't re-discover and re-litigate the same tradeoff from scratch.
+
+## D-130 — .profile FP: fixed, unlike D-129's core.hooksPath, because the two cases are structurally different
+
+Broader follow-up to D-129: reviewed every `persistenceMarkers` entry for the same class of risk (a
+punctuation-anchored, non-word-bounded raw substring generic enough to collide with ordinary code). Most
+entries are either word-bounded already or specific enough as literal strings to stay low-risk. `.profile`
+stood out: unlike `.bashrc`/`.git/hooks/`/`mcp.json` (each a specific, multi-token name), "profile" alone is
+a common object-property/identifier suffix, so the bare substring matched `user.profileImage`,
+`settings.profileData`, `analytics.profileId`, and even a bare `options.profile` accessor — none of them the
+shell dotfile. Confirmed locally against the scanner directly (no external search needed here, unlike
+mcp.json/core.hooksPath: the pattern is generic enough to construct minimal reproductions without hunting for
+a real package). Live-checked several real complex-postinstall packages (puppeteer's real `install.mjs`,
+esbuild's real installer, canvas, sharp) for a live hit — found none — but absence of a found live case
+carries less weight here than it did for `mcp.json`: this pattern needs no special-purpose tool to trigger,
+just any config object with a "profile" field accessed via dot notation.
+
+**Unlike D-129's `core.hooksPath`, this one has a genuine structural fix, not just an accepted tradeoff.**
+The distinguishing feature that made `core.hooksPath` unfixable — the benign and malicious cases being the
+*same string shape* with only an unobservable difference in intent — does not hold here. The real technique
+(`fs.appendFileSync(path.join(os.homedir(), '.profile'), payload)`, or a shell `>> ~/.profile` append) always
+references `.profile` as a **complete, standalone path component**: preceded by a quote, path separator, or
+whitespace, and followed by a quote, separator, whitespace, or end of string. The FP shape
+(`user.profileImage`, `options.profile`) always has an identifier character *immediately before* the `.`
+(the preceding property-holder's name) — a structural difference on the LEFT boundary that the flat
+raw-substring match never checked, because `.profile` contains punctuation and so skipped the boundary logic
+entirely (`isWordMarker` only applies `containsWord` to markers with zero punctuation — a gap that happened
+to be safe for the *rest* of that class, `.bashrc`/`.git/hooks/`/`/etc/`, only because those aren't also
+common identifier suffixes).
+
+Fix: added `boundaryCheckedPunctuationMarkers`, a small explicit set of punctuation-anchored markers that
+still need the dual-boundary `containsWord` check `isWordMarker` normally reserves for identifier-shaped
+ones. `.profile` is the first (and, on this review, only) entry. No new mechanism — this reuses the exact
+`containsWord` helper "systemd"/"crontab" already route through, just extending which markers are eligible
+for it. Verified directly that `containsWord` alone (no new regex needed) already correctly separates every
+constructed FP case from every real-technique case, including the trickiest one (`window.chrome.profile`, a
+bare accessor with nothing following it at all — the left-boundary check alone excludes it, since "e" from
+"chrome" precedes the "."). Cost against the real technique: zero — every real shape tested (`path.join` with
+`os.homedir()`, string concatenation, a shell `execSync` append, a bare quoted filename) is preceded by a
+quote, `/`, or whitespace, never by an identifier character.
+
+New test, `TestPersistenceDotProfilePrecision` (`dotprofile_fp_test.go`), following the exact structure of
+the pre-existing `TestPersistenceStartupPrecision` FP-regression test: six benign cases that must not raise
+persistence, four real-technique shapes that must. Mutation-proven: reverting the loop condition to its
+pre-fix form (`isWordMarker(m)` alone, without `boundaryCheckedPunctuationMarkers[m]`) fails all six benign
+cases with the exact FP behavior found in review, while the real cases keep passing either way — confirming
+the fix is genuinely load-bearing and isolated to exactly the class of case it targets.
+
+Validation: full suite green (34 packages), `-race` clean on `internal/installsurface`, `go vet` silent,
+`gofmt` no diffs. Live CLI validation: a synthetic install hook with only `.profile`-shaped property access
+(no real dotfile write) now scores clean of `VC-002g` — previously would have fired persistence on
+`opts.profile = opts.profile || settings.profileData`. A real `.profile` append combined with a piped-curl
+cradle still fires both `VC-002f` (critical/block) and `VC-002g` (high/gate-eligible) correctly, unaffected
+by the fix.
