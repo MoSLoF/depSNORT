@@ -395,7 +395,7 @@ var (
 	// unchanged — the persistence/benign split lives in the marker taxonomy, read
 	// by the check via IsPersistenceMarker, not in a new capability.
 	persistenceMarkers = []string{
-		".bashrc", ".bash_profile", ".zshrc", ".profile", "/etc/",
+		".bashrc", ".bash_profile", ".zshrc", ".profile",
 		"crontab", "systemd", "systemctl", "launchctl", "launchd",
 		// macOS auto-run dirs, listed explicitly so word-boundary matching (below)
 		// still covers them once bare "launchd" stops matching inside them.
@@ -589,6 +589,13 @@ func IsPersistenceMarker(marker string) bool {
 	if strings.EqualFold(marker, "startup-folder") {
 		return true
 	}
+	// /etc/ is emitted by etcAbsolutePathRe (D-131), replacing the old flat
+	// substring entry that also matched a merely-nested "etc" path segment
+	// (./etc/templates/, ./spec/etc/) with nothing to do with the real
+	// absolute Unix system directory.
+	if strings.EqualFold(marker, "/etc/") {
+		return true
+	}
 	for _, m := range persistenceMarkers {
 		if strings.EqualFold(marker, m) {
 			return true
@@ -616,7 +623,7 @@ func isIdentByte(b byte) bool {
 // boundaryCheckedPunctuationMarkers are punctuation-anchored persistence
 // markers (isWordMarker is false for them, since they contain non-identifier
 // characters) that STILL need the dual-boundary containsWord check, unlike
-// the rest of that class (.bashrc, /etc/, .git/hooks/). Found via an FP sweep
+// the rest of that class (.bashrc, .git/hooks/). Found via an FP sweep
 // (D-130): ".profile" is simultaneously the shell dotfile AND the generic
 // suffix of any object-property access — `user.profileImage`,
 // `settings.profileData`, `options.profile` all contain the literal
@@ -632,6 +639,29 @@ func isIdentByte(b byte) bool {
 var boundaryCheckedPunctuationMarkers = map[string]bool{
 	".profile": true,
 }
+
+// etcAbsolutePathRe (D-131, same FP sweep as D-130): "/etc/" used to be a flat
+// persistenceMarkers entry, matched as a raw substring — but that also fires
+// on ANY path that merely nests a directory literally named "etc" without
+// being the real absolute Unix system directory: `require('./etc/templates/
+// config.js')`, `require('./spec/etc/config.js')`. containsWord's dual
+// boundary check (the fix used for .profile above) does not fully close this:
+// its "before" check only asks whether the PRECEDING byte is an identifier
+// character, and "." and "/" both pass that test, so `./etc/` would still
+// match. What actually distinguishes the real absolute path is stronger: the
+// leading "/" of "/etc/" must be the START of a quoted string, shell token,
+// or the whole source — never continued FROM another path segment (a "."
+// or "/" immediately before it). Matched here as a whitelist of legitimate
+// preceding characters (quote, backtick, whitespace, and the shell/JS
+// argument separators ; & | ( = > < ,) rather than a blacklist, so a
+// preceding character this list does not anticipate fails closed (excluded),
+// not open. Deliberately does NOT try to distinguish a READ of /etc/ (e.g.
+// fs.existsSync('/etc/os-release'), a common, legitimate OS/libc-detection
+// idiom in native-module installers) from a WRITE establishing persistence —
+// no other persistence marker in this list makes that distinction either
+// (a bare `fs.existsSync('~/.bashrc')` also trips VC-002g today), so singling
+// out /etc/ for read/write semantics would be inconsistent, not more correct.
+var etcAbsolutePathRe = regexp.MustCompile(`(?:^|['"` + "`" + `\s;&|(=><,])/etc/`)
 
 // isWordMarker reports whether a marker is a bare identifier-shaped token
 // (letters/digits/_ only), which must be matched on word boundaries rather than
@@ -725,6 +755,11 @@ func scanCaps(text string) ([]Capability, []string) {
 	// over-matched benign identifiers/prose (process_startup, "on startup").
 	if startupFolderRe.MatchString(text) {
 		add(CapFilesystem, "startup-folder")
+	}
+	// A genuinely absolute /etc/ path (D-131) — not a merely-nested "etc"
+	// directory segment inside a relative path (./etc/, ./spec/etc/).
+	if etcAbsolutePathRe.MatchString(text) {
+		add(CapFilesystem, "/etc/")
 	}
 	// path.join()-split forms of the AI-agent-hook persistence targets
 	// (OPU-35): emits the SAME canonical marker string the flat substring

@@ -4959,3 +4959,49 @@ Validation: full suite green (34 packages), `-race` clean on `internal/installsu
 `opts.profile = opts.profile || settings.profileData`. A real `.profile` append combined with a piped-curl
 cradle still fires both `VC-002f` (critical/block) and `VC-002g` (high/gate-eligible) correctly, unaffected
 by the fix.
+
+## D-131 — /etc/ FP: fixed with a different mechanism than D-130's .profile, same sweep
+
+The other candidate flagged in the same review that produced D-130: `/etc/` was also a flat, punctuation-
+anchored `persistenceMarkers` entry matched as a raw substring — but "etc" is also a plausible directory-
+segment name, so it fired on any relative path that merely NESTS a directory literally named "etc" with
+nothing to do with the real absolute Unix system directory: `require('./etc/templates/config.js')`,
+`require('./spec/etc/config.js')`. Confirmed directly against the scanner.
+
+**D-130's fix (routing through `containsWord`) does not fully close this one.** `containsWord`'s "before"
+check only asks whether the immediately-preceding byte is a non-identifier character — and both `.` and `/`
+pass that test, so `./etc/` would still match even with the dual-boundary check applied. `.profile`'s FP
+shape (`user.profileImage`) and `/etc/`'s FP shape (`./etc/templates/`) are structurally different problems
+wearing the same "punctuation-anchored raw substring" surface: one is an identifier-continuation collision,
+the other is a path-nesting collision. They need different fixes, not the same one applied twice.
+
+**The fix:** `etcAbsolutePathRe`, a new regex requiring the leading `/` of `/etc/` to be the START of a
+quoted string, a shell/JS argument, or the whole source — matched as a whitelist of legitimate preceding
+characters (quote, backtick, whitespace, and the shell/JS separators `; & | ( = > <` `,`) rather than a
+blacklist, so any preceding character the list doesn't anticipate fails closed. `/etc/` was pulled out of the
+flat `persistenceMarkers` list entirely (mirroring the existing `startupFolderRe`/"startup-folder" precedent,
+not `boundaryCheckedPunctuationMarkers`'s in-place `containsWord` reuse) since this needed a genuinely new
+regex, not extended eligibility for an existing mechanism. `IsPersistenceMarker` gained a matching special
+case, exactly like the existing "startup-folder" one.
+
+**Deliberately left unfixed, and said so in the code**: this does NOT distinguish a READ of `/etc/`
+(`fs.existsSync('/etc/os-release')`, a common, legitimate OS/libc-detection idiom in native-module
+installers — the exact idiom that motivated checking this marker in the first place) from a WRITE
+establishing persistence. No other persistence marker in this list makes that distinction either — a bare
+`fs.existsSync('~/.bashrc')` also trips `VC-002g` today — so singling out `/etc/` for read/write semantics
+would be inconsistent with the rest of the list, not more correct. Fixing this would need actual call-site
+semantic analysis (tracking whether the matched string sits inside a write vs. a read call), a materially
+bigger change than a boundary check; noted as a residual, not attempted here.
+
+New test, `TestPersistenceEtcAbsolutePathPrecision` (`etc_fp_test.go`), following the same structure as
+`TestPersistenceDotProfilePrecision`: three benign nested-path cases that must not raise persistence, three
+real-technique shapes that must (a bare quoted write, a shell append via redirect, and the OS-detection read
+— deliberately still flagged, per the note above). Mutation-proven twice, independently: removing the
+`etcAbsolutePathRe` evaluation in `scanCaps` fails all three real cases; separately, removing the
+`IsPersistenceMarker` special case (leaving the `scanCaps` evaluation intact) also fails all three — both
+halves of the fix are independently load-bearing, not redundant with each other.
+
+Validation: full suite green (34 packages), `-race` clean on `internal/installsurface`, `go vet` silent,
+`gofmt` no diffs. Live CLI validation: a synthetic install hook doing only `require('./etc/templates/
+config.js')` now scores clean of `VC-002g`. A real `fs.writeFileSync('/etc/cron.d/evil', ...)` combined with
+a piped-curl cradle still fires both `VC-002f` and `VC-002g` correctly, unaffected by the fix.
