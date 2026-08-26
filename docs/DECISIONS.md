@@ -6179,3 +6179,44 @@ could add them behind the same local-only posture. npm's disclosure is per absen
 distinguish "no node_modules at all" from "this one package missing from an otherwise installed tree",
 though the count makes the difference visible. The gemspec content-gate (a narrower marker than `scanCaps`
 for gemspec shell-outs) is unchanged and remains on the outstanding list.
+
+## D-149 — the cargo build.rs fetch defaults on
+
+**Trigger:** D-141 corrected the premise D-140's opt-in rested on and closed by raising the inconsistency
+"so the decision can be revisited on accurate grounds": PyPI fetches per-dependency source by default while
+Cargo required `-cargo-fetch-source`. Revisited and decided by the owner, with a stated principle worth
+recording verbatim in substance: coverage defaults ON and flags exist for opting out — transparency and no
+blind spots — unless the action itself carries a risk, in which case the risk is weighed first.
+
+**The risk was weighed, and there is no new risk class.** The fetch downloads crate archives from crates.io,
+checksum-verified against the published record before extraction (D-140), analyzes build.rs statically and
+executes nothing (D-04). Every ordinary online scan already sends coordinates to api.osv.dev and fetches
+per-dependency sdists from PyPI by default, and the registry-history stage already talks to crates.io. The
+exposure — revealing which packages a project uses to registries that served them — is one the default
+posture already accepts everywhere else, and `-offline` remains the single switch that stops all of it.
+
+**The change.** `-cargo-fetch-source` (opt-in) is replaced by `-no-cargo-fetch-source` (opt-out), matching
+the repo's convention for default-on stages (`-no-osv`, `-no-registry`, `-no-expand`). The enrichment nests
+inside the registry stage as before, so `-no-registry` still implies no registry fetches. Under `-offline`
+the client serves only its warm cache and a cold miss keeps its `source-unavailable` gap — the same posture
+as OSV and the PyPI fetcher, per D-141. The old flag is removed rather than kept as a silent no-op: a script
+still passing it fails loudly at flag parsing, which beats accepting a flag that no longer does anything.
+
+**Proven at the CLI seam, hermetically and live.** The flag-level tests run `-offline` so the enrichment
+executes against an empty cache with no network: by default `cargo-source` appears in the report's data
+sources having queried the unexamined crate; with `-no-cargo-fetch-source` it does not, and the crate stays
+disclosed. Mutations reverting the gate to opt-in or ignoring the opt-out each fail their test. Live, with
+no flags at all: a cold clone pinning `arrayref@0.3.7` fetched by default, determined the crate ships no
+build.rs, and cleared its `source-unavailable` gap — the cold-clone scan that D-139 showed running blind now
+examines by default.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`cmd/depsnort`.
+
+Residual limitations: default online scans of unvendored cargo trees now fetch once per unexamined crate —
+cached across runs, but a visible traffic change for large cold trees; `-no-cargo-fetch-source` or
+`-offline` restores the old cost. The fetch resolves the exact locked version only (deliberate, D-140);
+nothing here widens what is fetched, only when. The same default-on principle applied to this flag has NOT
+been swept across every other opt-in in the tool — `-epss` remains opt-in, defensibly (it is an enrichment
+ranking, not coverage, and needs a second external service) — but that sweep is now the recorded yardstick
+if the owner wants it.

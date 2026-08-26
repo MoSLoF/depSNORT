@@ -611,9 +611,16 @@ func enrichCargoYankLure(n *graph.Node, newest string, deps *registry.CargoDepsC
 // analysis at all, which is exactly the posture a gating scanner runs in and
 // exactly when a live-but-not-yet-yanked compromise needs catching (D-139).
 //
-// Opt-in: it costs one registry fetch per unexamined crate, so it stays behind
-// -cargo-fetch-source rather than changing what every existing scan does.
-// -offline still wins, via the client's own gate.
+// Default-on since D-149 (opt out with -no-cargo-fetch-source). D-140 made this
+// opt-in on the grounds that fetching would be "a substantial change to the
+// tool's network posture" — a premise D-141 corrected: every ordinary online
+// PyPI scan already fetches per-dependency source from a registry by default,
+// and the owner's ruling is that coverage defaults on unless the action itself
+// carries a risk worth weighing. This fetch is checksum-verified against the
+// lockfile, executes nothing (D-04), and talks to a registry the scan's other
+// default stages already talk to, so it adds no risk class. -offline still
+// wins, via the client's own gate: a warm cache still serves, and a cold miss
+// stays a source-unavailable gap.
 //
 // Only nodes the extraction actually reported as source-unavailable are
 // fetched. Crates already read from vendor/ or CARGO_HOME are left alone: their
@@ -951,9 +958,9 @@ type resolveResult struct {
 	GapReasons    map[string]int
 	GapDetails    []string
 	// SourceUnavailable holds the node IDs whose install surface could not be
-	// examined because the package's source was not on disk. -cargo-fetch-source
-	// uses it to know exactly which crates to fetch, rather than re-fetching
-	// ones already scanned from vendor/ or CARGO_HOME.
+	// examined because the package's source was not on disk. The cargo build.rs
+	// fetch (default-on, D-149) uses it to know exactly which crates to fetch,
+	// rather than re-fetching ones already scanned from vendor/ or CARGO_HOME.
 	SourceUnavailable map[string]bool
 }
 
@@ -1020,7 +1027,7 @@ func cmdScan(args []string) int {
 	failIncomplete := fs.Bool("fail-on-incomplete", false, "degraded resolution coverage fails the run (exit 3)")
 	offline := fs.Bool("offline", false, "use only the local OSV cache; never touch the network")
 	noOSV := fs.Bool("no-osv", false, "skip the OSV data-source layer entirely")
-	cargoFetchSrc := fs.Bool("cargo-fetch-source", false, "fetch build.rs from crates.io for cargo dependencies whose source is not on disk (vendor/ or CARGO_HOME), so install-surface analysis covers a cold clone; one registry fetch per unexamined crate, and -offline still wins")
+	noCargoFetchSrc := fs.Bool("no-cargo-fetch-source", false, "skip fetching build.rs from crates.io for cargo dependencies whose source is not on disk (vendor/ or CARGO_HOME); the unexamined crates stay disclosed as source-unavailable (-offline also stops the fetch)")
 	cacheDir := fs.String("osv-cache", defaultCacheDir("osv"), "OSV advisory cache directory")
 	snapshotPath := fs.String("osv-snapshot", "", "path to a JSON advisory snapshot to import into the OSV cache before scanning (bootstraps -offline with zero network calls)")
 	exportPath := fs.String("osv-export", "", "write this scan's OSV results to path as a JSON snapshot for later -osv-snapshot import; requires live network access (incompatible with -offline/-no-osv)")
@@ -1299,10 +1306,13 @@ func cmdScan(args []string) int {
 			info.DataSources = append(info.DataSources, lureCov)
 		}
 
-		// Cargo build.rs fetch for unvendored crates (D-140), opt-in. Reuses the
-		// same cargo-source client and cache as the yank-lure path above, so a
-		// crate needed by both is fetched once.
-		if *cargoFetchSrc {
+		// Cargo build.rs fetch for unvendored crates (D-140), default-on since
+		// D-149 for parity with the PyPI sdist path. Reuses the same
+		// cargo-source client and cache as the yank-lure path above, so a crate
+		// needed by both is fetched once. Under -offline the client serves only
+		// its warm cache and a cold miss keeps its source-unavailable gap — the
+		// same posture as OSV and the PyPI fetcher.
+		if !*noCargoFetchSrc {
 			srcCov, examined := enrichCargoBuildRS(g, cargoLureSrc, pass.SourceUnavailable)
 			if srcCov.Stats.Queried > 0 || srcCov.Error != "" {
 				if srcCov.Error != "" {

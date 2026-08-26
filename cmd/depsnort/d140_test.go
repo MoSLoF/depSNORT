@@ -19,8 +19,9 @@ import (
 )
 
 // D-140: cargo install-surface analysis is local-only (vendor/ or CARGO_HOME),
-// so a cold clone gets none (D-139). -cargo-fetch-source closes that by fetching
-// build.rs for exactly the crates the extraction reported as source-unavailable.
+// so a cold clone gets none (D-139). The build.rs fetch (opt-in at D-140,
+// default-on since D-149) closes that by fetching build.rs for exactly the
+// crates the extraction reported as source-unavailable.
 
 func d140Crate(t *testing.T, nameVer string, files map[string]string) []byte {
 	t.Helper()
