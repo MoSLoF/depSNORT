@@ -5328,3 +5328,101 @@ deliberately does not do. `exports` is npm-only; no other ecosystem has an equiv
 resolution picks ONE condition arm per import; this pass collects every arm, which is deliberate (the
 scanner cannot know how a consumer will import) and means an unreachable-in-practice arm is still analyzed —
 over-collection, never under.
+
+## D-137 — resolve wildcard `exports` subpath targets against the tree (npm)
+
+**Trigger:** D-136's own residual note. That entry resolved concrete `exports` paths but skipped wildcard
+patterns, because a pattern names a SET rather than one file and enumerating it needs the tree. A loader
+reachable only through `"./features/*"` was therefore still invisible. Reproduced before writing any fix:
+both a flat wildcard target and one whose match sits in a nested directory produced ZERO hooks.
+
+**`*` matches across `/`, so this is a recursive walk, not a glob.** Node's subpath patterns are a string
+substitution: `*` captures any substring INCLUDING path separators, so `"./f/*": "./src/f/*.js"` makes
+`pkg/f/deep/nested/loader` resolve to `./src/f/deep/nested/loader.js`. A single-directory match would have
+found the shallow files and missed exactly the ones an attacker would prefer. The live-fire fixture below
+puts the loader a directory deeper than its benign sibling for that reason.
+
+**The fix:** `exportsPathsMatching` now partitions the exports walk into concrete paths and wildcard targets
+(`exportsEntryPaths` / `exportsWildcardTargets` are the two halves, so D-136's tests keep their exact
+meaning). `resolveExportsWildcards` splits each target on its wildcards, walks from the deepest fully-literal
+directory of the prefix, and collects files matching prefix and suffix. `npmEntryCandidatesResolved` merges
+the result with the static candidates, deduplicated — a file can be both a concrete export and a wildcard
+match — and both call sites use it.
+
+**Multiple `*` in one target over-collects, deliberately.** Node substitutes the SAME capture for every `*`,
+so `"./src/*/index-*.js"` constrains matches more tightly than prefix+suffix alone. Solving that exactly is
+only tractable for a single `*`; with more, prefix/suffix matching returns a superset. That is the safe
+direction for a scanner — it analyzes files that may not be reachable rather than missing ones that are — and
+it matches the posture already in place, which scans `index.js`/`index.mjs`/`index.cjs` whether or not they
+are exported. Recorded rather than silently accepted.
+
+**Containment and bounds.** Every listing and read goes through the contained reader, so a directory
+symlinked out of the package is refused rather than followed — proven by a test that plants such a symlink
+and asserts nothing outside the tree appears. A target containing `..` is refused before the walk as well.
+Nested `node_modules` (other packages, analyzed on their own nodes) and dot-directories are skipped, so a
+broad wildcard cannot sweep the dependency tree into one package's surface. Three bounds apply because this
+walk touches the filesystem: matches per package (64 — each is read and scanned), directory entries examined
+(4096), and walk depth (16). `os.ReadDir` returns entries sorted by name and the target list arrives sorted,
+so the result is deterministic without further sorting.
+
+**Mutation-proven, three mechanisms.** Dropping the wildcard wiring fails the end-to-end regression. Making
+the walk non-recursive fails the resolution-shapes test — the nested match disappears, which is precisely
+the `*`-spans-`/` semantics. Removing the `node_modules`/dot-directory skip fails the exclusion test.
+
+**Validation:** full suite green (34 packages), `-race` clean on `internal/ecosystem/npm` and
+`internal/ecosystem/conformance`. Live CLI before/after on a package whose loader is reachable ONLY through a
+wildcard and sits a directory deeper than its benign sibling: before, exit 0 with zero findings and zero hook
+nodes; after, `VC-002b` and `VC-002e` on `module-load:src/plugins/analytics/collect.js`, with the sibling
+`src/plugins/format.js` correctly producing nothing. The FP boundary matters more here than in D-136 — a
+wildcard can pull in many files — and a wholly benign three-file wildcard package still produces no hooks,
+because the load-time pass remains gated on a JS-precise execution signal.
+
+Residual limitations: the multiple-`*` superset above. Resolution is bounded, and a package exceeding the
+match cap has the remainder unanalyzed without that being surfaced as a coverage gap — acceptable at 64
+entry modules per package, but it is a silent stop rather than a disclosed one. `exports` remains npm-only.
+Wildcard resolution reads the tree, so it finds nothing for a dependency whose source is not on disk (a
+pre-install tree with no `node_modules`), exactly as the concrete-path pass already behaved.
+
+## D-138 — a scan bound that truncates enumeration is a disclosed coverage gap
+
+**Trigger:** D-137's own residual note. Wildcard resolution stopped at three bounds — matches, directory
+entries examined, walk depth — and returned what it had, silently. That sits directly against R-01, the
+principle this repo's whole gap layer was built on: a refusal reported as an absence is
+attacker-triggerable invisibility. A bound is a slower route to the same place. "We stopped looking" was
+being rendered as "we looked and found nothing", and a package could put its loader past entry 64 of a
+wildcard-reachable directory to get there.
+
+**The fix:** a new `instsurf.GapTruncated` ("scan-bound-truncated"), recorded by `resolveExportsWildcards`
+whenever a bound stops it with material still unexamined. The gap is attributed to the package node and its
+detail names which bounds tripped and their limits. Unlike every other reason in that file, nothing was
+refused and nothing failed to read — the scanner chose to stop — which is exactly why it needed its own
+reason rather than being folded into `GapUnreadable`.
+
+**One gap per package, not one per skipped directory.** A broad wildcard over a large tree can trip the
+bound at many points; emitting a gap at each would drown the coverage report this exists to inform. The
+three bound flags are collected during the walk and rendered once at the end.
+
+**The off-by-one is the whole correctness question, and it is tested directly.** A package with EXACTLY the
+cap's worth of matches was fully examined and must NOT be reported as truncated — otherwise the fix attaches
+a coverage gap to a package whose surface is completely known, which is its own kind of dishonesty. The
+`bounded` helper is only consulted at points reached when there is more to examine, so the flag means real
+truncation rather than a walk that finished. `TestD138ExactCapIsNotTruncation` pins it, and the mutation
+that trips the cap one entry early fails it with `expected all 64 matches, got 63`.
+
+**Mutation-proven:** removing the gap recording fails both the unit disclosure test and the end-to-end
+propagation test; the off-by-one mutation above fails the exact-cap boundary.
+
+**Validation:** full suite green (34 packages), `-race` clean on `internal/ecosystem/npm` and
+`internal/ecosystem/instsurf`. Live CLI on a package with 200 wildcard-reachable modules against a cap of
+64: `install_surface_gaps: 1`, `install_surface_gap_reasons: ["scan-bound-truncated x1"]`, the detail naming
+the package and `package.json (exports wildcard resolution)`, a stderr warning, and the coverage line
+concluding *"This report is NOT an all-clear."* The same fixture at 40 modules — under the cap — reports
+`install_surface_gaps: 0` and no reasons, so the disclosure tracks actual truncation rather than merely the
+presence of a wildcard.
+
+Residual limitations: only the wildcard resolver discloses its bounds. The `exports` JSON walk's own
+`maxExportsDepth`/`maxExportsEntries` (D-136) still truncate silently — they bound a manifest already
+size-capped by the contained reader and are unreachable for legitimate input, but that is an argument about
+likelihood, not a disclosure. `AnalyzeLoadTime`'s 16-reference sibling cap and gomod's `maxGoFiles` are the
+same shape elsewhere in the tree. Making bound-disclosure uniform across every capped enumeration is the
+honest follow-up; this entry closes one instance and names the rest rather than implying the class is done.

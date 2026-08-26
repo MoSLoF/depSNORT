@@ -60,6 +60,20 @@ const maxExportsEntries = 256
 // candidate list feeds graph node construction, which the determinism tests
 // require to be stable across runs.
 func exportsEntryPaths(raw json.RawMessage) []string {
+	return exportsPathsMatching(raw, false)
+}
+
+// exportsWildcardTargets returns the wildcard TARGETS in an exports value (the
+// right-hand side, e.g. "./src/features/*.js"). They name a set of files rather
+// than one, so they are resolved against the tree by resolveExportsWildcards
+// rather than used as candidates directly.
+func exportsWildcardTargets(raw json.RawMessage) []string {
+	return exportsPathsMatching(raw, true)
+}
+
+// exportsPathsMatching is the shared walk. wantWildcard selects which half of
+// the paths to return: the concrete ones, or the wildcard patterns.
+func exportsPathsMatching(raw json.RawMessage, wantWildcard bool) []string {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -79,10 +93,13 @@ func exportsEntryPaths(raw json.RawMessage) []string {
 		switch t := node.(type) {
 		case string:
 			// Only relative paths name a file inside this package. Bare
-			// specifiers ("node:fs", "another-pkg") resolve elsewhere, and a
-			// wildcard pattern ("./features/*.js") names a set this static pass
-			// cannot enumerate without walking the tree.
-			if !strings.HasPrefix(t, "./") || strings.Contains(t, "*") {
+			// specifiers ("node:fs", "another-pkg") resolve elsewhere.
+			if !strings.HasPrefix(t, "./") {
+				return
+			}
+			// A wildcard pattern names a SET; it is resolved against the tree
+			// separately. Each call returns one half or the other.
+			if strings.Contains(t, "*") != wantWildcard {
 				return
 			}
 			if !seen[t] {
@@ -143,6 +160,193 @@ func npmEntryCandidates(m pkgManifest) []string {
 	add("index.mjs")
 	add("index.cjs")
 	return out
+}
+
+// Bounds on wildcard resolution. Unlike the exports walk above, this one
+// touches the filesystem, so it is bounded on three axes: how many matches one
+// package may contribute (each is read and scanned), how many directory entries
+// may be examined finding them, and how deep the walk may go.
+const (
+	maxExportsWildcardMatches = 64
+	maxExportsWildcardVisits  = 4096
+	maxExportsWildcardDepth   = 16
+)
+
+// wildcardPrefixSuffix splits a wildcard target into the literal text before
+// its first `*` and after its last.
+//
+// Node substitutes the SAME captured string for every `*` in a target, so a
+// target with two of them constrains the match more tightly than prefix+suffix
+// alone. Solving that exactly is only tractable for a single `*`; with more,
+// prefix/suffix matching yields a SUPERSET. That is the safe direction for a
+// scanner — it analyzes files that may not be reachable rather than missing
+// ones that are — and matches the existing posture, which already scans
+// index.js/index.mjs/index.cjs whether or not they are exported.
+func wildcardPrefixSuffix(target string) (prefix, suffix string, ok bool) {
+	p := strings.TrimPrefix(target, "./")
+	first := strings.Index(p, "*")
+	if first < 0 {
+		return "", "", false
+	}
+	last := strings.LastIndex(p, "*")
+	prefix, suffix = p[:first], p[last+1:]
+	// A target that escapes the package is refused here as well as by the
+	// contained reader below.
+	if strings.Contains(prefix, "..") || strings.Contains(suffix, "..") {
+		return "", "", false
+	}
+	return prefix, suffix, true
+}
+
+// staticDirOf returns the deepest fully-literal directory of a prefix, which is
+// where the walk can start: "src/features/" -> "src/features", "dist/feat-" ->
+// "dist" (the trailing text is a partial filename, not a directory).
+func staticDirOf(prefix string) string {
+	i := strings.LastIndex(prefix, "/")
+	if i < 0 {
+		return ""
+	}
+	return prefix[:i]
+}
+
+// resolveExportsWildcards enumerates the real files a package's wildcard export
+// targets reach, returning package-relative slash paths.
+//
+// Node's `*` in a subpath pattern matches any substring INCLUDING "/", so
+// "./f/*.js" reaches "./f/deep/nested/loader.js". That is why this is a
+// recursive walk rather than a single-directory match.
+//
+// Every read and listing goes through the contained reader, so a symlink out of
+// the package is refused rather than followed. os.ReadDir returns entries
+// sorted by name and the target list arrives sorted, so the result is
+// deterministic without further sorting.
+//
+// When a bound stops the walk with material still unexamined, that is recorded
+// as a GapTruncated coverage gap rather than returned silently (R-01): a bound
+// that quietly drops entry modules reports "we looked and found nothing" when
+// the truth is "we stopped looking", which is the invisibility the gap layer
+// exists to prevent. One gap per package, naming which bounds tripped — not one
+// per skipped directory, which would drown the report it is meant to inform.
+func resolveExportsWildcards(reader *securefs.Reader, baseDir string, raw json.RawMessage, pkgID string, gaps *instsurf.Gaps) []string {
+	targets := exportsWildcardTargets(raw)
+	if len(targets) == 0 {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	visits := 0
+	var hitMatches, hitVisits, hitDepth bool
+
+	// bounded reports whether a bound stops us here. Every call site is reached
+	// only when there is more to examine, so setting the flag means real
+	// truncation, never a walk that simply finished.
+	bounded := func(depth int) bool {
+		switch {
+		case depth > maxExportsWildcardDepth:
+			hitDepth = true
+		case len(out) >= maxExportsWildcardMatches:
+			hitMatches = true
+		case visits >= maxExportsWildcardVisits:
+			hitVisits = true
+		default:
+			return false
+		}
+		return true
+	}
+
+	for _, t := range targets {
+		prefix, suffix, ok := wildcardPrefixSuffix(t)
+		if !ok {
+			continue
+		}
+		var walk func(relDir string, depth int)
+		walk = func(relDir string, depth int) {
+			if bounded(depth) {
+				return
+			}
+			dirPath := baseDir
+			if relDir != "" {
+				dirPath = filepath.Join(baseDir, filepath.FromSlash(relDir))
+			}
+			entries, err := reader.ReadDir(dirPath)
+			if err != nil {
+				// Absent or refused. A package that does not ship the directory
+				// its own exports name is normal, not a coverage gap.
+				return
+			}
+			for _, e := range entries {
+				// depth is not re-checked here: this loop is inside a directory
+				// already admitted at this depth.
+				if bounded(depth) {
+					return
+				}
+				visits++
+				name := e.Name()
+				childRel := name
+				if relDir != "" {
+					childRel = relDir + "/" + name
+				}
+				if e.IsDir() {
+					// A nested node_modules is other packages, analyzed on
+					// their own nodes; dot-directories are not shipped code.
+					if name == "node_modules" || strings.HasPrefix(name, ".") {
+						continue
+					}
+					walk(childRel, depth+1)
+					continue
+				}
+				if !strings.HasPrefix(childRel, prefix) || !strings.HasSuffix(childRel, suffix) {
+					continue
+				}
+				// Reject an overlap where prefix and suffix share characters:
+				// `*` has to stand for something.
+				if len(childRel) < len(prefix)+len(suffix) {
+					continue
+				}
+				if !seen[childRel] {
+					seen[childRel] = true
+					out = append(out, childRel)
+				}
+			}
+		}
+		walk(staticDirOf(prefix), 0)
+	}
+
+	if gaps != nil && (hitMatches || hitVisits || hitDepth) {
+		var which []string
+		if hitMatches {
+			which = append(which, fmt.Sprintf("match cap %d", maxExportsWildcardMatches))
+		}
+		if hitVisits {
+			which = append(which, fmt.Sprintf("visit cap %d", maxExportsWildcardVisits))
+		}
+		if hitDepth {
+			which = append(which, fmt.Sprintf("depth cap %d", maxExportsWildcardDepth))
+		}
+		gaps.AddReason(pkgID, "package.json (exports wildcard resolution)", instsurf.GapTruncated,
+			fmt.Errorf("%s reached; wildcard-reachable entry modules past it were not analyzed",
+				strings.Join(which, ", ")))
+	}
+	return out
+}
+
+// npmEntryCandidatesResolved is npmEntryCandidates plus the files reached by
+// wildcard export targets, which need the tree to enumerate. Deduplicated
+// against the static candidates: a file can be both a concrete export and a
+// wildcard match.
+func npmEntryCandidatesResolved(m pkgManifest, reader *securefs.Reader, baseDir, pkgID string, gaps *instsurf.Gaps) []string {
+	cands := npmEntryCandidates(m)
+	have := make(map[string]bool, len(cands))
+	for _, c := range cands {
+		have[c] = true
+	}
+	for _, w := range resolveExportsWildcards(reader, baseDir, m.Exports, pkgID, gaps) {
+		if !have[w] {
+			have[w] = true
+			cands = append(cands, w)
+		}
+	}
+	return cands
 }
 
 // rootDir resolves the project root from a path that may be a dir or the
@@ -244,7 +448,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		// entry file (pre-install tree, or a candidate the package does not ship)
 		// is normal and read quietly; only a referenced sibling that is refused
 		// becomes a gap (via the `read` closure passed to AnalyzeLoadTime).
-		for _, cand := range npmEntryCandidates(m) {
+		for _, cand := range npmEntryCandidatesResolved(m, reader, absPkgDir, n.ID, &gaps) {
 			src, err := reader.ReadFile(filepath.Join(absPkgDir, filepath.FromSlash(cand)))
 			if err != nil {
 				continue
@@ -373,7 +577,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		// the RedC2 evasion OPU-31 exists to catch, and gating it behind
 		// len(m.Scripts) > 0 reinstated that blind spot for publishable roots
 		// (the OPU-38 pass shipped with exactly that bug).
-		for _, cand := range npmEntryCandidates(m) {
+		for _, cand := range npmEntryCandidatesResolved(m, reader, absRoot, n.ID, &gaps) {
 			src, err := reader.ReadFile(filepath.Join(absRoot, filepath.FromSlash(cand)))
 			if err != nil {
 				continue
