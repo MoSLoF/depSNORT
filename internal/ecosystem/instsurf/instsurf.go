@@ -49,6 +49,26 @@ func AddToGraph(g *graph.Graph, pkg *graph.Node, s installsurface.Surface) {
 		}
 		g.AddEdge(pkg.ID, hookID, graph.EdgeDeclaresHook)
 
+		// The worm loop, finally drawn (D-152). graph.EdgeRepublish has been
+		// defined as "worm loop back into the declared tree", counted in the
+		// verdict's install-time subgraph and rendered by the Cypher/DOT
+		// emitters since the graph vocabulary was written — but no detector ever
+		// created one, so the edge type was aspirational. A hook that publishes
+		// points back at its own package: that IS the loop, and it is what makes
+		// the worm chain visible in a graph view rather than only in a finding.
+		//
+		// HasCap folds in the hook's artifacts, which is required rather than
+		// incidental: the real attack puts an unremarkable `node ./harvest.js`
+		// in the hook command and the publish inside the referenced script.
+		// Testing h.Caps alone drew the edge only for a publish inlined into the
+		// command — the one form Shai-Hulud does not use. VC-002k already
+		// reasons over the absorbed surface (collectHooks folds artifact caps
+		// into the hook view); the edge has to agree with the finding, or the
+		// graph contradicts the report.
+		if h.HasCap(installsurface.CapPropagate) {
+			g.AddEdge(hookID, pkg.ID, graph.EdgeRepublish)
+		}
+
 		for _, a := range h.Artifacts {
 			artID := "artifact:" + pkg.ID + "#" + a.Ref
 			an := g.AddNode(&graph.Node{

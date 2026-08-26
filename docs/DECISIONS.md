@@ -6327,3 +6327,81 @@ is exempted on the grounds that its scripts-vs-plugin split lives inside `Analyz
 root suite; if composer ever splits those into two adapter-level analyses, the exemption must move to a
 `depCases()` entry, which the coverage meta-test does NOT catch (it only catches a wholly-unlisted adapter),
 so that remains a reviewer's judgement.
+
+## D-152 — the propagation phase, and the edge that was drawn for four years' worth of nothing
+
+**Trigger:** an external gap analysis proposed twelve YAML rules. Eight were already covered, out of scope
+for a static analyzer, or heuristics this project has declined on principle (TLD-geography, narrative keyword
+matching). One was a real gap, and confirming it took a single grep: `EdgeRepublish` had no creator.
+
+**The gap, stated exactly.** The Shai-Hulud family has three phases. depSNORT detected the credential phase
+(VC-002c/d, OPU-19) and the persistence phase (VC-002g, OPU-19). The phase between them — the install hook
+that PUBLISHES, turning one compromised package into many — had no capability, no check, and no evidence
+marker. Reproduced before building anything: `npm publish`, `npm version patch`, `libnpmpublish` and `yarn
+publish` in a postinstall all scanned as plain `[exec]` or `[network]`, indistinguishable from a hook that
+shells out to a compiler. The worm step was invisible.
+
+Worse, and only visible from inside: `graph.EdgeRepublish` has been defined as "worm loop back into the
+declared tree", counted in the verdict's install-time subgraph (`verdict.go`), and rendered by both the
+Cypher and DOT emitters since the graph vocabulary was written — while **no code path anywhere ever created
+one**. The vocabulary described a detection the tool did not perform. (`EdgeExfil` is still in that state;
+recorded below, not fixed here.)
+
+**What was added.** `CapPropagate`, set by a package-manager-anchored publish regex (`npm|pnpm|yarn|bun
+publish`, plus `npm version <bump>`, which publishes under common release configs) and by the programmatic
+paths (`libnpmpublish`, `npm-registry-fetch`, the registry's `/-/package` endpoint). `VC-002k`
+(`HookSelfPropagation`), critical and blocking: unlike network egress, an install hook that publishes has no
+benign reading. When credential access is present on the same hook the evidence names the complete loop —
+harvest a registry token, publish with it — because the operator's next action is rotating tokens, not
+merely removing a package. And `EdgeRepublish` is finally emitted, pointing from the hook back at its own
+package: that IS the loop.
+
+**Three false-positive boundaries, each one a test.** `npm publish --dry-run` is how careful release tooling
+REHEARSES a publish — flagging it would fire on exactly the projects that have published nothing.
+`prepublish`/`postpublish`/`prepublishOnly` are hook NAMES in a large share of package.json files; matching
+the bare word "publish" flags all of them. And `emitter.publish()`, `redis.publish()`, `mqtt.publish()` are
+pub/sub, not registry traffic. A live scan of a project using `prepublishOnly`, `np`, `npm publish
+--dry-run` and `postpublish` returns exit 0 with no findings and no edges.
+
+**The defect live validation caught, which the unit tests had masked — twice.** Every unit test passed with
+the publish inlined into the hook command. Scanning an actual worm fixture produced the VC-002k finding over
+a graph with **no republish edge at all**, and the two disagreements had two separate causes:
+
+1. The edge was gated on the hook's own capabilities, but the real attack puts an unremarkable `node
+   ./harvest.js` in the hook command and the publish inside the referenced script. Fixed by testing
+   `Hook.HasCap`, which folds in artifacts — matching how VC-002k already reasons, since `collectHooks`
+   absorbs artifact caps into the hook view. The graph must agree with the finding.
+2. Even fixed, the edge reached only four adapters. **npm, PyPI and Composer each hand-roll a near-verbatim
+   copy of `instsurf.AddToGraph` rather than calling it** — so wiring the edge in the shared helper left out
+   the one ecosystem Shai-Hulud actually targets. This is the D-15/D-37 shape a third time: a second
+   implementation of a rule, drifting from the first.
+
+Both are now regression-tested, and the second got the D-37 treatment rather than a comment: a new
+`republish_test.go` conformance suite runs an inert publishing hook through **all seven** adapters and fails
+if any stops drawing the edge, with a boundary case (a benign hook draws none), an anti-vacuity precondition
+(a fixture producing no hook fails loudly rather than passing as "no edge"), and a coverage meta-test.
+
+**Two vacuous tests my own first pass shipped, found by mutation and fixed.** Every check-layer test called
+`HookSelfPropagation{}.Run` directly, so **unregistering the check from `builtin.Default()` broke nothing** —
+a check that detects nothing in production would have passed the suite. Now routed through `Default()`, the
+single registration point. And `TestD152IsCriticalAndBlocking` asserted only `Meta()`; the declared Meta and
+the emitted finding are separate literals, so the emitted severity could be downgraded silently while the
+test stayed green. Both literals are now asserted. Separately, the four false-positive tests would all have
+passed against a `scanCaps` that returned nothing at all, so the benign baseline now proves the scanner is
+still classifying — verified by mutating `scanCaps` to return nil.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on all
+seven touched packages. Nineteen mutations run, all killed — including one per graph-builder site, so each
+adapter's edge is individually load-bearing. Live CLI validation on an inert fixture (IOCs are RFC 5737
+TEST-NET-3 / `.invalid`; nothing executed, per D-04) yields VC-002k critical/block with the worm loop named,
+the `republish` edge in JSON, and the edge rendered in DOT.
+
+Residual limitations: the publish verbs are npm-family — a `gem push`, `twine upload`, `cargo publish` or
+`dotnet nuget push` from an install hook is NOT yet propagation, though the capability, the check and the
+edge are all ecosystem-neutral and only the marker table needs extending. Obfuscated publishes (the command
+assembled at runtime from string fragments) are out of reach of a static marker scan, as they are for every
+other capability here; `CapObfuscation` still fires on them via VC-002e. `EdgeExfil` remains defined,
+gated and rendered while nothing creates it — the same aspirational-vocabulary defect this entry fixed for
+`EdgeRepublish`, still open. And a package whose install hook legitimately publishes a DIFFERENT package
+(a monorepo release runner invoked at install time) would be flagged; no benign instance of that shape was
+found, and the block is deliberate.

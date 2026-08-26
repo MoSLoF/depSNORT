@@ -36,6 +36,12 @@ const (
 	CapObfuscation Capability = "obfuscation" // base64/hex decode paired with code execution
 	CapFilesystem  Capability = "filesystem"  // touches shell profiles / persistence locations
 	CapCradle      Capability = "cradle"      // fetches remote code and executes it in one step
+	// CapPropagate is the worm step: the hook publishes a package to a registry.
+	// An install hook that PUBLISHES is the mechanism that turns one compromised
+	// package into many — the phase of the Shai-Hulud family depSNORT modelled in
+	// its graph vocabulary (graph.EdgeRepublish) long before any detector emitted
+	// it (D-152).
+	CapPropagate Capability = "propagate"
 )
 
 // InstallHookNames are the npm lifecycle scripts that run as part of an install.
@@ -589,6 +595,35 @@ var (
 	// same hook.
 	pkgRunnerOfflineRe = regexp.MustCompile(`(?i)(?:npx|bunx|dlx|x|uvx|uv\s+tool\s+run)\s+(?:--?\w[\w-]*\s+)*(?:--no-install|--offline|--prefer-offline)\b`)
 
+	// propagationRe matches an install-time REGISTRY PUBLISH — the worm step.
+	//
+	// Deliberately anchored on the publish VERB with its package-manager, not on
+	// the word "publish" alone: `prepublish`/`postpublish` are lifecycle hook
+	// NAMES that appear in every second package.json, and a bare `publish(`
+	// matches event emitters, pub/sub libraries and message queues. The forms
+	// below are the ones that actually push a new version to a registry:
+	//
+	//	npm/pnpm/yarn/bun publish     the CLI publish, the Shai-Hulud mechanism
+	//	npm version <patch|minor|...> the version bump that precedes it
+	//	libnpmpublish / npm-registry-fetch  the programmatic equivalents
+	//
+	// `npm publish --dry-run` is excluded below: it is the canonical way a
+	// legitimate CI job or release script REHEARSES a publish without one
+	// happening, so treating it as propagation would flag exactly the careful
+	// release tooling that has done nothing.
+	propagationRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(='"` + "`" + `])(?:(?:npm|pnpm|yarn|bun)\s+publish\b|(?:npm|pnpm|yarn)\s+version\s+(?:patch|minor|major|premajor|preminor|prepatch|prerelease)\b)`)
+
+	// propagationDryRunRe marks a publish that is explicitly a rehearsal.
+	propagationDryRunRe = regexp.MustCompile(`(?i)(?:npm|pnpm|yarn|bun)\s+publish\b[^;&|
+]*\s--dry-run\b`)
+
+	// propagationAPIMarkers are the programmatic publish paths. A package that
+	// merely DEPENDS on libnpmpublish is not doing this — these only ever run
+	// through scanCaps over an install hook's own source text.
+	propagationAPIMarkers = []string{
+		"libnpmpublish", "npm-registry-fetch", "registry.npmjs.org/-/package",
+	}
+
 	// benignRunnerTargets is a curated, exact-match allowlist of runner target
 	// packages that are known-benign guard clauses — they gate WHICH package
 	// manager may install and contribute no payload (OPU-27 Part D). `only-allow`
@@ -797,6 +832,11 @@ func scanCaps(text string) ([]Capability, []string) {
 	scan(envMarkers, CapEnv)
 	scan(execMarkers, CapExec)
 	scan(obfuscationMarkers, CapObfuscation)
+	scan(propagationAPIMarkers, CapPropagate)
+	// A CLI publish counts only when it is not an explicit --dry-run rehearsal.
+	if m := propagationRe.FindString(text); m != "" && !propagationDryRunRe.MatchString(text) {
+		add(CapPropagate, "registry-publish:"+strings.TrimSpace(m))
+	}
 	// Persistence and ordinary install writes are both CapFilesystem; the
 	// persistence/benign distinction lives in the marker (IsPersistenceMarker),
 	// read by VC-002g, so the capability output is unchanged (OPU-19).

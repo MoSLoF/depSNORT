@@ -577,6 +577,17 @@ func addSurfaceToGraph(g *graph.Graph, pkg *graph.Node, s installsurface.Surface
 		}
 		g.AddEdge(pkg.ID, hookID, graph.EdgeDeclaresHook)
 
+		// D-152: the worm loop. Drawn here as well as in instsurf.AddToGraph
+		// because npm, PyPI and Composer each hand-roll a near-verbatim copy of
+		// that function; wiring the edge only in the shared helper left the ONE
+		// ecosystem Shai-Hulud actually targets without it, so a live npm worm
+		// produced a VC-002k finding over a graph that showed no loop. The
+		// conformance test in internal/ecosystem/conformance keeps the copies
+		// from drifting apart again.
+		if h.HasCap(installsurface.CapPropagate) {
+			g.AddEdge(hookID, pkg.ID, graph.EdgeRepublish)
+		}
+
 		for _, a := range h.Artifacts {
 			artID := "artifact:" + pkg.ID + "#" + a.Ref
 			an := g.AddNode(&graph.Node{
