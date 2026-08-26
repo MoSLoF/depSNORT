@@ -351,6 +351,68 @@ var (
 	// function does, which is exactly the esbuild-vs-Mastra distinction.
 	namedFunctionDeclRe = regexp.MustCompile(`\bfunction\s+[A-Za-z_$][\w$]*\s*\(`)
 
+	// OPU-39 (arrayref/proc-macro1, Rust supply-chain attack, August 2026):
+	// cargo's build.rs runs at COMPILE time with no user action beyond
+	// `cargo build` — the JS-specific asyncCradleRe/cradleRe never fire on
+	// Rust syntax at all. The real campaign's technique: a build.rs fetches a
+	// remote binary via a Rust HTTP client, then executes it via
+	// Command::new/process::Command — the exact same fetch-then-exec shape
+	// asyncCradleRe catches in JS, just different syntax entirely. Scoped to
+	// the two dominant Rust HTTP client crates (reqwest, ureq) plus the
+	// generic `.get(...).send()` builder-pattern idiom both expose. Filtered
+	// the same way OPU-34 learned to filter JS cradles: reject any candidate
+	// whose span crosses a separately-declared Rust function (`fn name`) —
+	// a legitimate crate that fetches a prebuilt binary in one function and
+	// runs an unrelated tool in a different function must not match, same
+	// reasoning as the esbuild negative that broke OPU-34's first draft.
+	//
+	// A second constraint was needed after the first draft of this regex
+	// broke an existing test (yanklure_test.go's "ambiguous: network+exec
+	// only" case — `reqwest::get(url); Command::new("sh");`, deliberately
+	// NOT flagged: a build that fetches a prebuilt binary and invokes an
+	// unrelated compiler is an ordinary, common shape). The distinguishing
+	// signal: the real campaign always executes a DOWNLOADED PATH — a
+	// variable, since the whole point of downloading is the content wasn't
+	// known in advance — never a hardcoded tool name. Requiring the
+	// Command::new argument to be an identifier (`&dest`, `payload_path`),
+	// not a string literal (`"sh"`, `"cc"`, `"protoc"`), cleanly separates
+	// "executing what was just fetched" from "invoking a known tool"
+	// without needing real dataflow tracking.
+	cargoFetchExecCandidateRe = regexp.MustCompile(`(?is)(?:reqwest::(?:blocking::)?get\s*\(|ureq::get\s*\(|\.\s*get\s*\([^)]{0,200}\)\s*\.\s*send\s*\(\s*\))([\s\S]{0,1000}?)(?:Command::new|process::Command)\s*\(\s*&?[A-Za-z_]\w*\s*[,)]`)
+
+	// A NAMED Rust function declaration — the Rust analog of
+	// namedFunctionDeclRe above, used by the same candidate-plus-filter
+	// pattern for cargoFetchExecCandidateRe.
+	rustFnDeclRe = regexp.MustCompile(`\bfn\s+[A-Za-z_]\w*`)
+
+	// OPU-39: TLS certificate-verification bypass. proc-macro1's build
+	// script "disabled TLS verification" before downloading its payload
+	// (Metaverse Post's technical writeup on the campaign) — a legitimate
+	// crate has essentially no reason to ever disable certificate
+	// validation. Scoped to the well-known builder methods reqwest and
+	// native-tls both expose under the same name, plus the openssl-crate
+	// equivalent. Feeds CapObfuscation: disabling a security control to
+	// enable something else is the same conceptual bucket as decoding a
+	// hidden payload — both defeat a control so a later step can proceed
+	// undetected, and co-occurring with CapExec already raises VC-002e.
+	tlsBypassRe = regexp.MustCompile(`(?i)danger_accept_invalid_certs\s*\(\s*true\s*\)|danger_accept_invalid_hostnames\s*\(\s*true\s*\)|SslVerifyMode::NONE`)
+
+	// OPU-39 (onering, Rust supply-chain attack, June 2026): a build.rs ran
+	// `git log`/`git diff` to harvest the diff of the developer's most
+	// recent commit and exfiltrated it to a Sentry ingest endpoint —
+	// network egress was already covered, but nothing flagged the git
+	// CONTENT read as suspicious on its own. Deliberately excludes
+	// `git rev-parse`/`describe`/`branch`/`status` — version-stamping a
+	// build with the current commit hash (via `git rev-parse HEAD` or the
+	// vergen crate) is an extremely common, entirely benign pattern that
+	// must not trip this. `log`/`diff`/`show`/`cat-file` read actual commit
+	// content (messages, diffs, file contents) rather than just identity,
+	// and have no comparable legitimate build-time use case. Gated on
+	// CapNetwork already being present (checked in scanCaps below) rather
+	// than firing standalone: a build.rs that reads git content but never
+	// leaves the machine is not the onering pattern.
+	gitContentReadRe = regexp.MustCompile(`(?i)Command::new\s*\(\s*"git"\s*\)[\s\S]{0,300}?\.args?\s*\([^)]*\b(?:log|diff|show|cat-file)\b`)
+
 	// OPU-32: a spawned scripting interpreter (powershell, cmd, wscript,
 	// cscript, mshta). On its own this is just CapExec — legitimate installers
 	// occasionally shell out to one of these. It only becomes a cradle signal
@@ -871,6 +933,36 @@ func scanCaps(text string) ([]Capability, []string) {
 		}
 		add(CapCradle, "async-cradle:"+strings.TrimSpace(m[0][:min(len(m[0]), 80)]))
 		break
+	}
+	// Cargo fetch-then-exec cradle (OPU-39): the Rust analog of the JS
+	// async-cradle above. See cargoFetchExecCandidateRe above for the real
+	// campaign (arrayref/proc-macro1) this closes. Same structural filter:
+	// reject a candidate whose span crosses a separately-declared Rust
+	// function.
+	for _, m := range cargoFetchExecCandidateRe.FindAllStringSubmatch(text, -1) {
+		if rustFnDeclRe.MatchString(m[1]) {
+			continue
+		}
+		add(CapCradle, "cargo-fetch-exec:"+strings.TrimSpace(m[0][:min(len(m[0]), 80)]))
+		break
+	}
+	// TLS certificate-verification bypass (OPU-39): see tlsBypassRe above.
+	// Feeds CapObfuscation — defeating a security control, same bucket as a
+	// hidden-payload decode.
+	if m := tlsBypassRe.FindString(text); m != "" {
+		add(CapObfuscation, "tls-bypass:"+strings.TrimSpace(m))
+	}
+	// Git-content exfiltration (OPU-39, onering): see gitContentReadRe
+	// above. Gated on CapNetwork already present in this pass — a build.rs
+	// that reads git content but never reaches the network is not the
+	// onering pattern.
+	if gitContentReadRe.MatchString(text) {
+		for _, c := range caps {
+			if c == CapNetwork {
+				add(CapCradle, "git-content-exfil")
+				break
+			}
+		}
 	}
 	// Decode-then-invoke-interpreter (OPU-32): obfuscation immediately feeding
 	// a spawned script interpreter is a cradle even when the decoded command

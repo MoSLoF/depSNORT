@@ -5081,3 +5081,82 @@ Cargo have the analogous root-hook gap, unaddressed here); `"private": true` is 
 reasons would be excluded, and a workspace root that omits it (however unusual) is included; a bare
 `package.json` with no lockfile still leaves the project's OWN declared dependencies unresolved as a
 separate, pre-existing coverage gap this patch does not touch.
+
+## D-133 — OPU-39: Cargo/Rust build.rs supply-chain detection (fetch-exec cradle, TLS bypass, git-content exfil)
+
+**Trigger:** `AnalyzeRust` runs `build.rs` content through the shared `scanCaps` engine — the same one every
+other ecosystem's install hooks use — and unconditionally tags `CapExec` (a build script always runs by
+definition). That was the full extent of Rust-specific coverage. Two real 2026 campaigns exposed exactly
+what's missing: **arrayref/proc-macro1** (RUSTSEC-2026-0260/0265, August 2026) — a compromised maintainer
+account shipped a `build.rs` that disabled TLS verification, downloaded a remote binary via `reqwest`, and
+executed it (~245M combined downloads, transitive dependency of most Rust GUI frameworks); **onering**
+(RUSTSEC-2026-0175, June 2026) — a `build.rs` that ran `git log`/`git diff` to harvest the developer's most
+recent commit and exfiltrated it to a Sentry ingest endpoint. Neither pattern was reachable by any existing
+marker: `asyncCradleRe`/`cradleRe` are JS/shell/PowerShell syntax only; nothing recognized a Rust HTTP fetch,
+a TLS-bypass builder call, or git-content-reading as suspicious signals.
+
+**The fix — three additions to `internal/installsurface/analyze.go`, feeding the same shared `scanCaps` every
+`AnalyzeRust` call already routes through:**
+
+- `cargoFetchExecCandidateRe` — a `reqwest`/`ureq`/generic-builder fetch (`.get(...).send()`) followed within
+  1000 chars by `Command::new`/`process::Command`, filtered the same way OPU-34 learned to filter JS async
+  cradles: reject a candidate whose span crosses a separately-declared Rust function (`rustFnDeclRe`, the
+  `fn name` analog of OPU-34's `function name`). A second, independent guard requires the `Command::new`
+  argument to be an **identifier, not a string literal** (`&dest`, `payload_path` vs. `"sh"`, `"cc"`) — the
+  real campaigns always execute a *downloaded path* (necessarily a variable), never a hardcoded tool name.
+  This is the one guard that keeps `cmd/depsnort/yanklure_test.go`'s pre-existing `TestHostileBuildRS`
+  "ambiguous: network+exec only" case (`reqwest::get(url); Command::new("sh");` — a build that fetches a
+  prebuilt binary and separately invokes a generic command, deliberately non-hostile) from regressing.
+- `tlsBypassRe` — `danger_accept_invalid_certs(true)`/`danger_accept_invalid_hostnames(true)` (shared by
+  reqwest and native-tls) and `SslVerifyMode::NONE` (openssl crate). Feeds `CapObfuscation`: disabling a
+  security control to enable a later step is the same conceptual bucket as decoding a hidden payload, and
+  co-occurring with the `CapExec` every build.rs already carries correctly raises `VC-002e`.
+- `gitContentReadRe` — `Command::new("git")` with `log`/`diff`/`show`/`cat-file` args, gated on `CapNetwork`
+  already present in the same scan. Deliberately excludes `rev-parse`/`describe`/`branch`/`status`: those
+  reveal only commit *identity* (the ubiquitous, benign version-stamping idiom — e.g. `vergen`, or Microsoft's
+  own published `git rev-parse --short HEAD` pattern); `log`/`diff`/`show`/`cat-file` reveal commit *content*
+  and have no comparable legitimate build-time use.
+
+**Independent verification, mutation-proven.** Reproduced every claim rather than trusting the handoff:
+confirmed by reading `cmd/depsnort/yanklure_test.go` and `testdata/adversarial/cargo-buildrs-exfil/build.rs`
+directly, then empirically (not just by manual regex-tracing) confirmed `TestHostileBuildRS` still passes
+post-patch. Mutation-proved all four load-bearing mechanisms: removing `rustFnDeclRe`'s filter, the
+identifier-vs-literal constraint, `tlsBypassRe` itself, `gitContentReadRe`'s `CapNetwork` gate, and its
+subcommand exclusion list each independently reproduces a concrete false positive or false negative
+(including re-reproducing the exact `TestHostileBuildRS` regression when the identifier-vs-literal constraint
+is removed). Adversarially probed two FP-risk areas the handoff's own validation didn't specifically call
+out — the generic `.get(...).send()` alternation over-matching unrelated map/channel code, and
+`gitContentReadRe`'s handling of chained single-`.arg()` calls where the subcommand isn't in the first
+call — both came back clean (no FP; the second is in fact correctly detected already, not a gap).
+
+**Review finding — a vacuous test, for a benign reason (the same OPU-38 pattern).** The shipped
+`TestCargoFetchExecCradleDetected` negative case for the function-declaration filter uses
+`Command::new("protoc")` (a string literal) as the unrelated function's exec target — already excluded by the
+identifier-vs-literal guard regardless of whether `rustFnDeclRe`'s filter exists at all, so mutation-testing
+by removing that filter alone left the shipped test passing. Confirmed `rustFnDeclRe` is genuinely
+load-bearing via an isolated probe (same shape, but the unrelated function's exec target is an identifier —
+`Command::new(tool_path)`): with the filter, no `CapCradle`; with it removed, `CapCradle` fires incorrectly.
+Added this case to the shipped test so the function-decl filter has a test that can actually fail for the
+reason it claims to guard against.
+
+**Validation:** full suite green (34 packages), `-race` clean on `internal/installsurface` and
+`cmd/depsnort`. Live CLI validation against independently-built (not copied from the handoff), IOC-neutered
+reproductions of both campaigns: arrayref/proc-macro1 shape (TLS bypass + `client.get(url).send()` fetch +
+`fs::write` + `Command::new(&dest)`) → `VC-002f` critical/block + `VC-002e` high/gate-eligible; onering shape
+(`git diff` + POST to an RFC 5737 TEST-NET-3 placeholder) → `VC-002f` critical/block, correct source URL in
+evidence; the pre-existing `testdata/adversarial/cargo-buildrs-exfil` fixture (raw-socket exfil + reverse
+shell, a different technique class using no reqwest/ureq at all) unchanged at `VC-002d` critical/block. FP
+validation: Microsoft's own documented `git rev-parse --short HEAD` version-stamping pattern → exit 0, zero
+findings; the prebuilt-binary-fetch-plus-unrelated-`cc`-compile shape (`TestHostileBuildRS`'s own documented
+ambiguous case) → exit 0 by default / exit 2 with `-fail-on-eligible`, only the pre-existing `VC-002b`
+(network egress, medium) fires — the new OPU-39 markers correctly silent in both cases.
+
+Residual limitations, carried forward from the handoff: no dataflow tracking backs the identifier-vs-literal
+heuristic in `cargoFetchExecCandidateRe` — a contrived `let cmd = "sh"; Command::new(cmd)` (a variable that
+happens to hold a hardcoded literal) would still match even though it executes nothing fetched; not observed
+in either real campaign, flagged as a known imprecision rather than silently accepted. HTTP client coverage
+is scoped to `reqwest`/`ureq`, the two dominant crates by a wide margin but not exhaustive (`hyper`, `surf`,
+`attohttpc` uncovered). `gitContentReadRe`'s subcommand exclusion list is a judgment call checked against one
+documented real example, not a large corpus of real git-integrating build.rs files. Only two campaigns drove
+this patch — the broader research survey's remaining clusters were typosquat/namespace-squat patterns better
+addressed by name-similarity detection (VC-006) than install-surface analysis, and are out of scope here.
