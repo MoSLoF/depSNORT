@@ -5479,3 +5479,63 @@ Residual limitations: this entry corrects D-133's disclosure; it does not change
 a cold Cargo tree still reports `source-unavailable` rather than analysis. The equivalent question for other
 ecosystems was not examined — PyPI has an `SdistFetcher` used more broadly than the Cargo client, and
 whether npm/gem/nuget dependency analysis has comparable source-availability preconditions is unaudited.
+
+## D-140 — `-cargo-fetch-source`: opt-in build.rs fetch for unvendored crates
+
+**Trigger:** D-139 established that Cargo install-surface analysis is local-only, so a cold clone gets none,
+and put three options to the owner rather than choosing. The opt-in flag was chosen.
+
+**The flag.** `-cargo-fetch-source` fetches `build.rs` from crates.io for cargo dependencies whose source was
+not on disk, and runs it through `installsurface.AnalyzeRust` and `instsurf.AddToGraph` — the same path a
+vendored crate takes, so every VC-002 check including the OPU-39 markers sees identical content either way.
+Default posture is unchanged, `-offline` still wins through the client's own gate, and the existing
+`cargo-source` client and cache are reused so a crate needed by both this pass and the yank-lure enrichment
+is fetched once.
+
+**Only crates the extraction reported as `source-unavailable` are fetched.** `resolveResult` now carries
+those node IDs. Crates already read from `vendor/` or `$CARGO_HOME` are deliberately left alone: their
+on-disk content is what the build will actually use, and a fetch could disagree with it.
+
+**A new primitive was required, and reusing the existing one would have been a silent bug.**
+`ResolveBuildRS` answers "what would a build pull for this requirement" and therefore skips yanked versions —
+correct for the yank-lure enrichment it was written for. Analyzing a LOCKED dependency is a different
+question. A lockfile may pin a version yanked after the fact (a stale lock is ordinary; the fluxfang eval's
+own `spin@0.9.8` is exactly this), and that pinned version is what the build installs and whose build.rs
+runs. Routed through the requirement path it would find no satisfying non-yanked version and return nothing —
+silently, for precisely the crates most worth a look. `BuildRSAt` takes the exact version, looks its
+published SHA-256 up including yanked entries, and still verifies it, so exactness costs no integrity
+checking. `TestD140BuildRSAtReadsYankedWhereResolveDoesNot` asserts the two side by side so the reason the
+primitive exists lives in a test, not only a comment.
+
+**A stale gap is the same dishonesty pointed the other way.** The first working version still reported
+`source-unavailable` for crates it had just fetched and analyzed — coverage claiming "not examined" about
+something examined, which is D-138's problem mirrored. The pass now returns the set of nodes it resolved and
+the caller clears their gaps: after a successful fetch the live CLI reports `install_surface_gaps: 0`. A
+crate that genuinely ships no build.rs counts as resolved — that is the answer, not a failure to get one — while
+a fetch ERROR leaves the gap standing, which `TestD140FetchErrorLeavesGapStanding` pins.
+
+**Two test defects found and fixed during the work, both mine, both real.** The caps assertion read a joined
+`caps` attribute that does not exist — `instsurf.setCaps` writes individual `cap.<name>` keys — so it was
+asserting against `""` and would have passed for any content. And the no-build.rs case was set up as a 404,
+which is a fetch error, not "this crate has no build script"; it therefore tested the error path while
+claiming to test the resolved-but-empty path. Both corrected rather than worked around.
+
+**Mutation-proven:** swapping `BuildRSAt` for `ResolveBuildRS` fails the yanked contrast test; marking a
+failed fetch as examined fails the gap-standing test.
+
+**Validation:** full suite green (34 packages), `-race` clean on `cmd/depsnort` and
+`internal/datasource/registry`. Live CLI on a cold-cache Cargo project (`CARGO_HOME` pointed at an empty
+directory, no `vendor/`): flag off → `source-unavailable`, zero hooks, unchanged from before; flag on with
+`-offline` → still no fetch, gap stands; flag on live → `libc@0.2.155`'s real build.rs fetched and
+checksum-verified from crates.io, a `build.rs` hook node on the crate, `cargo.build_rs_source: fetched`,
+`cargo-source` coverage `queried 1 / gaps 0`, and `install_surface_gaps: 0`. In-repo, without network,
+`TestD140FetchedBuildRSReachesTheGraph` fetches an IOC-neutered reproduction of the arrayref/proc-macro1
+build.rs through a stub and asserts `cap.cradle`, `cap.obfuscation` and `cap.exec` land on the resulting
+hook — the chain D-139 showed was broken, closed end to end.
+
+Residual limitations: opt-in, so a scan that does not pass the flag still has D-139's gap — deliberate, and
+the reason the flag is documented in `-h` rather than silently defaulted. Cost is one registry fetch per
+unexamined crate; on a large cold tree that is hundreds of requests, bounded only by the crate count. The
+`crates.io` versions endpoint is queried per crate with no batching. PyPI's equivalent question is
+untouched: `SdistFetcher` is reachable from the yank-lure path under the same yanked-only gate, so a cold
+PyPI tree has the analogous limitation and no equivalent flag.
