@@ -5328,3 +5328,57 @@ deliberately does not do. `exports` is npm-only; no other ecosystem has an equiv
 resolution picks ONE condition arm per import; this pass collects every arm, which is deliberate (the
 scanner cannot know how a consumer will import) and means an unreachable-in-practice arm is still analyzed —
 over-collection, never under.
+
+## D-137 — resolve wildcard `exports` subpath targets against the tree (npm)
+
+**Trigger:** D-136's own residual note. That entry resolved concrete `exports` paths but skipped wildcard
+patterns, because a pattern names a SET rather than one file and enumerating it needs the tree. A loader
+reachable only through `"./features/*"` was therefore still invisible. Reproduced before writing any fix:
+both a flat wildcard target and one whose match sits in a nested directory produced ZERO hooks.
+
+**`*` matches across `/`, so this is a recursive walk, not a glob.** Node's subpath patterns are a string
+substitution: `*` captures any substring INCLUDING path separators, so `"./f/*": "./src/f/*.js"` makes
+`pkg/f/deep/nested/loader` resolve to `./src/f/deep/nested/loader.js`. A single-directory match would have
+found the shallow files and missed exactly the ones an attacker would prefer. The live-fire fixture below
+puts the loader a directory deeper than its benign sibling for that reason.
+
+**The fix:** `exportsPathsMatching` now partitions the exports walk into concrete paths and wildcard targets
+(`exportsEntryPaths` / `exportsWildcardTargets` are the two halves, so D-136's tests keep their exact
+meaning). `resolveExportsWildcards` splits each target on its wildcards, walks from the deepest fully-literal
+directory of the prefix, and collects files matching prefix and suffix. `npmEntryCandidatesResolved` merges
+the result with the static candidates, deduplicated — a file can be both a concrete export and a wildcard
+match — and both call sites use it.
+
+**Multiple `*` in one target over-collects, deliberately.** Node substitutes the SAME capture for every `*`,
+so `"./src/*/index-*.js"` constrains matches more tightly than prefix+suffix alone. Solving that exactly is
+only tractable for a single `*`; with more, prefix/suffix matching returns a superset. That is the safe
+direction for a scanner — it analyzes files that may not be reachable rather than missing ones that are — and
+it matches the posture already in place, which scans `index.js`/`index.mjs`/`index.cjs` whether or not they
+are exported. Recorded rather than silently accepted.
+
+**Containment and bounds.** Every listing and read goes through the contained reader, so a directory
+symlinked out of the package is refused rather than followed — proven by a test that plants such a symlink
+and asserts nothing outside the tree appears. A target containing `..` is refused before the walk as well.
+Nested `node_modules` (other packages, analyzed on their own nodes) and dot-directories are skipped, so a
+broad wildcard cannot sweep the dependency tree into one package's surface. Three bounds apply because this
+walk touches the filesystem: matches per package (64 — each is read and scanned), directory entries examined
+(4096), and walk depth (16). `os.ReadDir` returns entries sorted by name and the target list arrives sorted,
+so the result is deterministic without further sorting.
+
+**Mutation-proven, three mechanisms.** Dropping the wildcard wiring fails the end-to-end regression. Making
+the walk non-recursive fails the resolution-shapes test — the nested match disappears, which is precisely
+the `*`-spans-`/` semantics. Removing the `node_modules`/dot-directory skip fails the exclusion test.
+
+**Validation:** full suite green (34 packages), `-race` clean on `internal/ecosystem/npm` and
+`internal/ecosystem/conformance`. Live CLI before/after on a package whose loader is reachable ONLY through a
+wildcard and sits a directory deeper than its benign sibling: before, exit 0 with zero findings and zero hook
+nodes; after, `VC-002b` and `VC-002e` on `module-load:src/plugins/analytics/collect.js`, with the sibling
+`src/plugins/format.js` correctly producing nothing. The FP boundary matters more here than in D-136 — a
+wildcard can pull in many files — and a wholly benign three-file wildcard package still produces no hooks,
+because the load-time pass remains gated on a JS-precise execution signal.
+
+Residual limitations: the multiple-`*` superset above. Resolution is bounded, and a package exceeding the
+match cap has the remainder unanalyzed without that being surfaced as a coverage gap — acceptable at 64
+entry modules per package, but it is a silent stop rather than a disclosed one. `exports` remains npm-only.
+Wildcard resolution reads the tree, so it finds nothing for a dependency whose source is not on disk (a
+pre-install tree with no `node_modules`), exactly as the concrete-path pass already behaved.
