@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"ihbv.io/depsnort/internal/ecosystem/instsurf"
@@ -21,6 +22,12 @@ type pkgManifest struct {
 	// script can still run a payload the instant it is imported.
 	Main   string `json:"main"`
 	Module string `json:"module"`
+	// Exports is the modern conditional-exports field. When present it REPLACES
+	// main for Node's own resolution, so a package can expose its entry — and a
+	// loader that runs on import — without setting main at all. Its shape is not
+	// statically typed (a string, a conditions object, a subpath map, or those
+	// nested), so it is kept raw and walked by exportsEntryPaths.
+	Exports json.RawMessage `json:"exports"`
 	// Private is the npm "private": true flag — set on application roots that
 	// are not meant to be published as installable packages (OPU-38). When true,
 	// the project's own install scripts are developer tooling, not consumer-facing
@@ -28,11 +35,87 @@ type pkgManifest struct {
 	Private bool `json:"private"`
 }
 
+// maxExportsDepth bounds recursion into an "exports" value. Real maps nest
+// three or four levels (subpath -> condition -> condition -> path); anything
+// deeper is malformed or hostile, and an unbounded walk over attacker-supplied
+// JSON is a stack-exhaustion vector.
+const maxExportsDepth = 8
+
+// maxExportsEntries bounds how many paths one exports map contributes. The
+// manifest's own size is already bounded by the contained reader, and real
+// packages with many subpaths use wildcard patterns (skipped below) rather than
+// enumerating hundreds of them, so this is unreachable for legitimate input and
+// exists only to bound a crafted manifest.
+const maxExportsEntries = 256
+
+// exportsEntryPaths walks a package.json "exports" value and returns every
+// package-relative module path reachable through it, in a deterministic order.
+//
+// Every exported path is load-time reachable: importing "pkg/feature" executes
+// whatever "./feature" maps to, exactly as importing "pkg" executes ".". So all
+// of them are collected, not just the "." subpath — a loader hidden behind a
+// secondary subpath runs on import just the same.
+//
+// Map keys are sorted before descending: Go randomizes map iteration, and the
+// candidate list feeds graph node construction, which the determinism tests
+// require to be stable across runs.
+func exportsEntryPaths(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		// A malformed exports value is not fatal: main/module and the
+		// conventional index.* candidates below still apply.
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	var walk func(node any, depth int)
+	walk = func(node any, depth int) {
+		if depth > maxExportsDepth || len(out) >= maxExportsEntries {
+			return
+		}
+		switch t := node.(type) {
+		case string:
+			// Only relative paths name a file inside this package. Bare
+			// specifiers ("node:fs", "another-pkg") resolve elsewhere, and a
+			// wildcard pattern ("./features/*.js") names a set this static pass
+			// cannot enumerate without walking the tree.
+			if !strings.HasPrefix(t, "./") || strings.Contains(t, "*") {
+				return
+			}
+			if !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		case []any:
+			// Fallback array: any element may be the one Node resolves.
+			for _, e := range t {
+				walk(e, depth+1)
+			}
+		case map[string]any:
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				walk(t[k], depth+1)
+			}
+		}
+		// A null value blocks a subpath and contributes nothing.
+	}
+	walk(v, 0)
+	return out
+}
+
 // npmEntryCandidates returns the entry modules an import of this package could
 // load, in priority order, deduplicated and normalized to package-relative
-// slash paths. `exports`-as-object is not resolved in this pass (documented
-// limitation); main/module plus the conventional index.* cover the common cases
-// including the RedC2 loader, whose package.json sets "main": "dist/index.mjs".
+// slash paths. main/module, every path reachable through `exports`, and the
+// conventional index.* cover the common cases — including the RedC2 loader,
+// whose package.json sets "main": "dist/index.mjs", and modern packages that
+// ship an `exports` map with no main at all.
 func npmEntryCandidates(m pkgManifest) []string {
 	var out []string
 	add := func(p string) {
@@ -53,6 +136,9 @@ func npmEntryCandidates(m pkgManifest) []string {
 	}
 	add(m.Main)
 	add(m.Module)
+	for _, p := range exportsEntryPaths(m.Exports) {
+		add(p)
+	}
 	add("index.js")
 	add("index.mjs")
 	add("index.cjs")
