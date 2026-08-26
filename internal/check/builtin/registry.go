@@ -28,6 +28,7 @@ func Default() *check.Registry {
 		HookBuildFlagInjection{}, // VC-002h
 		HookConstrainedInit{},    // VC-002i
 		HookLoadTimeNativeExec{}, // VC-002j
+		HookSelfPropagation{},    // VC-002k
 		IOCMatch{},               // VC-003
 		Dormancy{},               // VC-004
 		PatchBurst{},             // VC-005

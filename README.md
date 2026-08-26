@@ -110,7 +110,8 @@ The built-in pack currently covers:
   access, decode/execute indirection, credential-exfiltration shapes,
   download/execute cradles, persistence (startup-folder / LaunchAgents /
   LaunchDaemons / cron-shaped hooks), cgo `#cgo` build-flag injection,
-  build-tag-gated `init()` evasion, and load-time (import-time) execution;
+  build-tag-gated `init()` evasion, load-time (import-time) execution, and
+  self-propagation (a hook that publishes to a package registry);
 - **VC-003** — operator IOC ledger: explicit package/version indicators supplied
   by the operator (an [example Miasma/Hades feed](docs/ioc-miasma-hades.json)
   ships in the repo — see [Threat-intelligence tiers](#threat-intelligence-tiers));
@@ -235,7 +236,15 @@ The VC-002 family scores *where an install path reaches*:
   reachable via `go/ast` closure over the package's own build directives →
   gate-eligible;
 - **VC-002j** — npm: an entry module that spawns a bundled native binary at
-  import time, with no lifecycle hook involved → gate-eligible.
+  import time, with no lifecycle hook involved → gate-eligible;
+- **VC-002k** — self-propagation: the hook publishes to a package registry
+  (`npm publish`, a `npm version` bump, `libnpmpublish`) → **block**. This is
+  the worm step — the phase that turns one compromised package into many — and
+  it also draws a `republish` edge from the hook back to its own package, so
+  the loop is visible in a graph view. An explicit `--dry-run` rehearsal and
+  the `prepublish`/`postpublish` hook *names* are not publishes. Where
+  credential access is present on the same hook, the finding names the full
+  loop, because the operator's next action is rotating registry tokens.
 
 When a cradle is present, VC-002b defers to VC-002f so the reach is reported
 once, at the higher gate class, rather than twice.
@@ -794,7 +803,9 @@ differentiation is the intersection of:
   `project.assets.json`'s real resolved tree;
 - ✅ install-surface persistence (VC-002g), Go cgo build-flag injection
   (VC-002h) and build-tag-gated init evasion (VC-002i, proven via `go/ast`
-  reachability), npm load-time native execution (VC-002j);
+  reachability), npm load-time native execution (VC-002j), and self-propagation
+  — an install hook that publishes to a registry (VC-002k), the Shai-Hulud worm
+  step, drawn as a `republish` edge across all seven ecosystems;
 - ✅ yank-lure detection (VC-012): a version pinned to a since-yanked/retracted
   release with a live-newest enrichment shaped like a lure, across
   Cargo/PyPI/Go;

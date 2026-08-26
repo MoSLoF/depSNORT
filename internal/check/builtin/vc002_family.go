@@ -534,6 +534,61 @@ func (HookLoadTimeNativeExec) Run(ctx *check.Context) []finding.Finding {
 	return out
 }
 
+// ---- VC-002k: self-propagation (the worm step) ----------------------------
+
+// HookSelfPropagation (VC-002k) reports an install hook that PUBLISHES to a
+// package registry. This is the step that makes a worm a worm: a compromised
+// package whose install hook publishes turns one victim into many, which is the
+// propagation phase of the Shai-Hulud family.
+//
+// depSNORT modelled this in its graph vocabulary from the start —
+// graph.EdgeRepublish is documented as the "worm loop back into the declared
+// tree", is included in the verdict's install-time subgraph, and is rendered by
+// the Cypher and DOT emitters — but until D-152 no detector ever created that
+// edge, and no capability marked the act. The persistence phase (VC-002g,
+// OPU-35/36) and the credential phase (VC-002c/d, OPU-19) were both detected;
+// the propagation phase between them was not.
+//
+// It is CRITICAL and blocking. Unlike network egress (common and often benign)
+// this has no legitimate reading: a library's install hook has no reason to
+// publish a package. `npm publish --dry-run` — the release-rehearsal idiom — is
+// excluded at the capability layer, so a careful CI script does not fire this.
+type HookSelfPropagation struct{}
+
+func (HookSelfPropagation) Meta() check.Meta {
+	return check.Meta{
+		ID: "VC-002k", Axis: finding.AxisKnownCompromise,
+		DefaultSeverity: finding.SevCritical, DefaultGate: finding.GateBlock,
+		Description: "install hook publishes to a package registry (self-propagation)",
+	}
+}
+
+func (HookSelfPropagation) Run(ctx *check.Context) []finding.Finding {
+	var out []finding.Finding
+	for _, v := range collectHooks(ctx.Graph) {
+		if !v.Caps["propagate"] {
+			continue
+		}
+		// Credential access alongside publishing is the complete worm loop:
+		// steal a token, then use it to push. Said in the evidence rather than
+		// split into another check — the propagation act alone already blocks.
+		loop := ""
+		if v.Caps["credentials"] {
+			loop = "; combined with credential access this is the full worm loop (harvest a registry token, then publish with it)"
+		}
+		out = append(out, finding.Finding{
+			CheckID: "VC-002k", Axis: finding.AxisKnownCompromise,
+			Severity: finding.SevCritical, GateClass: finding.GateBlock,
+			Confidence: 0.9, NodeID: v.Pkg.ID,
+			Title: fmt.Sprintf("install hook (%s) publishes to a package registry", v.Hook.Name),
+			Evidence: fmt.Sprintf("install-time publish from %s [caps: %s]; markers: %s%s",
+				v.Hook.Name, capList(v.Caps), strings.Join(dedupeStrings(v.Evidence), ", "), loop),
+			Remediation: "treat as a self-propagating worm: a package's install hook must never publish. Rotate every registry token reachable from this build, audit packages published by those tokens, and quarantine the dependency",
+		})
+	}
+	return out
+}
+
 // hookEvidenceHas reports whether any of the hook's evidence strings contains
 // the marker substring (evidence entries are comma-joined per source node).
 func hookEvidenceHas(v hookView, marker string) bool {
