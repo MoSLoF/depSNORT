@@ -83,7 +83,15 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 		}
 		sort.Strings(ids)
 
-		listed := ids
+		// Which IDs the prose cap KEEPS matters, because plain ID order is not
+		// neutral: CVE ids sort chronologically, so an alphabetical cut showed
+		// the eight OLDEST advisories and hid the newest, and hid every GHSA
+		// outright once a package had eight or more CVEs (D-144). This file
+		// already ranks findings so the vulnerabilities most likely to be
+		// exploited surface first; the same signal now orders the ids INSIDE a
+		// finding. Without EPSS there is no severity signal in an advisory
+		// record, so sorted order stands as the deterministic fallback.
+		listed := rankAdvisoryIDs(ids, advs, ctx.EPSS)
 		suffix := ""
 		if len(listed) > maxListedAdvisories {
 			listed = listed[:maxListedAdvisories]
@@ -118,6 +126,7 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 				Title:       title,
 				Evidence:    evidence,
 				Remediation: "upgrade to a release that is not covered by these advisories",
+				Advisories:  ids,
 				EPSS:        es,
 			},
 			peak: peak,
@@ -132,6 +141,30 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 	for i, r := range ranked {
 		out[i] = r.f
 	}
+	return out
+}
+
+// rankAdvisoryIDs orders ids so the prose sample keeps the ones worth reading.
+// With EPSS present that is descending exploit probability; ids carries the
+// complete set either way, and Finding.Advisories carries it into the report,
+// so this decides presentation and never what is retained.
+//
+// The input must already be sorted: that order is the tie-break, which is what
+// keeps the output deterministic (D-09) when scores are equal or absent.
+func rankAdvisoryIDs(ids []string, advs []datasource.Advisory, scores map[string]epss.Score) []string {
+	out := append([]string(nil), ids...)
+	if len(scores) == 0 {
+		return out
+	}
+	best := make(map[string]float64, len(advs))
+	for _, adv := range advs {
+		for _, cve := range advisoryCVEs(adv) {
+			if s, found := scores[cve]; found && s.EPSS > best[adv.ID] {
+				best[adv.ID] = s.EPSS
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return best[out[i]] > best[out[j]] })
 	return out
 }
 

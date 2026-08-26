@@ -105,6 +105,14 @@ type Finding struct {
 	// it is present (OPU-12 D-3). Empty for a root or a node reachable by no
 	// depends-on edge (e.g. an install-hook subject).
 	DepPath []string `json:"dep_path,omitempty"`
+	// Advisories lists EVERY advisory ID this finding aggregates, sorted.
+	// VC-008 folds all of a package's advisories into one finding and spells
+	// only a bounded sample into the evidence prose; before this field the rest
+	// existed in no output format at all, so a package with more advisories than
+	// the prose cap allowed had the remainder reported as a bare "+N more" and
+	// then discarded (D-144). The count was honest and the identities were
+	// unrecoverable. Populated only by VC-008; nil elsewhere.
+	Advisories []string `json:"advisories,omitempty"`
 	// EPSS is the exploit-prediction summary for this finding, when one applies —
 	// the peak FIRST.org score across the finding's CVEs. Populated only by VC-008
 	// under -epss; nil otherwise. Carried as structured data (not only in the
