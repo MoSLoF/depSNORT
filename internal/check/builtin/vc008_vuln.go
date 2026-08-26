@@ -85,6 +85,26 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 		}
 		sort.Strings(ids)
 
+		// The alias identities, deduped and excluding anything already listed as
+		// an advisory id in its own right.
+		primary := map[string]bool{}
+		for _, id := range ids {
+			primary[strings.ToUpper(id)] = true
+		}
+		aliasSet := map[string]bool{}
+		for _, adv := range advs {
+			for _, cve := range advisoryCVEs(adv) {
+				if !primary[cve] {
+					aliasSet[cve] = true
+				}
+			}
+		}
+		aliases := make([]string, 0, len(aliasSet))
+		for a := range aliasSet {
+			aliases = append(aliases, a)
+		}
+		sort.Strings(aliases)
+
 		// Which IDs the prose cap KEEPS matters, because plain ID order is not
 		// neutral: CVE ids sort chronologically, so an alphabetical cut showed
 		// the eight OLDEST advisories and hid the newest, and hid every GHSA
@@ -101,6 +121,8 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 		}
 		title := fmt.Sprintf("%d known %s", len(ids), plural(len(ids), "vulnerability", "vulnerabilities"))
 		evidence := fmt.Sprintf("%s@%s is affected by %s%s", n.Name, n.Version, strings.Join(listed, ", "), suffix)
+
+		sevPeak := peakSeverity(advs)
 
 		peak := -1.0
 		var es *finding.ExploitScore
@@ -129,6 +151,8 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 				Evidence:    evidence,
 				Remediation: "upgrade to a release that is not covered by these advisories",
 				Advisories:  ids,
+				Aliases:     aliases,
+				Severity_:   sevPeak,
 				EPSS:        es,
 			},
 			peak: peak,
@@ -154,12 +178,13 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 //
 //  1. Exploit probability, when -epss supplied it. A measured prediction that
 //     this vulnerability is being exploited beats any proxy.
-//  2. Recency (D-145). Without EPSS there was no signal at all and ids fell in
-//     sorted order — which is not neutral, because CVE identifiers sort
-//     chronologically, so the sample was reliably the OLDEST advisories a
-//     package had. An advisory record carries no severity (OSV's querybatch
-//     returns only id and modified), but it does carry when it last changed,
-//     and that was being discarded.
+//  2. Severity (D-147). How bad the vulnerability is if exploited, as the
+//     advisory database published it. This is the signal D-145 recorded as
+//     unavailable — true of querybatch, but /v1/query returns it and D-146
+//     already made that call for the coordinates that matter.
+//  3. Recency (D-145). A proxy, and the weakest of the three, but far better
+//     than the sorted order it replaced: CVE identifiers sort chronologically,
+//     so the old sample was reliably the OLDEST advisories a package had.
 //
 // The input must already be sorted: that order is the final tie-break, which is
 // what keeps the output deterministic (D-09) when both signals are level.
@@ -167,8 +192,14 @@ func rankAdvisoryIDs(ids []string, advs []datasource.Advisory, scores map[string
 	out := append([]string(nil), ids...)
 	best := make(map[string]float64, len(advs))
 	when := make(map[string]time.Time, len(advs))
+	tier := make(map[string]int, len(advs))
+	sev := make(map[string]float64, len(advs))
 	for _, adv := range advs {
 		when[adv.ID] = advisoryWhen(adv)
+		tier[adv.ID] = severityTier(adv)
+		if adv.ScoredSeverity {
+			sev[adv.ID] = adv.Severity
+		}
 		for _, cve := range advisoryCVEs(adv) {
 			if s, found := scores[cve]; found && s.EPSS > best[adv.ID] {
 				best[adv.ID] = s.EPSS
@@ -177,6 +208,16 @@ func rankAdvisoryIDs(ids []string, advs []datasource.Advisory, scores map[string
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if a, b := best[out[i]], best[out[j]]; a != b {
+			return a > b
+		}
+		if a, b := tier[out[i]], tier[out[j]]; a != b {
+			return a > b
+		}
+		// Within a tier, an exact score refines the order where one is known.
+		// Across tiers it must not: a scored 7.0 HIGH and a label-only CRITICAL
+		// are not comparable as numbers, and the tier is the common currency
+		// CVSS itself defines for them.
+		if a, b := sev[out[i]], sev[out[j]]; a != b {
 			return a > b
 		}
 		if a, b := when[out[i]], when[out[j]]; !a.Equal(b) {
@@ -189,6 +230,68 @@ func rankAdvisoryIDs(ids []string, advs []datasource.Advisory, scores map[string
 		return false
 	})
 	return out
+}
+
+// peakSeverity summarizes the worst severity among a package's advisories, by
+// the same tier-then-score ordering the ranking uses, so the number shown is the
+// one that did the work. nil when no advisory carried any severity at all.
+func peakSeverity(advs []datasource.Advisory) *finding.AdvisorySeverity {
+	var out *finding.AdvisorySeverity
+	bestTier := 0
+	for _, adv := range advs {
+		t := severityTier(adv)
+		if t == 0 {
+			continue
+		}
+		if out != nil && (t < bestTier || (t == bestTier && adv.Severity <= out.Peak)) {
+			continue
+		}
+		bestTier = t
+		out = &finding.AdvisorySeverity{
+			Peak:     adv.Severity,
+			Scored:   adv.ScoredSeverity,
+			Label:    adv.SeverityLabel,
+			Advisory: adv.ID,
+		}
+	}
+	return out
+}
+
+// severityTier maps an advisory onto CVSS's own published qualitative bands, so
+// a scored vector and a bare database label can be compared at all. 0 means no
+// severity signal of either kind.
+//
+// The bands are the specification's (§5): 0.1-3.9 low, 4.0-6.9 medium, 7.0-8.9
+// high, 9.0-10.0 critical. A scored 0.0 is NONE — a real rating meaning no
+// impact — and ranks below every rated advisory but is still not "unknown".
+func severityTier(adv datasource.Advisory) int {
+	if adv.ScoredSeverity {
+		switch {
+		case adv.Severity >= 9.0:
+			return 5
+		case adv.Severity >= 7.0:
+			return 4
+		case adv.Severity >= 4.0:
+			return 3
+		case adv.Severity >= 0.1:
+			return 2
+		default:
+			return 1 // scored NONE: rated, and rated harmless
+		}
+	}
+	switch strings.ToUpper(adv.SeverityLabel) {
+	case "CRITICAL":
+		return 5
+	case "HIGH":
+		return 4
+	case "MEDIUM", "MODERATE":
+		return 3
+	case "LOW":
+		return 2
+	case "NONE":
+		return 1
+	}
+	return 0 // no severity signal at all
 }
 
 // advisoryWhen estimates how recently an advisory changed, for ranking only.
