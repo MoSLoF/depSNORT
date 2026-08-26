@@ -5160,3 +5160,56 @@ is scoped to `reqwest`/`ureq`, the two dominant crates by a wide margin but not 
 documented real example, not a large corpus of real git-integrating build.rs files. Only two campaigns drove
 this patch — the broader research survey's remaining clusters were typosquat/namespace-squat patterns better
 addressed by name-similarity detection (VC-006) than install-surface analysis, and are out of scope here.
+
+## D-134 — publishable-root load-time analysis must not be gated on lifecycle scripts (bug in D-132's own pass)
+
+**Trigger:** a BleepingComputer report (Aug 25 2026) on threat actors abusing npm mirrors — UNPKG,
+npmmirror — as free hosting for phishing pages. The packages carry two files (`index.html` + a `package.json`
+declaring the HTML as `main`), no install hooks and no JS; victims arrive via a browser hitting
+`https://unpkg[.]com/<pkg>@<ver>/index[.]html`, not via `npm install`. Investigating whether depSNORT had a
+gap here surfaced a real bug in the OPU-38 pass shipped as D-132.
+
+**Scope decision — the phishing-hosting technique itself is deliberately NOT addressed.** It is not a
+dependency-graph attack: nothing depends on these packages, installing one is harmless (OX Security's own
+words: "downloading it wouldn't do harm"), and the victim is an email recipient rather than a developer
+resolving a lockfile. The researchers' own recommended control — treat direct HTML requests to mirror
+domains as suspicious — is a network/email-filter concern, not a scanner's. Two further facts confirm the
+boundary rather than argue against it: `manifestPath` requires `manifestDeclaresDeps`, so a
+zero-dependency 2-file package is not discovered as a project at all; and a pure
+`fetch(...).then(v => location.href = atob(v))` browser redirect carries no JS execution signal, so
+`loadTimeExecJS` correctly declines it — a redirect is not import-time code execution, and teaching the
+load-time model to call it one would misuse the model and invite FPs on every package shipping demo or
+docs HTML. Building a phishing-HTML detector here would be coverage theater; recorded as a considered no.
+
+**The real bug.** D-132's publishable-root pass bailed out with `if len(m.Scripts) == 0 { continue }` placed
+BEFORE its own load-time (entry-module) analysis. A published package with no lifecycle scripts at all, whose
+entry module runs a loader the instant a consumer imports it, was therefore completely invisible when scanned
+as its own root — reinstating, for publishable roots, exactly the RedC2 evasion OPU-31 added load-time
+analysis to catch. The main lockfile-resolved loop never had this bug: it guards only the script pass with
+`if len(m.Scripts) > 0` and then runs the entry-candidate loop unconditionally. The fix makes the
+publishable path structurally identical to the main loop; the two code regions are now textually the same.
+
+**Mutation-proven, and the proof itself needed a correction.** A first mutation attempt used a naive
+`str.replace` and silently mutated BOTH the main loop and the publishable path, because the fix had made
+them identical — a contaminated proof. Redone anchored to the publishable path alone (asserting exactly one
+occurrence in the tail region): the main loop stays untouched and precisely one test,
+`TestD134ScriptsLessPublishableRootEntryModuleAnalyzed`, fails. The paired
+`TestD134ScriptsPresentStillAnalyzed` fixture differs from it by a single harmless `"test": "echo ok"`
+entry, isolating the defect to the scripts-count guard and nothing else.
+
+**Validation:** full suite green (34 packages), `-race` clean on `internal/ecosystem/npm`. Live CLI
+before/after on a scripts-less publishable package with a loader entry module (inert RFC 5737 C2
+placeholder): before, exit 0 with zero findings and zero hook nodes — entirely invisible; after,
+`VC-002b` (network egress) and `VC-002e` (decode-and-execute) on
+`hook:pkg:npm/loader-pkg@1.0.0#module-load:index.js`. FP check: an ordinary scripts-less library entry
+module (`require`/`module.exports`, no exec signal) produces zero findings and zero hooks — the load-time
+pass is still gated on a JS-precise execution signal, so removing the scripts guard adds no noise.
+`TestD134PrivateScriptsLessRootStillExcluded` confirms the `"private": true` application-root guard still
+dominates on the path this fix opened up.
+
+Residual limitations: the fix is npm-only — whether the other ecosystems' publishable-root paths carry the
+same script-gating shape was not audited here. `exports`-as-object entry resolution remains unresolved
+(pre-existing, documented at `npmEntryCandidates`), so a package exposing its loader only through an
+`exports` map is still missed. And the zero-dependency discovery floor noted above means a malicious package
+that declares no dependencies is not reachable by a CLI scan at all, whatever its entry module does — a
+real boundary, recorded rather than papered over.
