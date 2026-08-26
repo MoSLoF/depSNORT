@@ -5213,3 +5213,59 @@ same script-gating shape was not audited here. `exports`-as-object entry resolut
 `exports` map is still missed. And the zero-dependency discovery floor noted above means a malicious package
 that declares no dependencies is not reachable by a CLI scan at all, whatever its entry module does — a
 real boundary, recorded rather than papered over.
+
+## D-135 — cross-ecosystem audit of the D-134 bug class, and a conformance suite for it
+
+**Trigger:** D-134 fixed one adapter (npm) whose publishable-root pass gated its entry-module analysis behind
+`len(m.Scripts) == 0 { continue }`. That entry's own residual note asked whether the other ecosystems carried
+the same shape. This is that audit.
+
+**Result: npm was the only adapter with the bug.** All six others were already structurally correct, and
+three of them are worth naming because they show the right shape explicitly. Cargo computes `hasBuildRs` and
+`rootIsProcMacro` independently and checks each independently inside the root loop, so neither gates the
+other. NuGet gathers PowerShell hooks and MSBuild scripts separately, enters on `len(scripts) > 0 ||
+len(msbuildScripts) > 0`, and passes BOTH to `applyHooks`. Composer computes `flatScripts` unconditionally
+and `pluginSource` under its own semantic gate (`type == "composer-plugin"`, which is a correct condition,
+not a proxy for another analysis), then hands both to `AnalyzePHP`. RubyGems collects extconf, gemspec and
+Rakefile independently and early-returns only when ALL THREE are empty. PyPI's two `len(...) == 0` early
+exits (the wheel-only `PthFiles` skip, and `extractLocalPython`'s both-inputs-empty return) are benign: in
+each case the skipped call would receive only-empty inputs. gomod runs a single analysis over every collected
+source, so it has no second analysis to strand.
+
+**A structural reason npm was the outlier, not bad luck.** The other six adapters iterate `g.Roots` directly
+and treat the root as just another node. npm alone grew a SEPARATE second pass (the OPU-38 publishable-root
+loop) bolted beside its lockfile-keyed main loop, and that new pass re-derived the script/entry ordering from
+scratch instead of mirroring the loop 100 lines above it. The duplicated-logic seam is where the contract
+leaked — the same shape as the D-15 leaks that motivated the conformance package in the first place.
+
+**The deliverable: `internal/ecosystem/conformance/installsurface_test.go`.** Reading six adapters and
+declaring them fine is not proof — D-134's guard also read as obviously benign ("nothing to analyze") and was
+not. So the audit is frozen as an executable contract instead. Each case deletes the FIRST analysis's
+precondition and keeps only the SECOND's, then asserts the second still fires: npm (no scripts, loader entry
+module), cargo (no build.rs, proc-macro crate), nuget (no PowerShell, MSBuild target), rubygems (no
+extconf/Rakefile, gemspec declaring extensions), pypi (no setup.py, pyproject build-backend), composer (no
+scripts, plugin entrypoint). gomod is recorded as single-analysis and exempt.
+`TestEveryInstallSurfaceExtractorHasAsymCoverage` then asserts every adapter implementing
+`ecosystem.InstallSurfaceExtractor` either has a case or an explicit exemption, so a seventh ecosystem cannot
+ship into step 5 without answering this question — the same coverage guarantee
+`TestEveryExpandedEcosystemIsCovered` already gives the walk.
+
+**Mutation-proven, both halves.** Reintroducing the exact D-134 guard in npm fails precisely the npm subtest
+with its intended diagnostic and leaves the other five passing. Deleting the cargo entry from `asymCases()`
+fails the coverage test naming cargo. Neither test passes vacuously.
+
+**Secondary finding — a narrow gate that is correct and must not be "fixed".** The first rubygems fixture
+failed, and the cause was the fixture, not the adapter: `AnalyzeRuby`'s gemspec branch fires only on a
+gemspec DECLARING native extensions (`extensions` and `extconf` both present), not on arbitrary gemspec
+content. That looked like under-coverage — a `.gemspec` is executed Ruby, so `system("curl | sh")` in one
+would be missed. It is deliberate: scanning all gemspec content trips `CapExec` on the ubiquitous
+`` s.files = `git ls-files`.split("\n") `` idiom, verified directly against `scanCaps` (caps=[exec],
+evidence=[`]). Widening it would fire on a large fraction of real gems. Recorded here with the proof so the
+next person does not read the narrow gate as an oversight and turn every Ruby scan into an FP flood; the
+fixture carries the same note inline.
+
+Residual limitations: the contract covers only the asymmetric-precondition class the audit was chartered
+for — it does not assert that each adapter's analyses are individually CORRECT, only that neither strands
+the other. Fixtures exercise the root path; the dependency-scan paths (vendored crates, module cache,
+sdists, `vendor/`) are not covered by this suite. The gemspec content-gate scope question above is
+documented, not resolved.
