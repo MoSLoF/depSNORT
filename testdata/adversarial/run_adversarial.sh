@@ -20,7 +20,7 @@ cd "$(dirname "$0")/../.."
 PASS=0
 FAIL=0
 TOTAL=0
-EXPECTED_SCENARIOS=7
+EXPECTED_SCENARIOS=8
 
 BIN=${DEPSNORT_BIN:-}
 if [ -z "$BIN" ]; then
@@ -123,6 +123,18 @@ check "cargo-buildrs-exfil (build.rs credential theft)" \
 check "composer-plugin-cradle (certutil download)" \
     "testdata/adversarial/composer-plugin-cradle" \
     "VC-002f"
+
+# The propagation phase (D-152). The corpus covered the credential phase and the
+# persistence phase of this family; the step that turns one victim into many had
+# no scenario, because until VC-002k there was no check to fail. D-37's rule is
+# that a check cannot be live in production while the corpus stays blind to it.
+#
+# VC-002d is expected alongside VC-002k: the fixture harvests a token and sends
+# it, which is the exfil shape, and the two findings together are the point —
+# the worm loop is credential theft PLUS republication.
+check "npm-shai-hulud-propagation (worm republishes itself)" \
+    "testdata/adversarial/npm-shai-hulud-propagation" \
+    "VC-002d,VC-002k"
 
 echo "============================================="
 echo "  Results: $PASS/$TOTAL passed, $FAIL failed"
