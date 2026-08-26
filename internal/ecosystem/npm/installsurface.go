@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -399,10 +400,14 @@ func rootDir(path string) string {
 // script files STATICALLY from the on-disk tree, and adds the install-time
 // subgraph (hook / referenced-artifact / sink nodes and their edges) to g.
 //
-// Nothing is executed (Decision D-04). If a package's directory is not present
-// (a pre-install tree with no node_modules), that package is simply skipped —
-// the lockfile-level hasInstallScript fact still stands via VC-002a, and the
-// gap is not papered over.
+// Nothing is executed (Decision D-04). If a dependency's directory is not
+// present (a pre-install tree with no node_modules), that package is recorded
+// as a source-unavailable coverage gap (D-148): the lockfile-level
+// hasInstallScript fact still stands via VC-002a, but that flag is the
+// registry's assertion, and the hook CONTENT — the cradle and exfil markers
+// VC-002e/f read, and the entry module's load-time chain — was never examined.
+// This comment previously said the skip meant "the gap is not papered over";
+// with nothing recorded anywhere, papered over is exactly what it was.
 func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 	root := rootDir(path)
 
@@ -441,8 +446,17 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 
 		raw, err := reader.ReadFile(manifestPath)
 		if err != nil {
-			// Absent (no node_modules) is normal; refused is not.
-			gaps.Add(n.ID, manifestPath, err)
+			// Refused is a typed gap as before. Absent used to be silent —
+			// "normal" — which read as examined-and-clean for every dependency
+			// of a pre-install tree (D-148). The root stays exempt: its
+			// manifest is what discovery keyed on, so it cannot be absent in a
+			// tree we are scanning.
+			if errors.Is(err, fs.ErrNotExist) && relDir != "." {
+				gaps.AddReason(n.ID, manifestPath, instsurf.GapUnavailable,
+					errors.New("package source not installed; install hooks and entry modules were not examined"))
+			} else {
+				gaps.Add(n.ID, manifestPath, err)
+			}
 			continue
 		}
 		var m pkgManifest

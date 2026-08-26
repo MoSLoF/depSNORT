@@ -111,16 +111,23 @@ func TestExtractInstallSurfaceReadsInTreeManifest(t *testing.T) {
 	}
 }
 
-// The other half of R-01: an OPTIONAL file that is simply absent is normal and
-// must NOT be reported as a gap, or every pre-install tree (no node_modules)
-// would gate and the signal would be worthless.
-func TestAbsentPackageDirIsNotAGap(t *testing.T) {
+// This test asserted the opposite until D-148 — that an absent package
+// directory "is not a gap", reasoning that otherwise "every pre-install tree
+// would gate and the signal would be worthless". That reasoning conflated
+// disclosure with gating: install-surface gaps reach the exit code only under
+// the opt-in -fail-on-incomplete, and for an operator who chose that flag a
+// pre-install tree genuinely IS incomplete coverage — every dependency's hook
+// content and load-time chain is unexamined. The absence-vs-refusal line R-01
+// draws is for files that are OPTIONAL (a package without a Rakefile has no
+// Rakefile); a dependency's own source is not optional to examining it. Same
+// correction D-141 made for PyPI's offline cold cache.
+func TestAbsentPackageDirIsSourceUnavailable(t *testing.T) {
 	root := t.TempDir() // no node_modules at all
 	h, gaps := extractAndCountHooks(t, root, nodeWithPath("pkg:npm/absent@1.0.0", "node_modules/absent"))
 	if h != 0 {
-		t.Errorf("install-hook nodes = %d, want 0", h)
+		t.Errorf("install-hook nodes = %d, want 0 — a gap must never invent hooks", h)
 	}
-	if len(gaps) != 0 {
-		t.Errorf("an absent package directory is not a gap, got %v", gaps)
+	if len(gaps) != 1 || gaps[0].Reason != instsurf.GapUnavailable {
+		t.Errorf("an absent dependency is unexamined and must say so, got %v", gaps)
 	}
 }

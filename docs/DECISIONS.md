@@ -6085,3 +6085,97 @@ adoption grows. The base score ignores temporal and environmental metrics, which
 published advisory but means the number is not tailored to this deployment. And severity orders the prose
 sample only — it does not change gate class, since VC-008 stays advisory-class by default (D-14) and a
 CRITICAL CVSS score is still not a reason to fail a build by default.
+
+## D-148 — the npm/gem/nuget offline-and-source-availability audit
+
+**Trigger:** D-141 answered "what does this ecosystem do when a dependency's source is not available?" for
+PyPI and closed by declining to generalize: "the npm/gem/nuget equivalents of this question remain
+unaudited." This is that audit. Verdicts: nuget honest with one edge defect, npm silently skipping, and
+rubygems the worst of the three — dependencies never examined and never disclosed.
+
+**The baseline the three are measured against** is the posture cargo (D-140), pypi (D-141) and the gap layer
+(R-01) already share: examine a dependency's source where it is locally present, and record
+`source-unavailable` where it is not. None of these three ecosystems fetches anything, and this entry adds
+no fetching — the question is purely what happens at the local miss.
+
+### nuget: honest, with one edge defect
+
+A dependency missing from the cache records `GapUnavailable` — but only when the cache-dir list was
+non-empty. With no `NUGET_PACKAGES` and no resolvable home directory, the guard `len(pkgDirs) > 0` made
+every miss silent: the environment where NOTHING could be examined reported as the cleanest. The guard is
+removed; fewer places to look is less coverage, not less to say.
+
+### npm: the silent skip, defended by a comment and two tests
+
+A dependency directory absent from a pre-install tree was skipped with nothing recorded — `Classify` treats
+`ErrNotExist` as "ordinary absence", and the extractor's doc comment asserted "the gap is not papered over"
+while nothing was recorded anywhere. Reproduced: a lockfile whose dependency carries
+`hasInstallScript: true`, no `node_modules` — zero gaps, and the coverage line implied the install surface
+had been read.
+
+The defense has real content and gets a real answer. `hasInstallScript` (VC-002a) does still stand — but it
+is the registry's ASSERTION of hook presence, not an observation of hook CONTENT: the cradle and exfil
+markers VC-002e/f read, and the entry module's load-time chain (D-134), were never examined. The absent
+dependency's source is not an "optional file" in R-01's sense — a package without a Rakefile has no
+Rakefile; a dependency without its source merely hasn't been looked at. Absent source for a dependency node
+is now `GapUnavailable`; the root stays exempt (its manifest is what discovery keyed on); refusals keep
+their typed reasons.
+
+**Three shipped tests asserted the skip, and one was the E2E control for it.**
+`TestExtractInstallSurfaceNoNodeModulesIsQuiet` and `TestAbsentPackageDirIsNotAGap` encoded it at the
+adapter seam; `TestE2E_AbsentPackageStaysCleanAndComplete` pinned it at the CLI under `-fail-on-incomplete`,
+reasoning "if absence gated, every real pre-install scan would fail and the signal would be worthless".
+That reasoning conflates disclosure with gating: the gate fires only under the OPT-IN flag, and an operator
+who chose `-fail-on-incomplete` is asking precisely "did you read everything?" — for a pre-install tree the
+honest answer is no. It also could not survive the tool's own inconsistency: cargo, nuget and pypi all
+disclose this exact condition, and npm alone reported the least-examined tree as the most complete. All
+three tests corrected with the reversal inline; the halves that remain true (no invented hooks; no gate
+without opt-in) are kept as their own assertions.
+
+### rubygems: dependencies never examined, never disclosed — and a bug under that
+
+The adapter's scope was "the root gem only", on the stated grounds that "transitive gems are fetched from
+rubygems.org and are not present in a source checkout". That premise is false for the two standard local
+installs — Bundler's `vendor/bundle` (committed or CI-cached in exactly the projects that scan) and
+`$GEM_HOME` — and the consequence was severe: the classic rubygems supply-chain payload IS a dependency's
+extconf.rb, and a Gemfile.lock full of native-extension gems scanned with zero gaps, as if every extconf.rb
+had been read and found clean.
+
+Dependency gems are now scanned at cargo parity: `findGemDir` searches `vendor/bundle/ruby/*/gems` and
+`$GEM_HOME/gems` (local-only, nothing fetched, D-04), a found gem's extconf.rb/gemspec/Rakefile go through
+the same `AnalyzeRuby` as the root with hooks attributed to the dependency node, and a gem in neither place
+records `GapUnavailable`. Lookup keys come from a parsed Gemfile.lock — attacker-authored input — so a name
+or version containing separators or traversal is refused as `GapContainment` before any path join, the same
+discipline as nuget's `isCleanPkgName`.
+
+**Writing the tests exposed a pre-existing bug that had made the root-only scope even narrower than
+documented.** `ExtractInstallSurface` returned early when the ROOT had no extconf/gemspec/Rakefile — the
+shape of nearly every *application* (a Gemfile.lock and no gemspec of its own). Harmless in the root-only
+era; with dependency scanning it would have skipped every dependency for exactly the most common project
+shape. The early return is removed.
+
+**Proven end to end:** a hostile extconf.rb planted in a vendored dependency produces a VC-002f
+download-cradle finding attributed to `pkg:gem/sassc@2.4.0` — a detection that did not exist at all before
+this entry — while the gems not vendored disclose as `source-unavailable x2` in the same run.
+
+**Mutation-proven, eight sites:** npm's silent skip restored and its root exemption dropped; gem's
+dependency scan removed, its miss undisclosed, its early return restored, its key sanitizer removed, and its
+`$GEM_HOME` search dropped; nuget's empty-list guard restored. Each fails its test.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on the
+four touched packages. Live CLI: the npm cold tree that reported 0 gaps now reports `source-unavailable x1`;
+the gem cold tree that reported 0 now reports `x3`; the vendored-hostile-gem tree reports the VC-002f
+finding plus `x2` for the unvendored rest.
+
+**A behaviour change the owner should weigh at review:** a pre-install npm scan — a common CI shape — now
+reports incomplete install-surface coverage and, under `-fail-on-incomplete` only, exits 3 where it exited
+0. This is the same visible-honesty cost D-141 accepted for offline PyPI, applied to the last ecosystem that
+lacked it.
+
+Residual limitations: the gem search covers Bundler's vendor path and an explicit `$GEM_HOME`, not the
+default user/system gem directories (`~/.gem/ruby/<version>`, the ruby installation's own gem dir) — those
+require guessing ruby-version layouts and are disclosed as unavailable rather than guessed at; a follow-up
+could add them behind the same local-only posture. npm's disclosure is per absent PACKAGE; it does not
+distinguish "no node_modules at all" from "this one package missing from an otherwise installed tree",
+though the count makes the difference visible. The gemspec content-gate (a narrower marker than `scanCaps`
+for gemspec shell-outs) is unchanged and remains on the outstanding list.
