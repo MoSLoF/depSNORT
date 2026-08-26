@@ -85,6 +85,26 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 		}
 		sort.Strings(ids)
 
+		// The alias identities, deduped and excluding anything already listed as
+		// an advisory id in its own right.
+		primary := map[string]bool{}
+		for _, id := range ids {
+			primary[strings.ToUpper(id)] = true
+		}
+		aliasSet := map[string]bool{}
+		for _, adv := range advs {
+			for _, cve := range advisoryCVEs(adv) {
+				if !primary[cve] {
+					aliasSet[cve] = true
+				}
+			}
+		}
+		aliases := make([]string, 0, len(aliasSet))
+		for a := range aliasSet {
+			aliases = append(aliases, a)
+		}
+		sort.Strings(aliases)
+
 		// Which IDs the prose cap KEEPS matters, because plain ID order is not
 		// neutral: CVE ids sort chronologically, so an alphabetical cut showed
 		// the eight OLDEST advisories and hid the newest, and hid every GHSA
@@ -129,6 +149,7 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 				Evidence:    evidence,
 				Remediation: "upgrade to a release that is not covered by these advisories",
 				Advisories:  ids,
+				Aliases:     aliases,
 				EPSS:        es,
 			},
 			peak: peak,

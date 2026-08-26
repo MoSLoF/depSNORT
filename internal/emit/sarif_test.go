@@ -217,3 +217,26 @@ func TestD144SARIFCarriesTheCompleteAdvisorySet(t *testing.T) {
 		}
 	}
 }
+
+// TestD146SARIFCarriesAdvisoryAliases: a dashboard keyed on CVE numbers matches
+// nothing when OSV returned a GHSA, unless the resolved CVE travels with it.
+func TestD146SARIFCarriesAdvisoryAliases(t *testing.T) {
+	g := graph.New()
+	id := "pkg:npm/widget@1.0.0"
+	g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "npm", Name: "widget", Version: "1.0.0"})
+	res := verdict.Result{Findings: []finding.Finding{{
+		CheckID: "VC-008", Axis: finding.AxisVuln, Severity: finding.SevMedium,
+		GateClass: finding.GateAdvisory, Confidence: 1, NodeID: id,
+		Title:      "1 known vulnerability",
+		Evidence:   "widget@1.0.0 is affected by GHSA-aaaa-bbbb-cccc",
+		Advisories: []string{"GHSA-aaaa-bbbb-cccc"},
+		Aliases:    []string{"CVE-2026-9002"},
+	}}}
+	var buf bytes.Buffer
+	if err := (SARIF{}).Emit(&buf, g, res, RunInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "CVE-2026-9002") {
+		t.Error("the CVE behind the GHSA is unrecoverable from SARIF")
+	}
+}

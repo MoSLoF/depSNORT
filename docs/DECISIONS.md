@@ -5936,3 +5936,74 @@ which the batch endpoint does not return. Recency is a proxy and not a good one 
 unfixed CVE can matter more than a newly-touched record, and nothing here claims otherwise — only that a
 recency-ranked sample beats one ordered by how the identifier happens to spell. Severity ranking remains
 unbuilt and would cost one request per advisory.
+
+## D-146 — CVE-alias hydration, and a correction to D-145's account of why it was missing
+
+**Trigger:** D-145 closed with a residual: a GHSA carrying neither a timestamp nor a CVE alias has no date
+signal, and "closing that would mean populating `Aliases`, which the batch endpoint does not return."
+
+**That residual named the wrong blocker, and the correction matters more than the fix.** The claim about
+querybatch is true — it returns `{id, modified}` and no aliases. But a hydration path for exactly this
+already existed in the tree: `osv.CVEAliases` resolves aliases through the fuller `/v1/query` endpoint, one
+cached call per COORDINATE (not per advisory), and had been there since the EPSS work. D-145 reasoned from
+the batch endpoint's shape to "there is no way to get aliases" without checking whether the repository
+already had one. It did. The blocker was never the API; it was that hydration ran only inside
+`if *epssOn && !*offline && osvClient != nil`, and `-epss` defaults to false — so on a default scan
+`Advisory.Aliases` was empty, always, and line 1499 of main.go was the only place in the program that ever
+set it.
+
+**Reproduced before changing anything, and the reproduction moved the target.** A snapshot that SUPPLIES
+aliases already ranks correctly today: a GHSA whose alias is `CVE-2026-9002` sorts first, because
+`advisoryWhen` reads the year off the alias exactly as designed. So the D-145 mechanism was sound and
+untested only because nothing fed it. What the same run also showed is the sharper problem: the finding
+listed `GHSA-aaaa-bbbb-cccc` and not `CVE-2026-9002`. The tool had resolved the GHSA to a CVE, used that CVE
+to decide what an operator would read, and then never told them. Someone searching the report for a CVE they
+had been briefed on found nothing.
+
+**What recency actually gains from hydration is close to nothing, and saying so is part of the job.** OSV's
+schema makes `modified` required and querybatch returns it, so a live advisory already has a real timestamp
+and ranks fine without any alias. Where a timestamp is absent — imported snapshots, the bundled dataset —
+the scan is offline and `CVEAliases` is cache-only, so hydration cannot help there either. Anyone reading
+D-145's residual would expect this entry to fix ranking. It mostly does not. What it fixes is IDENTITY.
+
+**Hydration now runs on its own,** gated on OSV being available and the scan being online rather than on
+`-epss`. EPSS continues to consume the same hydrated map, so nothing is fetched twice, and whether alias
+resolution degraded still reaches the EPSS coverage note — that fact travels with the enrichment even though
+the fetch moved out of it.
+
+**Decoupling it means every online scan can now spend requests here, so the candidate set is targeted.**
+`aliasCandidates` asks only about coordinates carrying a non-malicious advisory whose id is NOT already a
+CVE: a package whose advisories are all CVE-primary carries its CVE identity in the id, and querying it
+would spend a request to learn nothing. Malicious-only packages are VC-001's and never reach VC-008;
+unversioned nodes cannot be queried at all, since `/v1/query` is keyed by name and version. Each coordinate
+appears once however many non-CVE advisories it has. On a scan with no vulnerabilities the added cost is
+zero requests.
+
+**`Finding.Aliases` is separate from `Finding.Advisories` deliberately.** Folding aliases into the advisory
+list would have been the obvious shortcut and would have broken D-144's contract: `Advisories` means "the
+advisories this finding aggregates" and matches the count in the title, so two GHSAs with two CVE aliases
+must stay "2 known vulnerabilities" rather than becoming four. An alias is another NAME for a vulnerability,
+not another vulnerability. `TestD146AliasesDoNotInflateTheCount` fails against exactly that shortcut. A CVE
+that OSV returns both in its own right and as another advisory's alias is listed once, as an advisory.
+
+**Mutation-proven, eight sites.** Not populating aliases fails the identity tests; folding them into the ids
+fails the count test; dropping the primary-id dedup fails the double-listing test; dropping the sort fails
+the determinism test; widening `aliasCandidates` to every vulnerable coordinate, or to malicious-only
+packages, or to unversioned nodes, each fails its own targeting test; removing the SARIF property fails the
+SARIF test.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/check/builtin`, `internal/emit`, `cmd/depsnort`. Live CLI on a snapshot carrying a GHSA aliased to
+a recent CVE: JSON now emits `advisory_aliases: ["CVE-2026-9002"]` beside the nine advisory ids, SARIF emits
+`advisoryAliases`, and the title still reads nine. An offline run prints no alias line at all, confirming
+the gate.
+
+Residual limitations: hydration needs the network, so an offline or `-no-osv` scan still has whatever
+aliases its input carried and no more — which is the honest floor, not a gap that can be closed from a
+cache. The live-OSV recency case that D-145's residual pointed at was already working and remains so; this
+entry did not improve it, and the residual as written overstated what hydration would buy. `/v1/query`
+returns full advisory records including severity, which this still discards — a severity-ranked sample is
+now a strictly smaller change than D-145 assumed, since the request is already being made for the
+coordinates that matter, and that is worth revisiting on its own rather than smuggling in here. Aliases
+other than CVEs (PYSEC, GO, OSV cross-references) are still dropped by `mergeAliases`, which predates this
+entry and is unchanged.

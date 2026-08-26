@@ -200,6 +200,43 @@ exit codes:
 // happened (R-01). Exceeding the cap is disclosed by summarizeReasons.
 const maxGapDetails = 25
 
+// aliasCandidates picks the coordinates worth asking OSV about. A package whose
+// advisories are ALL CVE-primary already carries its CVE identity in the id, so
+// querying it would spend a request to learn nothing; only a non-CVE id (GHSA-,
+// GO-, PYSEC-, …) can be hiding one. This is what keeps hydration from adding a
+// request per vulnerable package to every scan (D-146).
+func aliasCandidates(g *graph.Graph, ctx *check.Context) []datasource.Coord {
+	var out []datasource.Coord
+	for _, n := range g.SortedNodes() {
+		if n.Version == "" {
+			continue
+		}
+		for _, a := range ctx.Advisories[n.ID] {
+			if a.Malicious || strings.HasPrefix(strings.ToUpper(a.ID), "CVE-") {
+				continue
+			}
+			out = append(out, datasource.Coord{Ecosystem: n.Ecosystem, Name: n.Name, Version: n.Version})
+			break
+		}
+	}
+	return out
+}
+
+// advisoryCVEIDs returns an advisory's CVE identities: its own id when that is a
+// CVE, plus any hydrated CVE aliases.
+func advisoryCVEIDs(a datasource.Advisory) []string {
+	var out []string
+	if strings.HasPrefix(strings.ToUpper(a.ID), "CVE-") {
+		out = append(out, strings.ToUpper(a.ID))
+	}
+	for _, al := range a.Aliases {
+		if strings.HasPrefix(strings.ToUpper(al), "CVE-") {
+			out = append(out, strings.ToUpper(al))
+		}
+	}
+	return out
+}
+
 // summarizeReasons renders gap reason counts deterministically, e.g.
 // ["containment-refusal x3", "file-too-large x1"].
 func summarizeReasons(counts map[string]int) []string {
@@ -1473,6 +1510,36 @@ func cmdScan(args []string) int {
 	// EPSS runs AFTER the post-expansion advisory pass so it scores the complete
 	// advisory set, including packages discovered during expansion. Requires the
 	// OSV client for CVE-alias resolution, so it is skipped under -no-osv.
+	// CVE-alias hydration (D-146). Runs on its own now, not only under -epss.
+	// OSV's querybatch returns advisory IDs without aliases, so a GHSA-primary
+	// advisory arrives carrying no CVE identity at all: the report could not name
+	// the CVE, an operator searching for one found nothing, and the recency
+	// fallback (D-145) had no year to read. /v1/query returns the aliases, one
+	// cached call per coordinate.
+	aliasByID := map[string][]string{}
+	aliasDegraded := false
+	if !*offline && osvClient != nil {
+		coords := aliasCandidates(g, ctx)
+		if len(coords) > 0 {
+			hydrated, aErr := osvClient.CVEAliases(context.Background(), coords)
+			if aErr != nil {
+				aliasDegraded = true
+				fmt.Fprintf(os.Stderr, "depsnort: warning: CVE-alias resolution degraded: %v\n", aErr)
+			}
+			aliasByID = hydrated
+			for id, advs := range ctx.Advisories {
+				for i := range advs {
+					if cs, ok := aliasByID[advs[i].ID]; ok {
+						advs[i].Aliases = append(advs[i].Aliases, cs...)
+					}
+				}
+				ctx.Advisories[id] = advs
+			}
+			fmt.Fprintf(os.Stderr, "depsnort: resolved CVE aliases for %d of %d coordinate(s) whose advisories are not CVE-identified\n",
+				len(aliasByID), len(coords))
+		}
+	}
+
 	if *epssOn && !*offline && osvClient != nil {
 		var coords []datasource.Coord
 		for _, n := range g.SortedNodes() {
@@ -1488,22 +1555,13 @@ func cmdScan(args []string) int {
 			}
 		}
 		if len(coords) > 0 {
-			aliasByID, aErr := osvClient.CVEAliases(context.Background(), coords)
-			if aErr != nil {
-				fmt.Fprintf(os.Stderr, "depsnort: warning: EPSS alias resolution degraded: %v\n", aErr)
-			}
+			// Aliases were hydrated above and are already merged onto the
+			// advisories; this pass only collects the CVEs to score.
 			var cves []string
-			for id, advs := range ctx.Advisories {
+			for _, advs := range ctx.Advisories {
 				for i := range advs {
-					if cs, ok := aliasByID[advs[i].ID]; ok {
-						advs[i].Aliases = append(advs[i].Aliases, cs...)
-						cves = append(cves, cs...)
-					}
-					if strings.HasPrefix(strings.ToUpper(advs[i].ID), "CVE-") {
-						cves = append(cves, strings.ToUpper(advs[i].ID))
-					}
+					cves = append(cves, advisoryCVEIDs(advs[i])...)
 				}
-				ctx.Advisories[id] = advs
 			}
 			epssClient := epss.New(datasource.NewCache(*cacheDir, 24*time.Hour), *offline)
 			scores, eErr := epssClient.Scores(context.Background(), cves)
@@ -1511,7 +1569,10 @@ func cmdScan(args []string) int {
 			epssCov := emit.DataSourceCoverage{
 				Name:  epssClient.Name(),
 				Stats: epssClient.Stats,
-				Note:  epss.EnrichmentSummary(len(coords), len(aliasByID), epssClient.Stats, aErr != nil),
+				// Whether alias resolution degraded is still reported: hydration
+				// moved out of this block (D-146) but the fact travels with it,
+				// because a partial alias map means partially-scored CVEs.
+				Note: epss.EnrichmentSummary(len(coords), len(aliasByID), epssClient.Stats, aliasDegraded),
 			}
 			if eErr != nil {
 				epssCov.Error = eErr.Error()

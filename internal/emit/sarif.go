@@ -206,6 +206,11 @@ func (SARIF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo)
 		if len(f.Advisories) > 0 {
 			props["advisories"] = strings.Join(f.Advisories, ", ")
 		}
+		// The CVE identities behind non-CVE advisory ids. A dashboard keyed on
+		// CVE numbers matches nothing without these when OSV returned a GHSA.
+		if len(f.Aliases) > 0 {
+			props["advisoryAliases"] = strings.Join(f.Aliases, ", ")
+		}
 		// Exploit-prediction summary as structured properties (from -epss), so a
 		// code-scanning dashboard can rank or threshold on exploit probability
 		// without parsing the evidence prose.

@@ -113,6 +113,15 @@ type Finding struct {
 	// then discarded (D-144). The count was honest and the identities were
 	// unrecoverable. Populated only by VC-008; nil elsewhere.
 	Advisories []string `json:"advisories,omitempty"`
+	// Aliases lists the OTHER identities the finding's advisories are known by —
+	// in practice the CVEs a GHSA-primary advisory maps to. Kept separate from
+	// Advisories so that field keeps meaning exactly "the advisories this finding
+	// aggregates" and stays consistent with the count in the title. Without it
+	// the tool resolved a GHSA to its CVE, used that to rank, and then never told
+	// anyone: an operator searching the report for a CVE they had been briefed on
+	// found nothing (D-146). Populated only by VC-008, and only for advisories
+	// whose aliases were hydrated.
+	Aliases []string `json:"advisory_aliases,omitempty"`
 	// EPSS is the exploit-prediction summary for this finding, when one applies —
 	// the peak FIRST.org score across the finding's CVEs. Populated only by VC-008
 	// under -epss; nil otherwise. Carried as structured data (not only in the
