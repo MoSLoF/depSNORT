@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"ihbv.io/depsnort/internal/check"
 	"ihbv.io/depsnort/internal/datasource"
@@ -56,18 +57,26 @@ func TestD144EveryAdvisoryIDSurvivesTheProseCap(t *testing.T) {
 	if len(f.Advisories) != len(d144Old) {
 		t.Fatalf("Advisories = %d ids, want all %d", len(f.Advisories), len(d144Old))
 	}
-	// The ones the prose dropped are the point of the field.
+	// The ones the prose dropped are the point of the field. Which ids those
+	// are is the ranking's business and changed in D-145, so this asks the
+	// question generically rather than naming ids: whatever the prose left out
+	// must still be recoverable.
 	raw, err := json.Marshal(f)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"CVE-2026-9002", "GHSA-aaaa-bbbb-cccc"} {
-		if strings.Contains(f.Evidence, want) {
-			t.Fatalf("precondition: %s should be past the prose cap", want)
+	dropped := 0
+	for _, id := range d144Old {
+		if strings.Contains(f.Evidence, id) {
+			continue
 		}
-		if !strings.Contains(string(raw), want) {
-			t.Errorf("%s is unrecoverable from the emitted finding: %s", want, raw)
+		dropped++
+		if !strings.Contains(string(raw), id) {
+			t.Errorf("%s was dropped from the prose and is unrecoverable from the finding: %s", id, raw)
 		}
+	}
+	if dropped != 3 {
+		t.Errorf("expected 3 ids past the cap, found %d", dropped)
 	}
 }
 
@@ -95,12 +104,20 @@ func TestD144AdvisoriesAreSortedAndComplete(t *testing.T) {
 // gate (D-09).
 func TestD144EqualScoresKeepSortedOrder(t *testing.T) {
 	ctx := d144Node(t, d144Old...)
-	// Every id scored identically: nothing but the tie-break decides the order.
+	// Every id scored identically AND stamped with the same Modified: with both
+	// ranking signals level, nothing but the final tie-break decides the order.
+	// D-145 inserted recency between EPSS and the tie-break, so flattening it
+	// here is what keeps this test about the tie-break rather than about
+	// whichever signal happens to dominate.
 	ctx.EPSS = map[string]epss.Score{}
 	for _, id := range d144Old {
 		if strings.HasPrefix(id, "CVE-") {
 			ctx.EPSS[id] = epss.Score{EPSS: 0.5, Percentile: 0.5}
 		}
+	}
+	same := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range ctx.Advisories["pkg:npm/widget@1.0.0"] {
+		ctx.Advisories["pkg:npm/widget@1.0.0"][i].Modified = same
 	}
 	f := (KnownVuln{}).Run(ctx)[0]
 	var want []string
@@ -164,9 +181,14 @@ func TestD144EPSSOrdersTheProseSample(t *testing.T) {
 	}
 }
 
-// TestD144WithoutEPSSOrderStaysDeterministic: no exploit signal exists in an
-// advisory record, so sorted order is the fallback — and it must be stable,
-// since a CI gate diffs this output (D-09).
+// TestD144WithoutEPSSOrderStaysDeterministic: whatever ranks the sample, a CI
+// gate diffs this string, so repeated runs over identical input must produce it
+// identically (D-09).
+//
+// The order this asserts changed in D-145. It used to require sorted order,
+// which for CVE ids means chronological, which meant the sample was reliably
+// the OLDEST advisories a package had — the behaviour D-145 replaced with
+// recency ranking. The determinism requirement is untouched.
 func TestD144WithoutEPSSOrderStaysDeterministic(t *testing.T) {
 	first := (KnownVuln{}).Run(d144Node(t, d144Old...))[0].Evidence
 	for i := 0; i < 20; i++ {
@@ -174,7 +196,7 @@ func TestD144WithoutEPSSOrderStaysDeterministic(t *testing.T) {
 			t.Fatalf("evidence is not deterministic:\n %q\n %q", first, got)
 		}
 	}
-	if !strings.Contains(first, "CVE-2015-1000, CVE-2015-1001") {
-		t.Errorf("without EPSS the sample should follow sorted order: %q", first)
+	if !strings.Contains(first, "CVE-2026-9002, CVE-2025-9001") {
+		t.Errorf("without EPSS the sample should lead with the most recent: %q", first)
 	}
 }
