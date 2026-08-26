@@ -115,6 +115,12 @@ func (h Hook) HasCap(c Capability) bool {
 // Surface is a package's complete install-time surface.
 type Surface struct {
 	Hooks []Hook
+	// Truncated names the scan bounds that stopped an enumeration inside this
+	// analysis with material still unexamined. Adapters turn each entry into a
+	// GapTruncated coverage gap (D-142). Empty means the analysis was
+	// exhaustive — a bound that merely EXISTS contributes nothing here, only
+	// one that actually stopped short of the end.
+	Truncated []string
 }
 
 // FileReader returns the contents of a path relative to the package root.
@@ -1183,6 +1189,12 @@ func dropCap(caps []Capability, c Capability, ev []string, fpMarkers ...string) 
 // entryRel is the entry's package-relative path (for evidence and to resolve
 // sibling references); entrySource is its content; read resolves sibling files
 // relative to the package root.
+// maxLoadTimeRefs bounds how many distinct sibling files an entry module's
+// references are followed to. Real entry modules reference a handful; the bound
+// stops a crafted module from turning one analysis into thousands of reads.
+// Hitting it is disclosed via Surface.Truncated (D-142), never dropped quietly.
+const maxLoadTimeRefs = 16
+
 func AnalyzeLoadTime(entryRel, entrySource string, read FileReader) Surface {
 	var s Surface
 	clean := stripCodeComments(entrySource)
@@ -1228,8 +1240,16 @@ func AnalyzeLoadTime(entryRel, entrySource string, read FileReader) Surface {
 	seen := map[string]bool{}
 	for _, m := range loadTimeRefRe.FindAllStringSubmatch(clean, -1) {
 		ref := strings.TrimPrefix(m[1], "./")
-		if ref == "" || seen[ref] || len(seen) >= 16 {
+		if ref == "" || seen[ref] {
 			continue
+		}
+		// The bound is only truncation when it drops a NEW reference. Checking
+		// it after the empty/duplicate filters keeps a 17th mention of an
+		// already-read sibling from being reported as unexamined material.
+		if len(seen) >= maxLoadTimeRefs {
+			s.Truncated = appendStr(s.Truncated,
+				fmt.Sprintf("load-time sibling refs capped at %d for %s", maxLoadTimeRefs, entryRel))
+			break
 		}
 		seen[ref] = true
 		full := ref

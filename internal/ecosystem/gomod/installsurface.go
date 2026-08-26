@@ -1,6 +1,7 @@
 package gomod
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,8 @@ import (
 // maxGoFiles bounds how many .go files the install-surface walk reads from one
 // module. Go has no depth cap (OPU-22), but a per-module file-count ceiling keeps
 // a pathologically large or generated tree from dominating a scan. A real module
-// is far under this; hitting it is disclosed as a gap, not a silent truncation.
+// is far under this; hitting it records a GapTruncated coverage gap (D-142) —
+// which this comment asserted for some time before the code actually did it.
 const maxGoFiles = 5000
 
 // ExtractInstallSurface implements ecosystem.InstallSurfaceExtractor (Decision
@@ -139,9 +141,14 @@ func collectGoSourcesUnder(reader *securefs.Reader, startRel string, skipDir fun
 	sources := map[string]string{}
 	count := 0
 
+	truncated := false
 	var walk func(rel, relToStart string)
 	walk = func(rel, relToStart string) {
+		// A subtree left unenumerated is unexamined, not known-empty: we cannot
+		// tell whether it held sources without doing the reading the bound
+		// exists to stop. Unknown is disclosed, never assumed clean.
 		if count >= maxGoFiles {
+			truncated = true
 			return
 		}
 		entries, err := reader.ReadDir(rel)
@@ -150,9 +157,6 @@ func collectGoSourcesUnder(reader *securefs.Reader, startRel string, skipDir fun
 			return
 		}
 		for _, e := range entries {
-			if count >= maxGoFiles {
-				return
-			}
 			name := e.Name()
 			child := filepath.Join(rel, name)
 			childRel := name
@@ -169,6 +173,14 @@ func collectGoSourcesUnder(reader *securefs.Reader, startRel string, skipDir fun
 			if !strings.HasSuffix(name, ".go") {
 				continue
 			}
+			// Checked here, past the .go filter, rather than at the top of the
+			// loop: a README sitting after the last source file is not material
+			// the bound dropped, and reporting it as such would put a coverage
+			// gap on a module that was in fact read in full.
+			if count >= maxGoFiles {
+				truncated = true
+				return
+			}
 			count++
 			b, err := reader.ReadFile(child)
 			if err != nil {
@@ -183,6 +195,13 @@ func collectGoSourcesUnder(reader *securefs.Reader, startRel string, skipDir fun
 		start = "."
 	}
 	walk(start, "")
+	if truncated {
+		// The comment on maxGoFiles claimed this was disclosed long before it
+		// was (D-142). A bound that drops source files silently reports "we
+		// read everything and found nothing" when the truth is "we stopped".
+		gaps.AddReason(gapPkg, startRel, instsurf.GapTruncated,
+			fmt.Errorf("go source files capped at %d; the rest of the module was not read", maxGoFiles))
+	}
 	return sources
 }
 

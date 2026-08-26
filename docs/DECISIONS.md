@@ -5601,3 +5601,184 @@ thinner by nature, not by gap. An offline scan with a cold cache now reports one
 which on a large tree is many lines; that is the honest count rather than noise, but it is a visible change
 for offline users. The npm/gem/nuget equivalents of this question remain unaudited — this entry corrects one
 wrong claim and fixes one real bug, and deliberately does not generalize from either.
+
+## D-142 — uniform bound-disclosure: every scan bound that stops short now says so
+
+**Trigger:** D-138 gave the exports wildcard resolver a `GapTruncated` disclosure when its match cap stopped
+an enumeration short. That fixed one bound. The tool has many, and the question left open was whether the
+rest behaved the same way. They did not. The R-01 principle behind the gap layer — a refusal reported as an
+absence is attacker-triggerable invisibility — applies with equal force to a bound: a scanner that stops at
+file 5,000 and reports nothing is telling the operator "we read everything and found nothing" when the truth
+is "we stopped."
+
+**The sweep, and what it actually found.** Every `max*` constant reachable from an install-surface path was
+triaged, and each was verified in code rather than assumed from its name or its comment. Three categories
+came out of it. Bounds that are already disclosed: PyPI's `maxIncludeDepth` routes unfollowed includes into
+`acc.unfollowed`, and the sdist size and entry caps surface as errors that the existing gap layer classifies
+— these needed nothing. Bounds that are not truncation at all: input-validation ceilings that reject a whole
+artifact rather than partially reading it already fail loudly. And three that stopped short in silence:
+
+- `installsurface.maxLoadTimeRefs` (16) — an entry module's sibling `require`s were followed to sixteen
+  distinct files and then `break`. A package splitting its payload across seventeen modules looked
+  identical to one whose entry was clean.
+- `npm`'s exports-walk `maxExportsDepth` (8) and `maxExportsEntries` (256) from D-136 — both returned early
+  from the walk with no record.
+- `gomod.maxGoFiles` (5000) — a bare `return` out of the source walk.
+
+**One of these was worse than an undocumented gap.** `maxGoFiles`'s own comment read "hitting it records a
+GapTruncated coverage gap, not a silent truncation." The code did not do that, and had never done it. A
+reader auditing this file would have checked the comment, concluded the case was handled, and moved on. The
+comment now says what the code does, and carries a note that it asserted this before it was true.
+
+**`Surface.Truncated` is how the analyzer reports a bound it hit.** `installsurface.AnalyzeLoadTime` is
+ecosystem-agnostic and has no Gaps sink, so it returns the fact and the adapters convert it. The invariant
+that makes the field trustworthy is that a bound which merely EXISTS contributes nothing — only one that
+actually stopped short of the end. The npm exports walk follows the same rule via `exportsTruncation`, which
+keeps the walk itself pure and does the disclosure where a sink exists.
+
+**Exactly-at-the-bound is complete coverage, not truncation.** This is the same line D-138 drew, and holding
+it took real care in each of the three sites. In `AnalyzeLoadTime` the check sits AFTER the empty/duplicate
+filters, so a module mentioning one sibling two hundred times is read once and reported as complete — a
+naive implementation that counts mentions instead of distinct references marks it truncated, and the test
+for that case fails against exactly that mutation.
+
+**A false positive in the first cut of this change, found by writing the boundary test.** In `gomod` the
+bound was initially checked at the top of the directory-entry loop, before the `.go` filter. A module with
+exactly `maxGoFiles` sources plus any other file — a README, a testdata fixture — would reach one more
+iteration with the count already at the cap and report truncation for material it was never going to read.
+The check moved past the `.go` filter, and `TestD142TrailingNonGoFileIsNotTruncation` pins it.
+
+**The opposite case is disclosed, deliberately.** A subtree the walk never opened because the count was
+already at the bound is *unexamined*, not *known-empty* — telling the two apart would require doing the
+reading the bound exists to prevent. Unknown is disclosed rather than assumed clean, and
+`TestD142UnenumeratedSubtreeIsTruncation` holds that side of the line.
+
+**`Gap.String` dropped `Detail`, so none of these messages reached the operator.** The bound-naming text
+written for each site — "go source files capped at 5000", "exports nesting capped at depth 8" — lived in
+`Gap.Detail`, which the report never rendered. Every gap arrived as its bare reason word: the operator
+learned that SOME bound fired, not which one, which is barely more actionable than the silence being
+removed. `Gap.String` now appends `Detail` when present. This widens beyond `GapTruncated` to every reason,
+which is the right blast radius: an underlying error text that was worth recording is worth showing. The
+full suite was green across the change, so no consumer depended on the truncated form.
+
+**Mutation-proven, every site and every boundary.** Removing each disclosure fails its test; the off-by-one
+on each bound fails the corresponding exactly-at-cap test; counting mentions rather than distinct references
+fails the duplicate-refs test; reverting `gomod` to the pre-fix loop shape fails the trailing-non-Go-file
+test; deleting the top-of-walk record fails the unread-subtree test; removing the npm exports gap wiring
+fails the graph-propagation test while leaving the pure-function test green — which is precisely why both
+exist. `Gap.String` was mutated in both directions: dropping `Detail` and appending it unconditionally each
+fail their own test.
+
+**Wiring is proven separately from computation.** `exportsTruncation` is a pure function and
+`Surface.Truncated` is a struct field; neither matters unless the adapter hands it to a sink the caller sees.
+Two tests drive the real extractor end to end and read the gap off the returned error.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/installsurface`, `internal/ecosystem/npm`, `internal/ecosystem/gomod`, `internal/ecosystem/instsurf`.
+Live CLI on three purpose-built trees, one per site: a 40-sibling npm entry, a 5,010-file Go module, and a
+600-entry exports map. Each reports `install_surface_gaps: 1`, a `scan-bound-truncated` reason, a stderr
+warning, the "This report is NOT an all-clear" line, and — after the `Gap.String` fix — a detail line naming
+the specific bound.
+
+Residual limitations: the bounds themselves are unchanged, so this makes truncation visible rather than
+rarer; a tree crafted to sit just past `maxGoFiles` still hides its tail, it just no longer hides that it is
+hiding. The root-module `gomod` call site passes an empty package ID, so its gap reads as a bare path — the
+project directory is already on the report line, but the gap itself is less self-describing than the
+per-dependency ones. The sweep covered bounds reachable from install-surface extraction; resolver-side and
+datasource-side caps were not audited, and no claim is made about them here.
+
+## D-143 — the resolver-side and datasource-side cap audit D-142 deferred
+
+**Trigger:** D-142 closed with an explicit exclusion — "the sweep covered bounds reachable from
+install-surface extraction; resolver-side and datasource-side caps were not audited, and no claim is made
+about them here." This is that audit. Two real defects, one of them the same shape as the `maxGoFiles` lie
+D-142 found, and five bounds that turned out to be correct and are recorded here so the next audit does not
+re-derive them.
+
+**What is NOT broken, verified rather than assumed.** `osv.maxBatch` (1000) and `epss.maxBatch` (100) look
+like truncation and are not: both are chunking loops that iterate until every coordinate is covered, and
+EPSS counts a failed chunk into `Stats.Gaps`. `datasource.maxSnapshotBytes` (64 MiB) rejects an oversize
+file outright with an error rather than reading part of it. The response caps in `depsdev` (16 MiB),
+`npmreg` (100 MiB) and `registry` (50 MiB) are applied to JSON documents, where a truncated read cannot
+parse — `depsdev` turns exactly that into `Stats.Gaps++` plus an error. Five bounds, five honest behaviours.
+
+### Defect 1 — the Go proxy truncated line-oriented text in silence
+
+`goproxy.get` read with a bare `io.ReadAll(io.LimitReader(body, maxResponseSize))`. Both of its consumers
+parse line-oriented text, not JSON: `Versions` splits `@v/list` on newlines, and `ModFile` hands go.mod
+source to `scanGoMod`. A truncated read therefore does not fail to parse the way a cut-off JSON document
+does — it simply yields less.
+
+Reproduced before anything was changed. An 8 MiB+ version list came back with `err == nil` and 708,310 of
+708,652 versions. The 342 missing entries are the smaller half of the problem; the last entry returned was
+`"v1.708309."` — the cut landed mid-token, so a fragment of a version string that was **never published**
+entered the candidate list the presume walk chooses from. Truncation was not merely losing data, it was
+manufacturing it.
+
+The read now takes one byte past the cap so an oversize body is *detectable*, and an oversize body is a gap
+rather than a partial answer. The `+1` is what makes the exactly-at-cap case decidable, and
+`TestD143ExactlyAtCapIsNotOversize` holds that line: a body of exactly `maxResponseSize` was received in
+full, and rejecting it would turn a complete answer into a gap.
+
+### Defect 2 — the expansion depth bound, and a decision resting on a premise that had stopped holding
+
+A 20-deep chain walked with the default options reaches depth 9, leaves eleven packages unentered, and
+reports `Complete=true`, `Degraded=false`, `Incomplete()=false`. A clean all-clear over what was never read.
+
+The disclosure existed and dead-ended. The leftovers are marked `AttrFrontier` — an attribute **no non-test
+code in the repository consults** — and counted into `Result.Frontier`, which the CLI never folds into
+anything. `expandTransitive`'s own doc comment claimed it folded "every root's frontier and unread counts";
+it folds `Unread` alone. That is the `maxGoFiles` shape again: a comment asserting a disclosure the code does
+not perform, which is worse than no comment, because an auditor checks the comment and moves on.
+
+**The user-facing half is worse than the comment.** `-expand-depth`'s help string read
+`0 = full depth`. Zero is the default, and zero selects `defaultMaxDepth = 8`. The flag's own
+documentation told operators the default was unlimited when the default was eight.
+
+**Why this changes a decision rather than just fixing a bug.** D-24 deliberately exempted this bound from
+degrading coverage, and stated its reason: the frontier has three causes kept apart, and of them "the
+`-expand-depth` cap (a limit the operator chose)" does not degrade, only an unread coordinate does. That
+reasoning is correct wherever its premise holds. It does not hold for a default nobody selected, which is
+every scan that never passes the flag. So the exemption is kept exactly where D-24 earned it — an explicit
+`-expand-depth=2` is someone stepping the tree on purpose, and failing their build for it is the warning tax
+that gets a tool muted — and dropped where the premise fails.
+
+The result: `Result.DepthTruncated` counts what was still queued when the bound stopped the walk, kept
+**separate** from `Frontier` because that number adds three unlike things together and no caller can report
+a bound honestly from a total. Disclosure is unconditional; degrading is conditional on the cap not being
+the operator's. The two coverage notes are joined rather than assigned, because a deep tree walked offline
+trips both and assigning would drop one in exactly the case where coverage is weakest.
+
+**A boundary that had to be discovered rather than assumed.** The first version of
+`TestD143ExactlyExhaustedIsNotTruncation` asserted that a 3-link chain at `MaxDepth=3` is untruncated. It
+fails, and the code is right: placing a node is not reading it. Three layers put `c1..c3` in the graph and a
+fourth reads `c3`'s own declarations, so at `MaxDepth=3` the walk genuinely stops with `c3` unexamined. The
+test now pins both sides of that edge.
+
+**Mutation-proven.** Reverting the goproxy read to the bare `LimitReader` fails both oversize tests;
+tightening its comparison to `>=` fails the exactly-at-cap test. Dropping `res.DepthTruncated++` fails the
+engine and CLI disclosure tests; setting it from the bound's *existence* rather than from work left queued
+fails both false-positive tests; removing the coverage fold fails the degrade test; degrading regardless of
+who chose the bound fails the operator-chosen test; assigning notes instead of joining fails the composition
+test.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/expand`, `internal/datasource/goproxy`, `cmd/depsnort`. Live CLI: an ordinary PyPI project draws no
+depth warning (the walk ran out of tree first); `-expand-depth=1` prints the warning with 11 packages still
+queued and leaves `expand`'s gap count at the unread value, with no depth-bound note — the operator-chosen
+exemption behaving as designed.
+
+**How reachable the default bound actually is, measured rather than asserted.** A 184-package
+`jupyter` + `apache-airflow` tree reaches depth **6** — real PyPI trees are wide, not deep, and the default
+bound of 8 was not hit even there. That tempers the severity honestly: on PyPI this fires rarely. It does
+not excuse it. npm trees nest deeper, an adversarially-authored chain is deeper still by construction, and
+when the bound does bite the report is wrong in the one direction a security tool must never be wrong in.
+The live default-bound-degrades path is therefore proven by test, not by a live scan; no real tree available
+here reaches it.
+
+Residual limitations: `defaultMaxDepth` is unchanged at 8, so this makes the truncation visible rather than
+rarer — raising it is a network-cost decision, and an unbounded walk is not safe, since a hostile registry
+can serve an endless chain of distinct names that the per-node `expanded` guard does not terminate.
+`AttrFrontier` is still written and still read by nothing; `DepthTruncated` routes around it rather than
+fixing it, and the other two frontier causes remain fused in `Result.Frontier`. The audit covered
+`internal/expand` and `internal/datasource`; the check layer and the emitters were not swept.

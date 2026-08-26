@@ -2,6 +2,7 @@ package npm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -60,7 +61,21 @@ const maxExportsEntries = 256
 // candidate list feeds graph node construction, which the determinism tests
 // require to be stable across runs.
 func exportsEntryPaths(raw json.RawMessage) []string {
-	return exportsPathsMatching(raw, false)
+	paths, _ := exportsPathsMatching(raw, false)
+	return paths
+}
+
+// exportsTruncation reports which exports-walk bounds stopped short, if any.
+// The walk itself stays pure; disclosure happens where a Gaps sink exists.
+func exportsTruncation(raw json.RawMessage) []string {
+	_, concreteTrunc := exportsPathsMatching(raw, false)
+	_, wildcardTrunc := exportsPathsMatching(raw, true)
+	// Both halves walk the same tree, so a bound trips identically in each.
+	// Report it once.
+	if len(concreteTrunc) > 0 {
+		return concreteTrunc
+	}
+	return wildcardTrunc
 }
 
 // exportsWildcardTargets returns the wildcard TARGETS in an exports value (the
@@ -68,26 +83,35 @@ func exportsEntryPaths(raw json.RawMessage) []string {
 // than one, so they are resolved against the tree by resolveExportsWildcards
 // rather than used as candidates directly.
 func exportsWildcardTargets(raw json.RawMessage) []string {
-	return exportsPathsMatching(raw, true)
+	paths, _ := exportsPathsMatching(raw, true)
+	return paths
 }
 
 // exportsPathsMatching is the shared walk. wantWildcard selects which half of
 // the paths to return: the concrete ones, or the wildcard patterns.
-func exportsPathsMatching(raw json.RawMessage, wantWildcard bool) []string {
+func exportsPathsMatching(raw json.RawMessage, wantWildcard bool) (paths, truncated []string) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		// A malformed exports value is not fatal: main/module and the
 		// conventional index.* candidates below still apply.
-		return nil
+		return nil, nil
 	}
 	var out []string
 	seen := map[string]bool{}
+	var hitDepth, hitEntries bool
 	var walk func(node any, depth int)
 	walk = func(node any, depth int) {
-		if depth > maxExportsDepth || len(out) >= maxExportsEntries {
+		// Reached only where there is more to descend into, so setting these
+		// means real truncation rather than a walk that simply finished.
+		if depth > maxExportsDepth {
+			hitDepth = true
+			return
+		}
+		if len(out) >= maxExportsEntries {
+			hitEntries = true
 			return
 		}
 		switch t := node.(type) {
@@ -124,7 +148,13 @@ func exportsPathsMatching(raw json.RawMessage, wantWildcard bool) []string {
 		// A null value blocks a subpath and contributes nothing.
 	}
 	walk(v, 0)
-	return out
+	if hitDepth {
+		truncated = append(truncated, fmt.Sprintf("exports nesting capped at depth %d", maxExportsDepth))
+	}
+	if hitEntries {
+		truncated = append(truncated, fmt.Sprintf("exports paths capped at %d", maxExportsEntries))
+	}
+	return out, truncated
 }
 
 // npmEntryCandidates returns the entry modules an import of this package could
@@ -340,6 +370,11 @@ func npmEntryCandidatesResolved(m pkgManifest, reader *securefs.Reader, baseDir,
 	for _, c := range cands {
 		have[c] = true
 	}
+	if gaps != nil {
+		for _, t := range exportsTruncation(m.Exports) {
+			gaps.AddReason(pkgID, "package.json (exports)", instsurf.GapTruncated, errors.New(t))
+		}
+	}
 	for _, w := range resolveExportsWildcards(reader, baseDir, m.Exports, pkgID, gaps) {
 		if !have[w] {
 			have[w] = true
@@ -454,6 +489,9 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 				continue
 			}
 			lt := installsurface.AnalyzeLoadTime(cand, string(src), read)
+			for _, t := range lt.Truncated {
+				gaps.AddReason(n.ID, cand, instsurf.GapTruncated, errors.New(t))
+			}
 			addSurfaceToGraph(g, n, lt)
 		}
 	}
@@ -583,6 +621,9 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 				continue
 			}
 			lt := installsurface.AnalyzeLoadTime(cand, string(src), read)
+			for _, t := range lt.Truncated {
+				gaps.AddReason(n.ID, cand, instsurf.GapTruncated, errors.New(t))
+			}
 			addSurfaceToGraph(g, n, lt)
 		}
 	}

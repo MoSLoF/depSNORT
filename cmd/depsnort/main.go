@@ -152,7 +152,7 @@ scan flags:
   -expand                  discover transitive layers a manifest does not name,
                            past what the lockfile recorded (default true); the
                            versions it presumes are labelled and never gate
-  -expand-depth int        stop expansion after N layers (0 = full depth); set 1
+  -expand-depth int        stop expansion after N layers (0 = the default bound); set 1
                            to step through the tree one layer at a time
   -no-depsdev              expand transitive layers on PRESUMED (guessed) versions
                            only; by default the asserted tier consults deps.dev for
@@ -744,10 +744,19 @@ func reconstructPyPIDepth(g *graph.Graph, client *registry.PyPIDepsClient, roots
 // presumption grade). It is per-root by construction: a declaration in one
 // project is never satisfied by another project's pinned version.
 //
-// depth is the -expand-depth cap (0 = full). The returned coverage folds every
-// root's frontier and unread counts into one data-source entry, so a walk that
-// was bounded by the network — rather than by the tree or by the cap — degrades
-// coverage exactly as the reconstruction stage does.
+// depth is the -expand-depth cap. Zero is NOT "full depth" — it selects the
+// engine's default bound (expand.defaultMaxDepth) — and this comment claimed
+// otherwise, alongside a -expand-depth help string that told operators the same
+// thing (D-143). The returned coverage folds every root's unread count into one
+// data-source entry, so a walk bounded by the NETWORK degrades coverage exactly
+// as the reconstruction stage does.
+//
+// A walk bounded by the CAP is disclosed too, and degrades only when the cap was
+// not the operator's choice. D-24 exempted this bound from degrading on the
+// stated grounds that it is "a limit the operator chose" — sound reasoning that
+// simply does not hold for a default nobody selected, which is the case for
+// every scan that does not pass the flag. Stepping a tree with an explicit
+// -expand-depth=1 is still a deliberately partial walk and still returns clean.
 func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Declarer, resolver expand.Resolver, depth int) emit.DataSourceCoverage {
 	cov := emit.DataSourceCoverage{Name: "expand"}
 	walker := expand.NewWalker(sources...)
@@ -757,7 +766,7 @@ func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Decl
 	// merged as asserted and closed, so a presumed guess never overwrites it.
 	opts := expand.Options{MaxDepth: depth, Resolver: resolver}
 
-	var discovered, presumed, contested, unread, asserted int
+	var discovered, presumed, contested, unread, asserted, depthTruncated int
 	for _, root := range roots {
 		res, err := walker.ExpandRoot(context.Background(), g, root, opts)
 		if err != nil && cov.Error == "" {
@@ -768,11 +777,23 @@ func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Decl
 		contested += res.Contested
 		unread += res.Unread
 		asserted += res.Asserted
+		depthTruncated += res.DepthTruncated
 	}
 	// Queried counts what we set out to learn; Gaps is the honest shortfall —
 	// a coordinate whose metadata never came back is a layer we could not read,
 	// which degrades coverage rather than passing as a complete walk (D-24).
 	cov.Stats.Gaps = unread
+	// The depth bound stopped the walk with packages still queued, so everything
+	// beneath them is unread — the same shortfall an unfetched coordinate is,
+	// arrived at by our own choice rather than the network's. Said out loud
+	// either way; counted as a gap only when the choice was not the operator's.
+	if depthTruncated > 0 {
+		fmt.Fprintf(os.Stderr, "depsnort: WARNING - expansion stopped at the depth bound with %d package(s) still queued; everything below them is unexamined\n", depthTruncated)
+		if depth <= 0 {
+			cov.Stats.Gaps += depthTruncated
+			cov.Note = joinNotes(cov.Note, depthBoundNote)
+		}
+	}
 	if discovered > 0 || asserted > 0 {
 		fmt.Fprintf(os.Stderr, "depsnort: expansion discovered %d transitive package(s) past the manifest (%d asserted, %d presumed, %d contested, %d unread)\n",
 			discovered+asserted, asserted, presumed, contested, unread)
@@ -788,12 +809,33 @@ func expandTransitive(g *graph.Graph, roots []*graph.Node, sources []expand.Decl
 	// as fact. The per-node version-truth axis marks each node; this is the
 	// run-level summary a reader needs.
 	if asserted == 0 && discovered > 0 {
-		cov.Note = presumedClosureNote
+		// Appended, not assigned: a deep tree walked offline trips BOTH this and
+		// the depth-bound note above, and assigning here would drop that one on
+		// the floor in exactly the case where coverage is weakest.
+		cov.Note = joinNotes(cov.Note, presumedClosureNote)
 		fmt.Fprintln(os.Stderr, "depsnort: NOTE - "+presumedClosureNote)
 	}
 	cov.Stats.Queried = discovered + asserted
 	return cov
 }
+
+// joinNotes concatenates coverage notes so a second one never erases the first.
+func joinNotes(existing, add string) string {
+	switch {
+	case add == "":
+		return existing
+	case existing == "":
+		return add
+	default:
+		return existing + "; " + add
+	}
+}
+
+// depthBoundNote is the in-report statement attached to the expand data source
+// when the walk hit the DEFAULT depth bound — one the operator never chose —
+// leaving packages queued and their subtrees unread (D-143).
+const depthBoundNote = "transitive expansion stopped at the default depth bound; " +
+	"packages below it were never examined - raise -expand-depth to see further"
 
 // presumedClosureNote is the in-report statement attached to the expand data
 // source when the transitive closure was built entirely on presumed versions —
@@ -945,7 +987,7 @@ func cmdScan(args []string) int {
 	noRegistry := fs.Bool("no-registry", false, "skip registry-metadata source (disables VC-004/VC-005)")
 	expandTree := fs.Bool("expand", true, "discover transitive layers past what the lockfile recorded; presumed versions are labelled and never gate")
 	noExpand := fs.Bool("no-expand", false, "alias for -expand=false")
-	expandDepth := fs.Int("expand-depth", 0, "stop expansion after N layers (0 = full depth); 1 steps one layer at a time")
+	expandDepth := fs.Int("expand-depth", 0, "stop expansion after N layers (0 = the default bound, not unlimited); 1 steps one layer at a time")
 	depsDev := fs.Bool("depsdev", true, "consult deps.dev for REAL resolved versions before presuming (the asserted tier; default on) — a supply-chain verdict should rest on resolved facts, not guesses; -offline or -no-depsdev falls back to presumed")
 	noDepsDev := fs.Bool("no-depsdev", false, "do not consult deps.dev; expand transitive layers on presumed (guessed) versions only")
 	noInstallSurface := fs.Bool("no-install-surface", false, "skip static install-hook extraction")

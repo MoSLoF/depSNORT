@@ -214,6 +214,13 @@ type Result struct {
 	Unread int `json:"unread_coordinates"`
 	// DepthReached is the greatest depth any node was placed at.
 	DepthReached int `json:"depth_reached"`
+	// DepthTruncated is how many nodes were still queued for expansion when the
+	// depth bound stopped the walk. Kept SEPARATE from Frontier, which counts
+	// three unlike things together — this bound, a version that would not
+	// resolve, and a coordinate never fetched. Only a caller that can tell them
+	// apart can report a bound honestly, and Frontier reaches no report at all
+	// (D-143). Zero means the walk ran out of tree before it ran out of depth.
+	DepthTruncated int `json:"depth_truncated,omitempty"`
 }
 
 // Walker expands graphs using per-ecosystem declarers.
@@ -541,9 +548,16 @@ func (w *Walker) ExpandRoot(ctx context.Context, g *graph.Graph, root *graph.Nod
 
 	// Anything still queued when the depth bound hit is a frontier too: a limit
 	// we imposed is disclosed exactly like a limit the data imposed.
+	//
+	// Counted separately as well (D-143). A non-empty frontier HERE means the
+	// loop above exited with work left, which happens only when the bound cut
+	// it short — a walk that finished the tree leaves nothing queued. That
+	// makes this the one place the imposed limit is distinguishable from the
+	// data's, and the count is what lets the caller say so.
 	for _, n := range frontier {
 		markFrontier(n)
 		res.Frontier++
+		res.DepthTruncated++
 	}
 	return res, nil
 }
