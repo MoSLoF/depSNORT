@@ -5863,3 +5863,76 @@ is on; without it the sample is still the alphabetically-first, which for CVE id
 loss is no longer permanent, but the default sample is still not the most interesting one. And ordering by
 exploit probability is not ordering by severity: EPSS predicts exploitation, not impact, and no severity
 field exists in an advisory record to sort by.
+
+## D-145 — ranking the advisory sample without EPSS
+
+**Trigger:** D-144 made VC-008's advisory list complete but ranked the prose SAMPLE only when `-epss` was
+on, and closed with that as a stated residual: "without it the sample is still the alphabetically-first,
+which for CVE ids is still the oldest." This closes it.
+
+**What the old fallback actually did.** With no scores, `rankAdvisoryIDs` returned early and ids fell in
+sorted order. Sorted order is not neutral. CVE identifiers embed the year, so lexicographic order is
+chronological order, and the eight ids an operator actually read were reliably the OLDEST advisories the
+package had. Because `CVE-` sorts before `GHSA-`, a package with eight or more CVEs also showed no GHSA at
+all — the sample was biased by identifier namespace, which says nothing about anything.
+
+**The first question was whether severity was available, and the answer is no — for a real reason.** OSV's
+`/v1/querybatch` returns only `{id, modified}` per vulnerability; severity, aliases and details require a
+separate `/v1/vulns/{id}` call per advisory. `qbVuln` decodes exactly the two fields the endpoint returns,
+so there is nothing being dropped there. The bundled dataset does carry a `severity`, but every one of its
+1,612 records is a `MAL-` malicious-package advisory, which VC-008 excludes by construction (that is
+VC-001's). So severity ranking would cost one request per advisory and is not what this entry builds.
+
+**What IS available and was being discarded: `Modified`.** The live OSV path parses it and populates
+`Advisory.Modified`, and nothing read it. An advisory record cannot tell us how bad a vulnerability is, but
+it can tell us when it last changed, and the ranking was throwing that away while falling back to a rule
+that was actively anti-correlated with interest.
+
+Two signals now, in order of how directly they speak to risk. Exploit probability first, unchanged — a
+measured prediction that a vulnerability is being exploited beats any proxy, and `TestD145EPSSStillOutranks
+Recency` pins that an exploited 2015 CVE still leads a quiet 2026 one. Recency second. Sorted order remains
+the final tie-break, which is what keeps the evidence string diffable in a CI gate (D-09).
+
+**The fallback for records with no timestamp is deliberately weaker than the real signal.** Snapshot and
+bundled records carry no `Modified`, so the year embedded in a CVE identifier stands in — but it is a
+DISCLOSURE year, not an update date, and the two are not interchangeable. `advisoryWhen` therefore consults
+it second and never lets it overwrite a real timestamp: an old CVE the registry revised last month outranks
+a newer one nobody has touched. `TestD145RealTimestampBeatsTheYearGuess` is the test that would fail if the
+precedence were reversed, and it does fail against exactly that mutation.
+
+**An identifier is attacker-influenced data.** `cveYear` range-guards the parse, because `CVE-9999-1` would
+otherwise yield a year that sorts above every genuine advisory — a package could put whatever it liked at
+the top of the sample by naming an advisory carefully. Without the guard,
+`TestD145MalformedYearsDoNotRankFirst` fails on both `CVE-9999-1` and `CVE-99999999-1`.
+
+**Three D-144 tests asserted the behaviour this entry replaces, and were corrected rather than deleted.**
+`TestD144WithoutEPSSOrderStaysDeterministic` required sorted order — precisely the rule being removed — so
+its determinism half is kept and its ordering half now expects the most recent first, with the reversal
+noted inline. `TestD144EqualScoresKeepSortedOrder` was about the TIE-BREAK, and D-145 inserted recency
+between EPSS and the tie-break, so the fixture now flattens both signals to keep the test about what it was
+always about. `TestD144EveryAdvisoryIDSurvivesTheProseCap` named specific ids in its precondition; it now
+asks the question generically — whatever the prose dropped must still be recoverable — which is the durable
+form and does not need revisiting the next time the ranking changes.
+
+**Mutation-proven.** Removing recency from the comparator fails three tests; restoring the pre-D-145
+no-EPSS short circuit fails two; letting the year guess override `Modified` fails the precedence test;
+dropping the range guard fails the malformed-id test; promoting recency above EPSS fails the EPSS-primacy
+test; making either comparator tier non-strict fails the D-144 tie-break guard, which confirms that guard
+still holds under the expanded comparator. One mutation — replacing the final `return false` with
+`return out[i] < out[j]` — changed nothing, and it is an equivalent mutant rather than a test gap: on
+already-sorted input the two produce identical output.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/check/builtin`, `internal/emit`, `internal/verdict`. Live CLI on the same eleven-advisory snapshot
+D-144 used: the prose led with `CVE-2015-1000 … CVE-2018-1007, +3 more` before, and now leads
+`CVE-2026-9002, CVE-2025-9001, …` — the newest first, through the CVE-year fallback, since snapshot records
+carry no timestamp.
+
+Residual limitations: a GHSA with neither a timestamp nor a CVE alias still has no date signal at all and
+falls to the sorted tie-break — visible in the live run above, where the GHSA remains among the three
+dropped. It is no longer segregated BY PREFIX, and on the live OSV path it carries a `Modified` and ranks
+like anything else, but on snapshot and bundled data it sinks. Closing that would mean populating `Aliases`,
+which the batch endpoint does not return. Recency is a proxy and not a good one in the abstract: an old
+unfixed CVE can matter more than a newly-touched record, and nothing here claims otherwise — only that a
+recency-ranked sample beats one ordered by how the identifier happens to spell. Severity ranking remains
+unbuilt and would cost one request per advisory.

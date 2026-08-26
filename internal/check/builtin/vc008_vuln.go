@@ -3,7 +3,9 @@ package builtin
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"ihbv.io/depsnort/internal/check"
 	"ihbv.io/depsnort/internal/datasource"
@@ -145,27 +147,88 @@ func (KnownVuln) Run(ctx *check.Context) []finding.Finding {
 }
 
 // rankAdvisoryIDs orders ids so the prose sample keeps the ones worth reading.
-// With EPSS present that is descending exploit probability; ids carries the
-// complete set either way, and Finding.Advisories carries it into the report,
-// so this decides presentation and never what is retained.
+// ids carries the complete set either way and Finding.Advisories carries it
+// into the report (D-144), so this decides presentation and never retention.
 //
-// The input must already be sorted: that order is the tie-break, which is what
-// keeps the output deterministic (D-09) when scores are equal or absent.
+// Two signals, in order of how directly they speak to risk:
+//
+//  1. Exploit probability, when -epss supplied it. A measured prediction that
+//     this vulnerability is being exploited beats any proxy.
+//  2. Recency (D-145). Without EPSS there was no signal at all and ids fell in
+//     sorted order — which is not neutral, because CVE identifiers sort
+//     chronologically, so the sample was reliably the OLDEST advisories a
+//     package had. An advisory record carries no severity (OSV's querybatch
+//     returns only id and modified), but it does carry when it last changed,
+//     and that was being discarded.
+//
+// The input must already be sorted: that order is the final tie-break, which is
+// what keeps the output deterministic (D-09) when both signals are level.
 func rankAdvisoryIDs(ids []string, advs []datasource.Advisory, scores map[string]epss.Score) []string {
 	out := append([]string(nil), ids...)
-	if len(scores) == 0 {
-		return out
-	}
 	best := make(map[string]float64, len(advs))
+	when := make(map[string]time.Time, len(advs))
 	for _, adv := range advs {
+		when[adv.ID] = advisoryWhen(adv)
 		for _, cve := range advisoryCVEs(adv) {
 			if s, found := scores[cve]; found && s.EPSS > best[adv.ID] {
 				best[adv.ID] = s.EPSS
 			}
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return best[out[i]] > best[out[j]] })
+	sort.SliceStable(out, func(i, j int) bool {
+		if a, b := best[out[i]], best[out[j]]; a != b {
+			return a > b
+		}
+		if a, b := when[out[i]], when[out[j]]; !a.Equal(b) {
+			return a.After(b)
+		}
+		// Deliberately false rather than a comparison: SliceStable then leaves
+		// the caller's sorted order intact. A non-strict comparator here would
+		// break sort's contract and cost the determinism the tie-break exists
+		// for — the mutation that proved this is recorded in D-144.
+		return false
+	})
 	return out
+}
+
+// advisoryWhen estimates how recently an advisory changed, for ranking only.
+//
+// Modified is the real signal and is what OSV's querybatch actually returns.
+// Records that reach the tool another way — an imported snapshot, the bundled
+// dataset — carry no timestamp, so the year embedded in a CVE identifier
+// stands in as a coarse fallback: it is a disclosure year rather than an update
+// date, which is why it is consulted second and never allowed to overwrite a
+// real one.
+//
+// A GHSA with neither a timestamp nor a CVE alias yields the zero time and
+// falls to the sorted tie-break. That is the honest answer: its identifier
+// encodes no date, and OSV's batch endpoint does not return the aliases that
+// would supply one.
+func advisoryWhen(adv datasource.Advisory) time.Time {
+	if !adv.Modified.IsZero() {
+		return adv.Modified
+	}
+	for _, id := range append([]string{adv.ID}, adv.Aliases...) {
+		if y, ok := cveYear(id); ok {
+			return time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC)
+		}
+	}
+	return time.Time{}
+}
+
+// cveYear pulls the year out of a CVE identifier ("CVE-2026-9002" -> 2026).
+// The range guard keeps a malformed or hostile id from producing a year that
+// would sort above every real advisory.
+func cveYear(id string) (int, bool) {
+	parts := strings.Split(strings.ToUpper(id), "-")
+	if len(parts) < 3 || parts[0] != "CVE" {
+		return 0, false
+	}
+	y, err := strconv.Atoi(parts[1])
+	if err != nil || y < 1999 || y > 2200 {
+		return 0, false
+	}
+	return y, true
 }
 
 // peakEPSS returns the peak exploit-prediction summary across an advisory set's
