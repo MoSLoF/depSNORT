@@ -6085,3 +6085,191 @@ adoption grows. The base score ignores temporal and environmental metrics, which
 published advisory but means the number is not tailored to this deployment. And severity orders the prose
 sample only — it does not change gate class, since VC-008 stays advisory-class by default (D-14) and a
 CRITICAL CVSS score is still not a reason to fail a build by default.
+
+## D-148 — the npm/gem/nuget offline-and-source-availability audit
+
+**Trigger:** D-141 answered "what does this ecosystem do when a dependency's source is not available?" for
+PyPI and closed by declining to generalize: "the npm/gem/nuget equivalents of this question remain
+unaudited." This is that audit. Verdicts: nuget honest with one edge defect, npm silently skipping, and
+rubygems the worst of the three — dependencies never examined and never disclosed.
+
+**The baseline the three are measured against** is the posture cargo (D-140), pypi (D-141) and the gap layer
+(R-01) already share: examine a dependency's source where it is locally present, and record
+`source-unavailable` where it is not. None of these three ecosystems fetches anything, and this entry adds
+no fetching — the question is purely what happens at the local miss.
+
+### nuget: honest, with one edge defect
+
+A dependency missing from the cache records `GapUnavailable` — but only when the cache-dir list was
+non-empty. With no `NUGET_PACKAGES` and no resolvable home directory, the guard `len(pkgDirs) > 0` made
+every miss silent: the environment where NOTHING could be examined reported as the cleanest. The guard is
+removed; fewer places to look is less coverage, not less to say.
+
+### npm: the silent skip, defended by a comment and two tests
+
+A dependency directory absent from a pre-install tree was skipped with nothing recorded — `Classify` treats
+`ErrNotExist` as "ordinary absence", and the extractor's doc comment asserted "the gap is not papered over"
+while nothing was recorded anywhere. Reproduced: a lockfile whose dependency carries
+`hasInstallScript: true`, no `node_modules` — zero gaps, and the coverage line implied the install surface
+had been read.
+
+The defense has real content and gets a real answer. `hasInstallScript` (VC-002a) does still stand — but it
+is the registry's ASSERTION of hook presence, not an observation of hook CONTENT: the cradle and exfil
+markers VC-002e/f read, and the entry module's load-time chain (D-134), were never examined. The absent
+dependency's source is not an "optional file" in R-01's sense — a package without a Rakefile has no
+Rakefile; a dependency without its source merely hasn't been looked at. Absent source for a dependency node
+is now `GapUnavailable`; the root stays exempt (its manifest is what discovery keyed on); refusals keep
+their typed reasons.
+
+**Three shipped tests asserted the skip, and one was the E2E control for it.**
+`TestExtractInstallSurfaceNoNodeModulesIsQuiet` and `TestAbsentPackageDirIsNotAGap` encoded it at the
+adapter seam; `TestE2E_AbsentPackageStaysCleanAndComplete` pinned it at the CLI under `-fail-on-incomplete`,
+reasoning "if absence gated, every real pre-install scan would fail and the signal would be worthless".
+That reasoning conflates disclosure with gating: the gate fires only under the OPT-IN flag, and an operator
+who chose `-fail-on-incomplete` is asking precisely "did you read everything?" — for a pre-install tree the
+honest answer is no. It also could not survive the tool's own inconsistency: cargo, nuget and pypi all
+disclose this exact condition, and npm alone reported the least-examined tree as the most complete. All
+three tests corrected with the reversal inline; the halves that remain true (no invented hooks; no gate
+without opt-in) are kept as their own assertions.
+
+### rubygems: dependencies never examined, never disclosed — and a bug under that
+
+The adapter's scope was "the root gem only", on the stated grounds that "transitive gems are fetched from
+rubygems.org and are not present in a source checkout". That premise is false for the two standard local
+installs — Bundler's `vendor/bundle` (committed or CI-cached in exactly the projects that scan) and
+`$GEM_HOME` — and the consequence was severe: the classic rubygems supply-chain payload IS a dependency's
+extconf.rb, and a Gemfile.lock full of native-extension gems scanned with zero gaps, as if every extconf.rb
+had been read and found clean.
+
+Dependency gems are now scanned at cargo parity: `findGemDir` searches `vendor/bundle/ruby/*/gems` and
+`$GEM_HOME/gems` (local-only, nothing fetched, D-04), a found gem's extconf.rb/gemspec/Rakefile go through
+the same `AnalyzeRuby` as the root with hooks attributed to the dependency node, and a gem in neither place
+records `GapUnavailable`. Lookup keys come from a parsed Gemfile.lock — attacker-authored input — so a name
+or version containing separators or traversal is refused as `GapContainment` before any path join, the same
+discipline as nuget's `isCleanPkgName`.
+
+**Writing the tests exposed a pre-existing bug that had made the root-only scope even narrower than
+documented.** `ExtractInstallSurface` returned early when the ROOT had no extconf/gemspec/Rakefile — the
+shape of nearly every *application* (a Gemfile.lock and no gemspec of its own). Harmless in the root-only
+era; with dependency scanning it would have skipped every dependency for exactly the most common project
+shape. The early return is removed.
+
+**Proven end to end:** a hostile extconf.rb planted in a vendored dependency produces a VC-002f
+download-cradle finding attributed to `pkg:gem/sassc@2.4.0` — a detection that did not exist at all before
+this entry — while the gems not vendored disclose as `source-unavailable x2` in the same run.
+
+**Mutation-proven, eight sites:** npm's silent skip restored and its root exemption dropped; gem's
+dependency scan removed, its miss undisclosed, its early return restored, its key sanitizer removed, and its
+`$GEM_HOME` search dropped; nuget's empty-list guard restored. Each fails its test.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on the
+four touched packages. Live CLI: the npm cold tree that reported 0 gaps now reports `source-unavailable x1`;
+the gem cold tree that reported 0 now reports `x3`; the vendored-hostile-gem tree reports the VC-002f
+finding plus `x2` for the unvendored rest.
+
+**A behaviour change the owner should weigh at review:** a pre-install npm scan — a common CI shape — now
+reports incomplete install-surface coverage and, under `-fail-on-incomplete` only, exits 3 where it exited
+0. This is the same visible-honesty cost D-141 accepted for offline PyPI, applied to the last ecosystem that
+lacked it.
+
+Residual limitations: the gem search covers Bundler's vendor path and an explicit `$GEM_HOME`, not the
+default user/system gem directories (`~/.gem/ruby/<version>`, the ruby installation's own gem dir) — those
+require guessing ruby-version layouts and are disclosed as unavailable rather than guessed at; a follow-up
+could add them behind the same local-only posture. npm's disclosure is per absent PACKAGE; it does not
+distinguish "no node_modules at all" from "this one package missing from an otherwise installed tree",
+though the count makes the difference visible. The gemspec content-gate (a narrower marker than `scanCaps`
+for gemspec shell-outs) is unchanged and remains on the outstanding list.
+
+## D-149 — the cargo build.rs fetch defaults on
+
+**Trigger:** D-141 corrected the premise D-140's opt-in rested on and closed by raising the inconsistency
+"so the decision can be revisited on accurate grounds": PyPI fetches per-dependency source by default while
+Cargo required `-cargo-fetch-source`. Revisited and decided by the owner, with a stated principle worth
+recording verbatim in substance: coverage defaults ON and flags exist for opting out — transparency and no
+blind spots — unless the action itself carries a risk, in which case the risk is weighed first.
+
+**The risk was weighed, and there is no new risk class.** The fetch downloads crate archives from crates.io,
+checksum-verified against the published record before extraction (D-140), analyzes build.rs statically and
+executes nothing (D-04). Every ordinary online scan already sends coordinates to api.osv.dev and fetches
+per-dependency sdists from PyPI by default, and the registry-history stage already talks to crates.io. The
+exposure — revealing which packages a project uses to registries that served them — is one the default
+posture already accepts everywhere else, and `-offline` remains the single switch that stops all of it.
+
+**The change.** `-cargo-fetch-source` (opt-in) is replaced by `-no-cargo-fetch-source` (opt-out), matching
+the repo's convention for default-on stages (`-no-osv`, `-no-registry`, `-no-expand`). The enrichment nests
+inside the registry stage as before, so `-no-registry` still implies no registry fetches. Under `-offline`
+the client serves only its warm cache and a cold miss keeps its `source-unavailable` gap — the same posture
+as OSV and the PyPI fetcher, per D-141. The old flag is removed rather than kept as a silent no-op: a script
+still passing it fails loudly at flag parsing, which beats accepting a flag that no longer does anything.
+
+**Proven at the CLI seam, hermetically and live.** The flag-level tests run `-offline` so the enrichment
+executes against an empty cache with no network: by default `cargo-source` appears in the report's data
+sources having queried the unexamined crate; with `-no-cargo-fetch-source` it does not, and the crate stays
+disclosed. Mutations reverting the gate to opt-in or ignoring the opt-out each fail their test. Live, with
+no flags at all: a cold clone pinning `arrayref@0.3.7` fetched by default, determined the crate ships no
+build.rs, and cleared its `source-unavailable` gap — the cold-clone scan that D-139 showed running blind now
+examines by default.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`cmd/depsnort`.
+
+Residual limitations: default online scans of unvendored cargo trees now fetch once per unexamined crate —
+cached across runs, but a visible traffic change for large cold trees; `-no-cargo-fetch-source` or
+`-offline` restores the old cost. The fetch resolves the exact locked version only (deliberate, D-140);
+nothing here widens what is fetched, only when. The same default-on principle applied to this flag has NOT
+been swept across every other opt-in in the tool — `-epss` remains opt-in, defensibly (it is an enrichment
+ranking, not coverage, and needs a second external service) — but that sweep is now the recorded yardstick
+if the owner wants it.
+
+## D-150 — a gemspec's own body is executed code, and now analyzed as such
+
+**Trigger:** the outstanding list carried "RubyGems gemspec content-gate (needs a narrower marker than
+`scanCaps` for gemspec shell-outs)" since D-135. This closes it.
+
+**The gap, reproduced before building anything.** A `.gemspec` is not data — it is Ruby that `gem build` and
+`gem install` EVALUATE. `AnalyzeRuby` looked at gemspec content only when the gemspec declared a native
+extension (`extensions` and `extconf` both present as substrings), and ran `scanCaps` on it then. So a
+payload sitting directly in the gemspec body — `eval(Net::HTTP.get(URI('…')))` with no extension declared —
+produced zero hooks, while `scanCaps` on that same text correctly returned `[network exec]`. The signal was
+computed and thrown away because the wrong precondition guarded it.
+
+**Why the gate could not simply be "any capability", which is the whole reason this sat open.** A gemspec
+near-universally populates `s.files` with `` `git ls-files`.split ``, a backtick shell-out that trips
+`CapExec` on essentially every real gem in existence. Running `scanCaps` over every gemspec and firing on a
+non-empty result would flag the entire ecosystem — the false-positive tax that gets a detector switched off.
+`scanCaps(benign git ls-files gemspec)` is exactly `[exec]`, confirmed in the reproduction.
+
+**The resolution is the split VC-002e/f already draw for other executed hooks: exec is table stakes, a risk
+capability is the tell.** A new `gemspec:body` hook fires when a gemspec WITHOUT an extension declaration
+exhibits `CapNetwork`, `CapObfuscation`, `CapCradle`, or `CapCredentials` — never on `CapExec` alone.
+`gemspecBodyPayload` is that gate, and it is the load-bearing piece: the mutation widening it to
+`len(caps) > 0` fails the benign `git ls-files` boundary and the broader exec-only cases, which is the
+guarantee that this does not reintroduce the false-positive flood the narrow gate existed to avoid.
+
+**The extensions path is unchanged and kept distinct.** A gemspec that DOES declare a native extension keeps
+the D-135 behaviour — any capability, `CapExec` included, because the extconf.rb it points at will run — and
+still fires as `gemspec:extensions`, not `gemspec:body`. The two are mutually exclusive: an
+extensions-declaring gemspec with a body payload fires the extensions hook only, since the declaration is
+the more specific precondition and owns the finding. Tests pin both the correct-name and the no-double-fire
+properties, and the mutation collapsing extensions into the body gate fails both.
+
+**Proven end to end.** Through the rubygems adapter, a Gemfile.lock gem shipping a gemspec with
+`` `git ls-files` `` plus `eval(Net::HTTP.get(…))` now produces a **VC-002b finding — "install hook
+(gemspec:body) reaches the network"** — a detection that yielded nothing at all before this entry. IOCs in
+all fixtures are inert (RFC 5737 TEST-NET-3 `203.0.113.x` / `.invalid`).
+
+**Mutation-proven, four sites:** removing the body gate fails the payload tests; widening it to any
+capability fails the benign-baseline tests; dropping `CapNetwork` from the risk set fails the fetch-eval
+test; routing extensions through the body gate fails the name and double-fire tests.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/installsurface` and `internal/ecosystem/rubygems`.
+
+Residual limitations: the gate keys on the capabilities `scanCaps` already recognizes, so a gemspec payload
+using a Ruby network/exec idiom `scanCaps` does not yet model is missed here exactly as it would be in an
+extconf.rb — this widens WHERE the existing capability scan runs, not what it recognizes. A gemspec that both
+declares an extension AND carries an unrelated body payload reports the extension hook only; the body payload
+rides along in the same scanned text so its capabilities still surface, but the hook is named for the
+extension. Exec-only remains deliberately silent, which is correct for `git ls-files` but would also miss a
+gemspec that shells out to a genuinely hostile local command with no network/obfuscation tell — the same
+exec-is-ordinary tradeoff every build-script analysis in the tool makes.

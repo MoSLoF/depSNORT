@@ -165,9 +165,12 @@ func scanDependencyPkg(g *graph.Graph, n *graph.Node, pkgDirs []string, gaps *in
 	}
 	pkgDir := findNuGetPkgDir(pkgDirs, n.Name, n.Version)
 	if pkgDir == "" {
-		if len(pkgDirs) > 0 {
-			gaps.AddReason(n.ID, n.Name+"@"+n.Version, instsurf.GapUnavailable, nil)
-		}
+		// Disclosed unconditionally (D-148). This used to be skipped when the
+		// cache-dir list itself was empty (no NUGET_PACKAGES and no resolvable
+		// home) — precisely the environment where NOTHING was examined, reported
+		// as if everything had been. Fewer places to look is less coverage, not
+		// less to say.
+		gaps.AddReason(n.ID, n.Name+"@"+n.Version, instsurf.GapUnavailable, nil)
 		return
 	}
 	pkgReader, err := securefs.NewReader(pkgDir)

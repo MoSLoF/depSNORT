@@ -162,24 +162,44 @@ func TestE2E_UnparseableManifestGatesIncomplete(t *testing.T) {
 	assertGated(t, code, coverageOf(t, doc), "parse-error")
 }
 
-// THE CONTROL, and the reason this cannot just gate on everything: a package
-// that is simply not installed (no node_modules, the ordinary pre-install state
-// depsnort is designed to scan) must stay complete and exit 0. If absence gated,
-// every real pre-install scan would fail and the signal would be worthless.
-func TestE2E_AbsentPackageStaysCleanAndComplete(t *testing.T) {
+// This was THE CONTROL for the opposite rule until D-148: it asserted that a
+// pre-install tree stays complete and exits 0 under -fail-on-incomplete,
+// reasoning that "if absence gated, every real pre-install scan would fail and
+// the signal would be worthless". Two things unseated that. First, the tool was
+// inconsistent with itself: cargo (D-140), nuget, and pypi (D-141) all disclose
+// a dependency whose source could not be examined, and npm alone reported the
+// least-examined tree as the most complete. Second, the gate only fires under
+// the OPT-IN -fail-on-incomplete — and an operator who chose that flag is
+// asking precisely "did you read everything?", to which the honest answer for a
+// pre-install tree is no: every dependency's hook content and load-time chain
+// is unexamined, with only the lockfile's asserted hasInstallScript standing in
+// (VC-002a). Without the flag the scan still exits 0 and merely SAYS so, which
+// is the D-06/D-24 discipline the test below this one pins.
+func TestE2E_AbsentPackageDisclosesAndGatesOnOptIn(t *testing.T) {
 	root := t.TempDir()
 	npmProjectWithPackage(t, root) // lockfile only; nothing installed
 
 	code, doc := runScan(t, "-fail-on-incomplete", root)
 	cov := coverageOf(t, doc)
+	assertGated(t, code, cov, "source-unavailable")
+	if complete, _ := cov["complete"].(bool); complete {
+		t.Errorf("coverage.complete = true over unexamined dependencies: %v", cov)
+	}
+}
+
+// The half of the old control that remains true and load-bearing: WITHOUT the
+// opt-in, a pre-install tree still exits 0 — disclosure is not a failure.
+func TestE2E_AbsentPackageDoesNotGateWithoutOptIn(t *testing.T) {
+	root := t.TempDir()
+	npmProjectWithPackage(t, root)
+
+	code, doc := runScan(t, root)
 	if code != 0 {
-		t.Errorf("exit = %d, want 0 — an uninstalled dependency is normal, not a gap", code)
+		t.Errorf("exit = %d, want 0 — disclosure gates only on opt-in", code)
 	}
-	if complete, _ := cov["complete"].(bool); !complete {
-		t.Errorf("coverage.complete = false for an ordinary pre-install tree: %v", cov)
-	}
-	if gaps, _ := cov["install_surface_gaps"].(float64); gaps != 0 {
-		t.Errorf("install_surface_gaps = %v, want 0", cov["install_surface_gaps"])
+	cov := coverageOf(t, doc)
+	if gaps, _ := cov["install_surface_gaps"].(float64); gaps == 0 {
+		t.Errorf("the gaps must still be reported: %v", cov)
 	}
 }
 

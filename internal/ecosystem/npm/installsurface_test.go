@@ -3,6 +3,7 @@ package npm
 import (
 	"testing"
 
+	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 )
 
@@ -110,14 +111,31 @@ func TestExtractInstallSurfaceProjectRootAIAgentConfigRelativePath(t *testing.T)
 	}
 }
 
-func TestExtractInstallSurfaceNoNodeModulesIsQuiet(t *testing.T) {
+// TestExtractInstallSurfaceNoNodeModulesIsDisclosed. This test was named
+// ...IsQuiet and asserted err == nil — it encoded the silent skip as the
+// contract, the same shape as D-141's nil-fetcher test. That is a contract
+// being corrected, not a test bent to fit a change: a pre-install tree leaves
+// every dependency's hook content and load-time chain unexamined, and a scan
+// that says nothing about that reads as examined-and-clean (D-148). The half
+// of the old test that was right stays: no hooks may be INVENTED.
+func TestExtractInstallSurfaceNoNodeModulesIsDisclosed(t *testing.T) {
 	a := &Adapter{}
 	g, err := a.Resolve("testdata/proj") // fixture has no node_modules on disk
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.ExtractInstallSurface("testdata/proj", g); err != nil {
-		t.Fatalf("expected quiet skip, got %v", err)
+	err = a.ExtractInstallSurface("testdata/proj", g)
+	if err == nil {
+		t.Fatal("a pre-install tree leaves dependencies unexamined; that must surface as gaps")
+	}
+	gapsFound := instsurf.GapsOf(err)
+	if len(gapsFound) == 0 {
+		t.Fatalf("expected source-unavailable gaps, got %v", err)
+	}
+	for _, gp := range gapsFound {
+		if gp.Reason != instsurf.GapUnavailable {
+			t.Errorf("expected every gap to be source-unavailable, got %v", gp)
+		}
 	}
 	if g.CountByKind()[graph.KindInstallHook] != 0 {
 		t.Error("no node_modules present: expected zero hook nodes, not invented ones")
