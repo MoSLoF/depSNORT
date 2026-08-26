@@ -6273,3 +6273,57 @@ rides along in the same scanned text so its capabilities still surface, but the 
 extension. Exec-only remains deliberately silent, which is correct for `git ls-files` but would also miss a
 gemspec that shells out to a genuinely hostile local command with no network/obfuscation tell — the same
 exec-is-ordinary tradeoff every build-script analysis in the tool makes.
+
+## D-151 — the install-surface conformance suite reaches the dependency dispatch
+
+**Trigger:** the outstanding list carried "conformance suite covers root paths only (dependency-scan paths
+unexercised)". D-148 had just added new dependency-scan code to three adapters, so the gap was no longer
+theoretical.
+
+**What the existing suite actually exercised, which is narrower than it reads.** D-135's
+`TestInstallSurfaceAsymmetricPrecondition` proves, for each adapter, that a second independent analysis fires
+even when the first analysis's precondition is removed — the D-134 regression, generalized. But it builds
+every fixture node with `Depth: 0` and `MarkRoot`, so it tests each adapter's ROOT dispatch. For several
+adapters the root dispatch is entirely separate code from the dependency dispatch: npm's node_modules-keyed
+main loop is a different pass from the publishable-root path a no-`npm.path` node actually hits (a fact
+confirmed by probe — the root conformance case exercises the publishable path, never the main loop);
+cargo/nuget/rubygems reach a dependency through vendor- and cache-lookup functions the root never calls. A
+precondition bug in that dependency dispatch would pass the root suite untouched — and D-148's
+`scanDependencyGem`, npm's per-node loop, and nuget's `scanDependencyPkg` are exactly that dispatch.
+
+**The addition.** A parallel `depCases()` places each fixture where the adapter searches for a DEPENDENCY's
+source — `node_modules/<name>`, `vendor/<name>`, the `$NUGET_PACKAGES` cache layout
+`<lowercase-name>/<version>/`, `vendor/bundle/ruby/*/gems/<name>-<version>` — marks the node a real
+dependency (`Depth: 1`, non-root), removes the first analysis's precondition, and asserts the second still
+fires. npm, cargo, nuget and rubygems each qualify (2+ independent analyses on the dependency path); composer
+(its `vendor/<name>` read funnels through one `AnalyzePHP` call), pypi (single fetched-sdist analysis) and
+gomod (single `AnalyzeGo` call) are recorded as exempt with reasons, and a coverage meta-test fails if a new
+extractor appears in neither list — the same guard the root suite's `TestEveryInstallSurfaceExtractorHas
+AsymCoverage` gives.
+
+**The anti-vacuity guard is the part that took care.** A dependency-path test that only checked "the wanted
+hook appeared" could pass for the wrong reason: a MISPLACED fixture finds nothing (that one fails safe), but
+a fixture that accidentally triggers the ROOT dispatch would produce the hook and pass while proving nothing
+about the dependency path. So each assertion also checks the hook's `hook.package` attribution equals the
+DEPENDENCY node's ID, not the root's. A green result can then only mean the dependency dispatch itself ran
+the second analysis. Writing this also corrected a first-cut design flaw: an initial "positive control" test
+reused the same first-precondition-absent fixture as the asymmetry test, making the two identical — folded
+into the single attribution-checked assertion instead.
+
+**No production bug found — and that is the honest result.** Every adapter's dependency dispatch already
+holds the contract; this locks that in. The value is a guard, not a fix: reintroducing the D-134 shape into
+each dependency dispatch (gate npm's entry-module pass behind `len(m.Scripts)`, cargo's proc-macro behind
+`build.rs`, nuget's MSBuild behind PowerShell hooks, rubygems' gemspec behind extconf) fails the
+corresponding case, and dropping an adapter from `depCases()` fails the coverage meta-test — five mutations,
+all load-bearing.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/ecosystem/conformance`. Test-only change; no production code touched.
+
+Residual limitations: the contract verified is the asymmetric-precondition one (one analysis not gated behind
+another), the specific D-134 shape — it is not a general "the dependency dispatch finds every payload the
+root dispatch would" equivalence, which would require a far larger fixture matrix. composer's dependency path
+is exempted on the grounds that its scripts-vs-plugin split lives inside `AnalyzePHP` and is covered by the
+root suite; if composer ever splits those into two adapter-level analyses, the exemption must move to a
+`depCases()` entry, which the coverage meta-test does NOT catch (it only catches a wholly-unlisted adapter),
+so that remains a reviewer's judgement.
