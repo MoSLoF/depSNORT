@@ -5269,3 +5269,62 @@ for — it does not assert that each adapter's analyses are individually CORRECT
 the other. Fixtures exercise the root path; the dependency-scan paths (vendored crates, module cache,
 sdists, `vendor/`) are not covered by this suite. The gemspec content-gate scope question above is
 documented, not resolved.
+
+## D-136 — resolve `exports`-as-object entry modules (npm)
+
+**Trigger:** D-134's residual note. `npmEntryCandidates` read `main`, `module`, and the conventional
+`index.{js,mjs,cjs}`, and its own comment recorded that "`exports`-as-object is not resolved in this pass
+(documented limitation)". That limitation had teeth: `exports` REPLACES `main` in Node's own resolution when
+present, so a package can ship its entry — and a loader that runs the instant a consumer imports it — with no
+`main` at all. Reproduced before writing any fix: four realistic shapes (string form, `{".": path}`,
+conditions object, subpath-only) each produced ZERO hooks. This is the modern packaging default, so the gap
+was widening over time rather than shrinking.
+
+**The fix:** `exportsEntryPaths` walks the raw `exports` value and returns every package-relative module path
+reachable through it, feeding the existing `add` normalizer alongside `main`/`module`.
+
+**Every exported path is collected, not just `"."`.** Importing `pkg/feature` executes whatever `./feature`
+maps to, exactly as importing `pkg` executes `"."`. A loader parked behind a secondary subpath runs on import
+just the same, and that is the shape the live-fire fixture below uses.
+
+Four decisions inside the walk, each with a reason:
+- **Map keys are sorted before descending.** Go randomizes map iteration and these paths become graph node
+  IDs; an unsorted walk would make two scans of the same tree disagree. This package has determinism tests
+  precisely because that class of bug has bitten before.
+- **Wildcards are skipped** (`"./f/*": "./src/f/*.js"`). A pattern names a SET this static pass cannot
+  enumerate without walking the tree. Skipping them also means legitimate packages with many subpaths — which
+  use wildcards rather than enumerating — contribute few entries, not many.
+- **Bare specifiers are skipped** (`"node:fs"`, another package name): they name no file in this package.
+  **`null` blocks a subpath** and contributes nothing.
+- **Two bounds on attacker-supplied JSON**: `maxExportsDepth` (8) against stack exhaustion from nesting, and
+  `maxExportsEntries` (256) against a crafted map. The manifest's size is already bounded by the contained
+  reader, and real packages never approach either, so both exist only to bound hostile input. Malformed
+  `exports` is non-fatal — main/module and the conventional candidates still apply.
+
+**Mutation-proven, three mechanisms independently.** Dropping the `exportsEntryPaths` wiring fails the
+end-to-end regression. Disabling the key sort fails the determinism test with a concrete order change
+(`[./a ./c ./b ./d ./e]` vs `[./d ./e ./a ./c ./b]`). Removing the depth guard makes the 5000-deep fixture
+return `./x.js` instead of nothing. A fourth check is defense in depth rather than a new guard: an exports
+value naming `"./../../etc/passwd"` is refused by the existing `add` normalizer before it can reach the
+contained reader, which would refuse it again.
+
+**One correction during the work, recorded because the test was wrong and the code was right.** The
+`conditions` case initially asserted `[./d/i.cjs, ./d/i.mjs]`. It fails: ordering follows the sorted CONDITION
+KEYS (`import` < `require`), not the path strings, so the correct order is `[./d/i.mjs, ./d/i.cjs]`. The
+sibling `nested_conditions` case (`default` < `import`) already encoded the right rule and passed throughout,
+which is what identified the expectation as the error. The test now says so inline.
+
+**Validation:** full suite green (34 packages), `-race` clean on `internal/ecosystem/npm` and
+`internal/ecosystem/conformance`. Live CLI before/after on a package whose loader hides behind a SECONDARY
+subpath (`"./telemetry"`), with no `main` and nothing at a conventional `index.*` path: before, exit 0 with
+zero findings and zero hook nodes; after, `VC-002b` and `VC-002e` on
+`hook:...#module-load:dist/telemetry.js`. The same fixture's benign `.mjs`/`.cjs` `"."` entries produce no
+hooks, and a wholly benign two-subpath exports package produces none either — the load-time pass is still
+gated on a JS-precise execution signal, so resolving more entry paths adds reach without adding noise.
+
+Residual limitations: **wildcard subpaths remain unresolved** — a loader reachable only through
+`"./f/*"` is still missed, and resolving it would require walking the package tree, which this pass
+deliberately does not do. `exports` is npm-only; no other ecosystem has an equivalent field. Node's real
+resolution picks ONE condition arm per import; this pass collects every arm, which is deliberate (the
+scanner cannot know how a consumer will import) and means an unreachable-in-practice arm is still analyzed —
+over-collection, never under.
