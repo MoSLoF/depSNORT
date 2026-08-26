@@ -81,7 +81,11 @@ func (g Gap) String() string {
 	if g.Package != "" {
 		where = g.Package + " (" + g.Path + ")"
 	}
-	return string(g.Reason) + ": " + where
+	out := string(g.Reason) + ": " + where
+	if g.Detail != "" {
+		out += ": " + g.Detail
+	}
+	return out
 }
 
 // Classify maps an error to a gap reason, reporting ok=false when the error is

@@ -5601,3 +5601,88 @@ thinner by nature, not by gap. An offline scan with a cold cache now reports one
 which on a large tree is many lines; that is the honest count rather than noise, but it is a visible change
 for offline users. The npm/gem/nuget equivalents of this question remain unaudited — this entry corrects one
 wrong claim and fixes one real bug, and deliberately does not generalize from either.
+
+## D-142 — uniform bound-disclosure: every scan bound that stops short now says so
+
+**Trigger:** D-138 gave the exports wildcard resolver a `GapTruncated` disclosure when its match cap stopped
+an enumeration short. That fixed one bound. The tool has many, and the question left open was whether the
+rest behaved the same way. They did not. The R-01 principle behind the gap layer — a refusal reported as an
+absence is attacker-triggerable invisibility — applies with equal force to a bound: a scanner that stops at
+file 5,000 and reports nothing is telling the operator "we read everything and found nothing" when the truth
+is "we stopped."
+
+**The sweep, and what it actually found.** Every `max*` constant reachable from an install-surface path was
+triaged, and each was verified in code rather than assumed from its name or its comment. Three categories
+came out of it. Bounds that are already disclosed: PyPI's `maxIncludeDepth` routes unfollowed includes into
+`acc.unfollowed`, and the sdist size and entry caps surface as errors that the existing gap layer classifies
+— these needed nothing. Bounds that are not truncation at all: input-validation ceilings that reject a whole
+artifact rather than partially reading it already fail loudly. And three that stopped short in silence:
+
+- `installsurface.maxLoadTimeRefs` (16) — an entry module's sibling `require`s were followed to sixteen
+  distinct files and then `break`. A package splitting its payload across seventeen modules looked
+  identical to one whose entry was clean.
+- `npm`'s exports-walk `maxExportsDepth` (8) and `maxExportsEntries` (256) from D-136 — both returned early
+  from the walk with no record.
+- `gomod.maxGoFiles` (5000) — a bare `return` out of the source walk.
+
+**One of these was worse than an undocumented gap.** `maxGoFiles`'s own comment read "hitting it records a
+GapTruncated coverage gap, not a silent truncation." The code did not do that, and had never done it. A
+reader auditing this file would have checked the comment, concluded the case was handled, and moved on. The
+comment now says what the code does, and carries a note that it asserted this before it was true.
+
+**`Surface.Truncated` is how the analyzer reports a bound it hit.** `installsurface.AnalyzeLoadTime` is
+ecosystem-agnostic and has no Gaps sink, so it returns the fact and the adapters convert it. The invariant
+that makes the field trustworthy is that a bound which merely EXISTS contributes nothing — only one that
+actually stopped short of the end. The npm exports walk follows the same rule via `exportsTruncation`, which
+keeps the walk itself pure and does the disclosure where a sink exists.
+
+**Exactly-at-the-bound is complete coverage, not truncation.** This is the same line D-138 drew, and holding
+it took real care in each of the three sites. In `AnalyzeLoadTime` the check sits AFTER the empty/duplicate
+filters, so a module mentioning one sibling two hundred times is read once and reported as complete — a
+naive implementation that counts mentions instead of distinct references marks it truncated, and the test
+for that case fails against exactly that mutation.
+
+**A false positive in the first cut of this change, found by writing the boundary test.** In `gomod` the
+bound was initially checked at the top of the directory-entry loop, before the `.go` filter. A module with
+exactly `maxGoFiles` sources plus any other file — a README, a testdata fixture — would reach one more
+iteration with the count already at the cap and report truncation for material it was never going to read.
+The check moved past the `.go` filter, and `TestD142TrailingNonGoFileIsNotTruncation` pins it.
+
+**The opposite case is disclosed, deliberately.** A subtree the walk never opened because the count was
+already at the bound is *unexamined*, not *known-empty* — telling the two apart would require doing the
+reading the bound exists to prevent. Unknown is disclosed rather than assumed clean, and
+`TestD142UnenumeratedSubtreeIsTruncation` holds that side of the line.
+
+**`Gap.String` dropped `Detail`, so none of these messages reached the operator.** The bound-naming text
+written for each site — "go source files capped at 5000", "exports nesting capped at depth 8" — lived in
+`Gap.Detail`, which the report never rendered. Every gap arrived as its bare reason word: the operator
+learned that SOME bound fired, not which one, which is barely more actionable than the silence being
+removed. `Gap.String` now appends `Detail` when present. This widens beyond `GapTruncated` to every reason,
+which is the right blast radius: an underlying error text that was worth recording is worth showing. The
+full suite was green across the change, so no consumer depended on the truncated form.
+
+**Mutation-proven, every site and every boundary.** Removing each disclosure fails its test; the off-by-one
+on each bound fails the corresponding exactly-at-cap test; counting mentions rather than distinct references
+fails the duplicate-refs test; reverting `gomod` to the pre-fix loop shape fails the trailing-non-Go-file
+test; deleting the top-of-walk record fails the unread-subtree test; removing the npm exports gap wiring
+fails the graph-propagation test while leaving the pure-function test green — which is precisely why both
+exist. `Gap.String` was mutated in both directions: dropping `Detail` and appending it unconditionally each
+fail their own test.
+
+**Wiring is proven separately from computation.** `exportsTruncation` is a pure function and
+`Surface.Truncated` is a struct field; neither matters unless the adapter hands it to a sink the caller sees.
+Two tests drive the real extractor end to end and read the gap off the returned error.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/installsurface`, `internal/ecosystem/npm`, `internal/ecosystem/gomod`, `internal/ecosystem/instsurf`.
+Live CLI on three purpose-built trees, one per site: a 40-sibling npm entry, a 5,010-file Go module, and a
+600-entry exports map. Each reports `install_surface_gaps: 1`, a `scan-bound-truncated` reason, a stderr
+warning, the "This report is NOT an all-clear" line, and — after the `Gap.String` fix — a detail line naming
+the specific bound.
+
+Residual limitations: the bounds themselves are unchanged, so this makes truncation visible rather than
+rarer; a tree crafted to sit just past `maxGoFiles` still hides its tail, it just no longer hides that it is
+hiding. The root-module `gomod` call site passes an empty package ID, so its gap reads as a bare path — the
+project directory is already on the report line, but the gap itself is less self-describing than the
+per-dependency ones. The sweep covered bounds reachable from install-surface extraction; resolver-side and
+datasource-side caps were not audited, and no claim is made about them here.
