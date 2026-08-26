@@ -53,10 +53,15 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			continue
 		}
 
-		if a.Sdist == nil {
+		if n.Name == "" || n.Version == "" {
 			continue
 		}
-		if n.Name == "" || n.Version == "" {
+		if a.Sdist == nil {
+			// No fetcher configured, so this dependency's install surface is
+			// unexamined. Staying silent would report that as "nothing to
+			// find" (R-01), which is exactly the confusion D-141 corrected for
+			// the offline path.
+			gaps.AddReason(n.ID, n.Name+"@"+n.Version, instsurf.GapUnavailable, nil)
 			continue
 		}
 

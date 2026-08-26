@@ -5539,3 +5539,65 @@ unexamined crate; on a large cold tree that is hundreds of requests, bounded onl
 `crates.io` versions endpoint is queried per crate with no batching. PyPI's equivalent question is
 untouched: `SdistFetcher` is reachable from the yank-lure path under the same yanked-only gate, so a cold
 PyPI tree has the analogous limitation and no equivalent flag.
+
+## D-141 — correcting D-139/D-140 on PyPI, and the real offline bug that was there instead
+
+**Trigger:** D-139 and D-140 both closed with the same residual claim — that PyPI carries the analogous
+cold-tree limitation to Cargo, its `SdistFetcher` reachable only behind the yank-lure gate. Asked to close
+that gap, the first step was to reproduce it. It does not exist.
+
+**The claim was wrong, and the mistake is worth naming precisely.** There are two `SdistFetcher`
+constructions in the CLI. `pypiLureSdist` (main.go) is the yanked-gated one used by `enrichYankLure` — the
+one examined when writing D-139. `adapterRegistry` separately builds the scanning adapter with
+`pypi.NewWithSdist(...)`, which wires the SAME fetcher type into the GENERAL install-surface path with no
+yank gate at all: `ExtractInstallSurface` calls `a.Sdist.Fetch` for every non-root PyPI package. The
+analogy to Cargo was asserted from the first construction without checking the second. Proven by scanning a
+cold PyPI tree (`six`, `markupsafe`, no local source anywhere): three install-surface hooks and ZERO
+`source-unavailable` gaps. PyPI has had cold-tree coverage all along.
+
+**What was actually broken: `-offline` discarded the fetcher entirely.** `NewWithSdist` returned a bare
+`&Adapter{}` when offline, leaving `a.Sdist == nil`, which `ExtractInstallSurface` handled with a bare
+`continue`. Two consequences, both wrong and the second worse:
+
+1. **A capability was thrown away.** `SdistFetcher.Fetch` already handles offline correctly — it serves from
+   its cache and returns `"not in cache (offline)"` without touching the network. Dropping the fetcher meant
+   sdists ALREADY CACHED went unanalyzed.
+2. **The skip was silent.** No gap was recorded, so an offline run reported `install_surface_gaps: 0` and
+   "0 partial install-surface extraction(s)" while having examined no PyPI dependency at all. That is a skip
+   rendered as an absence — the exact R-01 invisibility this codebase refuses, and the same shape as D-138's
+   silent truncation and D-140's stale gap. It matters most here because `-offline` is the mode people run
+   in locked-down CI, precisely where honest coverage is the point.
+
+**The fix is to stop dropping it.** `NewWithSdist` now passes `offline` THROUGH to the fetcher, which gates
+the network itself. The silent `continue` disappears as a consequence: with a fetcher present, an offline
+cache miss goes down the existing error path that already recorded a gap. The residual `a.Sdist == nil` case
+(a caller using `pypi.New()`) now discloses rather than skipping, so the honest behaviour does not depend on
+which constructor was used.
+
+**A shipped test asserted the bug, and was changed deliberately.**
+`TestExtractInstallSurfaceNilFetcher` read "nil fetcher should return nil" — it encoded the silent skip as
+the contract. That is a contract being corrected, not a test bent to fit a change, and it now asserts the
+gap with the reasoning inline so the reversal is legible.
+
+**Mutation-proven:** restoring `if offline { return &Adapter{} }` fails the constructor and
+no-network tests; restoring the bare `continue` fails the nil-fetcher disclosure test.
+
+**Validation:** full suite green (34 packages), `-race` clean on `internal/ecosystem/pypi`. Live CLI on the
+same cold PyPI tree, same binary pair: offline with a WARM cache goes from 0 hooks to 3 (cached sdists now
+analyzed); offline with a COLD cache goes from `0 gaps` — silently clean — to two `unreadable` gaps naming
+`six@1.16.0` and `markupsafe@2.1.3`. Online behaviour is unchanged.
+
+**A consequence for D-140 the owner should weigh.** D-140 made Cargo build.rs fetching opt-in, and the
+justification offered was that fetching per-dependency source would be "a substantial change to the tool's
+network posture." That argument was weaker than presented: depSNORT ALREADY fetches per-dependency source
+from a registry on every ordinary PyPI scan, by default. The two ecosystems are now inconsistent — PyPI
+fetches by default, Cargo only behind `-cargo-fetch-source` — and the opt-in choice was made partly on a
+premise this entry corrects. Flipping the default is a behaviour change and is not made here; it is raised
+so the decision can be revisited on accurate grounds.
+
+Residual limitations: wheel-only PyPI distributions still yield only `.pth` analysis, which is correct — a
+wheel has no setup.py or build backend to examine — but means a wheel-only dependency's install surface is
+thinner by nature, not by gap. An offline scan with a cold cache now reports one gap per PyPI dependency,
+which on a large tree is many lines; that is the honest count rather than noise, but it is a visible change
+for offline users. The npm/gem/nuget equivalents of this question remain unaudited — this entry corrects one
+wrong claim and fixes one real bug, and deliberately does not generalize from either.
