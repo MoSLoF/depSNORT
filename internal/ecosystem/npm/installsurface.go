@@ -220,7 +220,14 @@ func staticDirOf(prefix string) string {
 // the package is refused rather than followed. os.ReadDir returns entries
 // sorted by name and the target list arrives sorted, so the result is
 // deterministic without further sorting.
-func resolveExportsWildcards(reader *securefs.Reader, baseDir string, raw json.RawMessage) []string {
+//
+// When a bound stops the walk with material still unexamined, that is recorded
+// as a GapTruncated coverage gap rather than returned silently (R-01): a bound
+// that quietly drops entry modules reports "we looked and found nothing" when
+// the truth is "we stopped looking", which is the invisibility the gap layer
+// exists to prevent. One gap per package, naming which bounds tripped — not one
+// per skipped directory, which would drown the report it is meant to inform.
+func resolveExportsWildcards(reader *securefs.Reader, baseDir string, raw json.RawMessage, pkgID string, gaps *instsurf.Gaps) []string {
 	targets := exportsWildcardTargets(raw)
 	if len(targets) == 0 {
 		return nil
@@ -228,6 +235,24 @@ func resolveExportsWildcards(reader *securefs.Reader, baseDir string, raw json.R
 	var out []string
 	seen := map[string]bool{}
 	visits := 0
+	var hitMatches, hitVisits, hitDepth bool
+
+	// bounded reports whether a bound stops us here. Every call site is reached
+	// only when there is more to examine, so setting the flag means real
+	// truncation, never a walk that simply finished.
+	bounded := func(depth int) bool {
+		switch {
+		case depth > maxExportsWildcardDepth:
+			hitDepth = true
+		case len(out) >= maxExportsWildcardMatches:
+			hitMatches = true
+		case visits >= maxExportsWildcardVisits:
+			hitVisits = true
+		default:
+			return false
+		}
+		return true
+	}
 
 	for _, t := range targets {
 		prefix, suffix, ok := wildcardPrefixSuffix(t)
@@ -236,9 +261,7 @@ func resolveExportsWildcards(reader *securefs.Reader, baseDir string, raw json.R
 		}
 		var walk func(relDir string, depth int)
 		walk = func(relDir string, depth int) {
-			if depth > maxExportsWildcardDepth ||
-				len(out) >= maxExportsWildcardMatches ||
-				visits >= maxExportsWildcardVisits {
+			if bounded(depth) {
 				return
 			}
 			dirPath := baseDir
@@ -252,7 +275,9 @@ func resolveExportsWildcards(reader *securefs.Reader, baseDir string, raw json.R
 				return
 			}
 			for _, e := range entries {
-				if len(out) >= maxExportsWildcardMatches || visits >= maxExportsWildcardVisits {
+				// depth is not re-checked here: this loop is inside a directory
+				// already admitted at this depth.
+				if bounded(depth) {
 					return
 				}
 				visits++
@@ -286,6 +311,22 @@ func resolveExportsWildcards(reader *securefs.Reader, baseDir string, raw json.R
 		}
 		walk(staticDirOf(prefix), 0)
 	}
+
+	if gaps != nil && (hitMatches || hitVisits || hitDepth) {
+		var which []string
+		if hitMatches {
+			which = append(which, fmt.Sprintf("match cap %d", maxExportsWildcardMatches))
+		}
+		if hitVisits {
+			which = append(which, fmt.Sprintf("visit cap %d", maxExportsWildcardVisits))
+		}
+		if hitDepth {
+			which = append(which, fmt.Sprintf("depth cap %d", maxExportsWildcardDepth))
+		}
+		gaps.AddReason(pkgID, "package.json (exports wildcard resolution)", instsurf.GapTruncated,
+			fmt.Errorf("%s reached; wildcard-reachable entry modules past it were not analyzed",
+				strings.Join(which, ", ")))
+	}
 	return out
 }
 
@@ -293,13 +334,13 @@ func resolveExportsWildcards(reader *securefs.Reader, baseDir string, raw json.R
 // wildcard export targets, which need the tree to enumerate. Deduplicated
 // against the static candidates: a file can be both a concrete export and a
 // wildcard match.
-func npmEntryCandidatesResolved(m pkgManifest, reader *securefs.Reader, baseDir string) []string {
+func npmEntryCandidatesResolved(m pkgManifest, reader *securefs.Reader, baseDir, pkgID string, gaps *instsurf.Gaps) []string {
 	cands := npmEntryCandidates(m)
 	have := make(map[string]bool, len(cands))
 	for _, c := range cands {
 		have[c] = true
 	}
-	for _, w := range resolveExportsWildcards(reader, baseDir, m.Exports) {
+	for _, w := range resolveExportsWildcards(reader, baseDir, m.Exports, pkgID, gaps) {
 		if !have[w] {
 			have[w] = true
 			cands = append(cands, w)
@@ -407,7 +448,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		// entry file (pre-install tree, or a candidate the package does not ship)
 		// is normal and read quietly; only a referenced sibling that is refused
 		// becomes a gap (via the `read` closure passed to AnalyzeLoadTime).
-		for _, cand := range npmEntryCandidatesResolved(m, reader, absPkgDir) {
+		for _, cand := range npmEntryCandidatesResolved(m, reader, absPkgDir, n.ID, &gaps) {
 			src, err := reader.ReadFile(filepath.Join(absPkgDir, filepath.FromSlash(cand)))
 			if err != nil {
 				continue
@@ -536,7 +577,7 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		// the RedC2 evasion OPU-31 exists to catch, and gating it behind
 		// len(m.Scripts) > 0 reinstated that blind spot for publishable roots
 		// (the OPU-38 pass shipped with exactly that bug).
-		for _, cand := range npmEntryCandidatesResolved(m, reader, absRoot) {
+		for _, cand := range npmEntryCandidatesResolved(m, reader, absRoot, n.ID, &gaps) {
 			src, err := reader.ReadFile(filepath.Join(absRoot, filepath.FromSlash(cand)))
 			if err != nil {
 				continue

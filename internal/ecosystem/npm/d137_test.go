@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/securefs"
 )
@@ -68,6 +69,13 @@ func TestD137StaticDirOf(t *testing.T) {
 // d137Resolve runs the wildcard resolver directly over a fixture tree.
 func d137Resolve(t *testing.T, exports string, files map[string]string) []string {
 	t.Helper()
+	paths, _ := d137ResolveWithGaps(t, exports, files)
+	return paths
+}
+
+// d137ResolveWithGaps also returns the coverage gaps the resolution recorded.
+func d137ResolveWithGaps(t *testing.T, exports string, files map[string]string) ([]string, []instsurf.Gap) {
+	t.Helper()
 	dir := t.TempDir()
 	for rel, c := range files {
 		writeFile(t, dir, rel, c)
@@ -76,7 +84,9 @@ func d137Resolve(t *testing.T, exports string, files map[string]string) []string
 	if err != nil {
 		t.Fatal(err)
 	}
-	return resolveExportsWildcards(reader, reader.Root(), json.RawMessage(exports))
+	var gaps instsurf.Gaps
+	paths := resolveExportsWildcards(reader, reader.Root(), json.RawMessage(exports), "pkg:npm/wc-pkg@1.0.0", &gaps)
+	return paths, gaps.List()
 }
 
 func TestD137ResolutionShapes(t *testing.T) {
@@ -199,7 +209,8 @@ func TestD137SymlinkEscapeRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := resolveExportsWildcards(reader, reader.Root(), json.RawMessage(`{"./s/*": "./src/*.js"}`))
+	var gaps instsurf.Gaps
+	got := resolveExportsWildcards(reader, reader.Root(), json.RawMessage(`{"./s/*": "./src/*.js"}`), "pkg:npm/wc-pkg@1.0.0", &gaps)
 	for _, g := range got {
 		if strings.Contains(g, "escape") || strings.Contains(g, "secret") {
 			t.Errorf("followed a symlink out of the package: %q", g)

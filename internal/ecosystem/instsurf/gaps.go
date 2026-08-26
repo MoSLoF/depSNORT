@@ -57,6 +57,13 @@ const (
 	// but the ambiguity itself is a coverage signal — a repository-controlled
 	// duplicate could hide or suppress dependency-owned build code.
 	GapAmbiguousSource GapReason = "ambiguous-source"
+	// GapTruncated means a scan bound stopped an enumeration before it was
+	// exhausted, so material past the bound was never examined. Unlike the
+	// reasons above, nothing was refused and nothing failed to read — the
+	// scanner chose to stop. That is still a coverage gap: "we did not look"
+	// reported as "we looked and found nothing" is the exact invisibility this
+	// file exists to prevent, and a bound is just a slower way to arrive there.
+	GapTruncated GapReason = "scan-bound-truncated"
 	// GapUnreadable is any other I/O failure (permissions, I/O error).
 	GapUnreadable GapReason = "unreadable"
 )

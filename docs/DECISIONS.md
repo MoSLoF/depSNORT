@@ -5382,3 +5382,47 @@ match cap has the remainder unanalyzed without that being surfaced as a coverage
 entry modules per package, but it is a silent stop rather than a disclosed one. `exports` remains npm-only.
 Wildcard resolution reads the tree, so it finds nothing for a dependency whose source is not on disk (a
 pre-install tree with no `node_modules`), exactly as the concrete-path pass already behaved.
+
+## D-138 — a scan bound that truncates enumeration is a disclosed coverage gap
+
+**Trigger:** D-137's own residual note. Wildcard resolution stopped at three bounds — matches, directory
+entries examined, walk depth — and returned what it had, silently. That sits directly against R-01, the
+principle this repo's whole gap layer was built on: a refusal reported as an absence is
+attacker-triggerable invisibility. A bound is a slower route to the same place. "We stopped looking" was
+being rendered as "we looked and found nothing", and a package could put its loader past entry 64 of a
+wildcard-reachable directory to get there.
+
+**The fix:** a new `instsurf.GapTruncated` ("scan-bound-truncated"), recorded by `resolveExportsWildcards`
+whenever a bound stops it with material still unexamined. The gap is attributed to the package node and its
+detail names which bounds tripped and their limits. Unlike every other reason in that file, nothing was
+refused and nothing failed to read — the scanner chose to stop — which is exactly why it needed its own
+reason rather than being folded into `GapUnreadable`.
+
+**One gap per package, not one per skipped directory.** A broad wildcard over a large tree can trip the
+bound at many points; emitting a gap at each would drown the coverage report this exists to inform. The
+three bound flags are collected during the walk and rendered once at the end.
+
+**The off-by-one is the whole correctness question, and it is tested directly.** A package with EXACTLY the
+cap's worth of matches was fully examined and must NOT be reported as truncated — otherwise the fix attaches
+a coverage gap to a package whose surface is completely known, which is its own kind of dishonesty. The
+`bounded` helper is only consulted at points reached when there is more to examine, so the flag means real
+truncation rather than a walk that finished. `TestD138ExactCapIsNotTruncation` pins it, and the mutation
+that trips the cap one entry early fails it with `expected all 64 matches, got 63`.
+
+**Mutation-proven:** removing the gap recording fails both the unit disclosure test and the end-to-end
+propagation test; the off-by-one mutation above fails the exact-cap boundary.
+
+**Validation:** full suite green (34 packages), `-race` clean on `internal/ecosystem/npm` and
+`internal/ecosystem/instsurf`. Live CLI on a package with 200 wildcard-reachable modules against a cap of
+64: `install_surface_gaps: 1`, `install_surface_gap_reasons: ["scan-bound-truncated x1"]`, the detail naming
+the package and `package.json (exports wildcard resolution)`, a stderr warning, and the coverage line
+concluding *"This report is NOT an all-clear."* The same fixture at 40 modules — under the cap — reports
+`install_surface_gaps: 0` and no reasons, so the disclosure tracks actual truncation rather than merely the
+presence of a wildcard.
+
+Residual limitations: only the wildcard resolver discloses its bounds. The `exports` JSON walk's own
+`maxExportsDepth`/`maxExportsEntries` (D-136) still truncate silently — they bound a manifest already
+size-capped by the contained reader and are unreachable for legitimate input, but that is an argument about
+likelihood, not a disclosure. `AnalyzeLoadTime`'s 16-reference sibling cap and gomod's `maxGoFiles` are the
+same shape elsewhere in the tree. Making bound-disclosure uniform across every capped enumeration is the
+honest follow-up; this entry closes one instance and names the rest rather than implying the class is done.
