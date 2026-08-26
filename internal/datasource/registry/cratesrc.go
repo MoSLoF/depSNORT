@@ -74,6 +74,46 @@ func (c *CrateSourceClient) ResolveBuildRS(ctx context.Context, name, req string
 	return b, version, found, err
 }
 
+// BuildRSAt returns the build.rs of the EXACT published version given, or
+// found=false when that version ships none.
+//
+// This is deliberately not ResolveBuildRS with the version as its req.
+// ResolveBuildRS answers "what would a build pull for this requirement", so it
+// skips yanked versions — right for the yank-lure enrichment it was written
+// for, wrong for analyzing a LOCKED dependency. A lockfile may legitimately pin
+// a version that was yanked afterwards (a stale lock is common), and that
+// pinned version is exactly what the build installs and what its build.rs will
+// run. Resolving it through the req path would find no satisfying non-yanked
+// version and silently return nothing for precisely those crates.
+//
+// The published SHA-256 is still looked up and verified, so exactness costs no
+// integrity checking.
+func (c *CrateSourceClient) BuildRSAt(ctx context.Context, name, version string) (buildRS []byte, found bool, err error) {
+	cksum, ok, err := c.checksumOf(ctx, name, version)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	return c.buildRS(ctx, name, version, cksum)
+}
+
+// checksumOf returns the published SHA-256 for an exact version, yanked or not.
+func (c *CrateSourceClient) checksumOf(ctx context.Context, name, version string) (cksum string, ok bool, err error) {
+	raw, err := c.getJSON(ctx, "https://crates.io/api/v1/crates/"+url.PathEscape(name)+"/versions", "cargo-source-versions|"+name)
+	if err != nil {
+		return "", false, err
+	}
+	var resp crateVersionsResp
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", false, fmt.Errorf("cargo-source: parsing versions for %s: %w", name, err)
+	}
+	for _, v := range resp.Versions {
+		if v.Num == version && v.Checksum != "" {
+			return v.Checksum, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 type crateVersionsResp struct {
 	Versions []struct {
 		Num      string `json:"num"`

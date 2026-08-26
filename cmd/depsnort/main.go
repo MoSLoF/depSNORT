@@ -557,6 +557,73 @@ func enrichCargoYankLure(n *graph.Node, newest string, deps *registry.CargoDepsC
 	}
 }
 
+// enrichCargoBuildRS fetches build.rs for cargo crates whose source was NOT on
+// disk, and runs it through the same install-surface analysis a vendored crate
+// gets — so the OPU-39 markers, and every other VC-002 check, see the same
+// content either way.
+//
+// This exists because Cargo install-surface analysis is otherwise local-only
+// (vendor/ or $CARGO_HOME/registry/src). On a cold CI clone that means no
+// analysis at all, which is exactly the posture a gating scanner runs in and
+// exactly when a live-but-not-yet-yanked compromise needs catching (D-139).
+//
+// Opt-in: it costs one registry fetch per unexamined crate, so it stays behind
+// -cargo-fetch-source rather than changing what every existing scan does.
+// -offline still wins, via the client's own gate.
+//
+// Only nodes the extraction actually reported as source-unavailable are
+// fetched. Crates already read from vendor/ or CARGO_HOME are left alone: their
+// on-disk content is what the build will use, and re-fetching could disagree
+// with it.
+// The returned set names the nodes whose install surface this pass DID resolve,
+// so the caller can clear their stale source-unavailable gaps: reporting "not
+// examined" for a crate that was examined is the same dishonesty as hiding a
+// truncation, pointed the other way (D-138).
+func enrichCargoBuildRS(g *graph.Graph, src *registry.CrateSourceClient, unavailable map[string]bool) (emit.DataSourceCoverage, map[string]bool) {
+	cov := emit.DataSourceCoverage{Name: "cargo-source"}
+	examined := map[string]bool{}
+	if src == nil || len(unavailable) == 0 {
+		return cov, examined
+	}
+	for _, n := range g.SortedNodes() {
+		if n.Kind != graph.KindPackage || n.Ecosystem != "cargo" || !unavailable[n.ID] {
+			continue
+		}
+		if n.Name == "" || n.Version == "" {
+			continue
+		}
+		cov.Stats.Queried++
+		// The EXACT locked version, not a requirement resolution: a lockfile may
+		// pin a version yanked after the fact, and that pinned version is what
+		// the build installs and runs.
+		buildRS, found, err := src.BuildRSAt(context.Background(), n.Name, n.Version)
+		if err != nil {
+			cov.Stats.Gaps++
+			if cov.Error == "" {
+				cov.Error = err.Error()
+			}
+			continue
+		}
+		if !found {
+			// The crate genuinely ships no build.rs. Nothing to analyze, and not
+			// a gap — this is the answer, not a failure to get one, so the node
+			// counts as examined.
+			examined[n.ID] = true
+			continue
+		}
+		examined[n.ID] = true
+		surface := installsurface.AnalyzeRust(string(buildRS))
+		if len(surface.Hooks) > 0 {
+			instsurf.AddToGraph(g, n, surface)
+		}
+		if n.Attr == nil {
+			n.Attr = map[string]string{}
+		}
+		n.Attr["cargo.build_rs_source"] = "fetched"
+	}
+	return cov, examined
+}
+
 // enrichPyPIYankLure records, on a flagged PyPI package, whether the live-newest's
 // own setup.py is hostile at install time — the direct PyPI payload analogue of the
 // cargo build.rs case (Increment 5). Unlike cargo, the payload is usually the
@@ -797,6 +864,11 @@ type resolveResult struct {
 	ExtractorGaps int
 	GapReasons    map[string]int
 	GapDetails    []string
+	// SourceUnavailable holds the node IDs whose install surface could not be
+	// examined because the package's source was not on disk. -cargo-fetch-source
+	// uses it to know exactly which crates to fetch, rather than re-fetching
+	// ones already scanned from vendor/ or CARGO_HOME.
+	SourceUnavailable map[string]bool
 }
 
 // resolveProjects resolves each project and merges the results into a single
@@ -809,7 +881,7 @@ type resolveResult struct {
 // the first drift report would be an artifact of the tool disagreeing with
 // itself about how to read a tree.
 func resolveProjects(projects []discovered, extractSurface bool) resolveResult {
-	out := resolveResult{Graph: graph.New(), GapReasons: map[string]int{}}
+	out := resolveResult{Graph: graph.New(), GapReasons: map[string]int{}, SourceUnavailable: map[string]bool{}}
 	for _, p := range projects {
 		sub, err := p.Adapter.Resolve(p.Path)
 		if err != nil {
@@ -831,6 +903,9 @@ func resolveProjects(projects []discovered, extractSurface bool) resolveResult {
 						out.ExtractorGaps += len(gs)
 						for _, gp := range gs {
 							out.GapReasons[string(gp.Reason)]++
+							if gp.Reason == instsurf.GapUnavailable && gp.Package != "" {
+								out.SourceUnavailable[gp.Package] = true
+							}
 							if len(out.GapDetails) < maxGapDetails {
 								out.GapDetails = append(out.GapDetails, p.Path+": "+gp.String())
 							}
@@ -859,6 +934,7 @@ func cmdScan(args []string) int {
 	failIncomplete := fs.Bool("fail-on-incomplete", false, "degraded resolution coverage fails the run (exit 3)")
 	offline := fs.Bool("offline", false, "use only the local OSV cache; never touch the network")
 	noOSV := fs.Bool("no-osv", false, "skip the OSV data-source layer entirely")
+	cargoFetchSrc := fs.Bool("cargo-fetch-source", false, "fetch build.rs from crates.io for cargo dependencies whose source is not on disk (vendor/ or CARGO_HOME), so install-surface analysis covers a cold clone; one registry fetch per unexamined crate, and -offline still wins")
 	cacheDir := fs.String("osv-cache", defaultCacheDir("osv"), "OSV advisory cache directory")
 	snapshotPath := fs.String("osv-snapshot", "", "path to a JSON advisory snapshot to import into the OSV cache before scanning (bootstraps -offline with zero network calls)")
 	exportPath := fs.String("osv-export", "", "write this scan's OSV results to path as a JSON snapshot for later -osv-snapshot import; requires live network access (incompatible with -offline/-no-osv)")
@@ -1135,6 +1211,39 @@ func cmdScan(args []string) int {
 				dataSourceGaps = append(dataSourceGaps, lureCov.Name)
 			}
 			info.DataSources = append(info.DataSources, lureCov)
+		}
+
+		// Cargo build.rs fetch for unvendored crates (D-140), opt-in. Reuses the
+		// same cargo-source client and cache as the yank-lure path above, so a
+		// crate needed by both is fetched once.
+		if *cargoFetchSrc {
+			srcCov, examined := enrichCargoBuildRS(g, cargoLureSrc, pass.SourceUnavailable)
+			if srcCov.Stats.Queried > 0 || srcCov.Error != "" {
+				if srcCov.Error != "" {
+					fmt.Fprintf(os.Stderr, "depsnort: warning: %s coverage degraded: %v\n", srcCov.Name, srcCov.Error)
+					dataSourceGaps = append(dataSourceGaps, srcCov.Name)
+				}
+				info.DataSources = append(info.DataSources, srcCov)
+			}
+			// Clear the source-unavailable gaps the fetch actually resolved. Leaving
+			// them would report a crate as unexamined that this pass examined.
+			for id := range examined {
+				if gapReasonCounts[string(instsurf.GapUnavailable)] > 0 {
+					gapReasonCounts[string(instsurf.GapUnavailable)]--
+					if gapReasonCounts[string(instsurf.GapUnavailable)] == 0 {
+						delete(gapReasonCounts, string(instsurf.GapUnavailable))
+					}
+					extractorGaps--
+				}
+				marker := string(instsurf.GapUnavailable) + ": " + id + " ("
+				kept := gapDetails[:0]
+				for _, d := range gapDetails {
+					if !strings.Contains(d, marker) {
+						kept = append(kept, d)
+					}
+				}
+				gapDetails = kept
+			}
 		}
 
 		// PyPI real transitive-depth reconstruction: a post-merge stage, same
