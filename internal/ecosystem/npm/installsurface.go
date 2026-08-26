@@ -263,11 +263,8 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			// hooks. Leave them unscored to avoid FPs on build steps.
 			continue
 		}
-		if len(m.Scripts) == 0 {
-			continue // nothing to analyze
-		}
-		// Publishable package with install scripts. Analyze them the same way the
-		// main loop analyzes a dependency's hooks.
+		// Publishable package. Analyze it the same way the main loop analyzes a
+		// dependency: lifecycle scripts when present, and ALWAYS the entry module.
 		read := func(rel string) ([]byte, bool) {
 			clean := filepath.Clean(filepath.FromSlash(rel))
 			if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
@@ -279,10 +276,17 @@ func (*Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			}
 			return b, true
 		}
-		surface := installsurface.Analyze(m.Scripts, read)
-		addSurfaceToGraph(g, n, surface)
+		if len(m.Scripts) > 0 {
+			surface := installsurface.Analyze(m.Scripts, read)
+			addSurfaceToGraph(g, n, surface)
+		}
 		// Load-time (entry-module) analysis: the same gap that exists for
-		// lockfile-resolved packages also exists here (OPU-31).
+		// lockfile-resolved packages also exists here (OPU-31). This must NOT be
+		// gated on the package having lifecycle scripts — a package with no
+		// scripts at all whose entry module runs a loader on import is precisely
+		// the RedC2 evasion OPU-31 exists to catch, and gating it behind
+		// len(m.Scripts) > 0 reinstated that blind spot for publishable roots
+		// (the OPU-38 pass shipped with exactly that bug).
 		for _, cand := range npmEntryCandidates(m) {
 			src, err := reader.ReadFile(filepath.Join(absRoot, filepath.FromSlash(cand)))
 			if err != nil {
