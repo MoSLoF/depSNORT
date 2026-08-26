@@ -5426,3 +5426,56 @@ size-capped by the contained reader and are unreachable for legitimate input, bu
 likelihood, not a disclosure. `AnalyzeLoadTime`'s 16-reference sibling cap and gomod's `maxGoFiles` are the
 same shape elsewhere in the tree. Making bound-disclosure uniform across every capped enumeration is the
 honest follow-up; this entry closes one instance and names the rest rather than implying the class is done.
+
+## D-139 — correction to D-133: OPU-39's Cargo markers require crate source already on disk
+
+**Trigger:** a depSNORT evaluation of `MoSLoF/fluxfang` reported 364 install-surface gaps
+(`source-unavailable`) across the Cargo side and noted the new OPU-39 build.rs markers "didn't fire here."
+The eval read that as a property of the scan. Investigating it shows it is a property of the TOOL that
+D-133 — which I wrote — failed to disclose.
+
+**What D-133 claimed and what is actually true.** D-133 presents the three markers as closing the
+arrayref/proc-macro1 gap, and its residual-limitations paragraph lists dataflow imprecision, the
+`reqwest`/`ureq` client scope, and the git-subcommand judgment call. It says nothing about needing the
+crate's source to be locally present. Tracing the code:
+
+- `scanCargoDependency` resolves a dependency's source through `findCargoDependencyDir`, which looks in
+  `vendor/<name>`, `vendor/<name>-<version>`, and then `$CARGO_HOME/registry/src/*/<name>-<version>`. All
+  local. When none exists it records `GapUnavailable` and returns; the markers never receive content.
+- A network path for build.rs DOES exist — `registry.CrateSourceClient.ResolveBuildRS` — but it is reachable
+  only from `enrichYankLure`, behind a chain of gates: the crate must be YANKED, must match
+  `YankLureShape()`, and only the build-deps INTRODUCED by its live-newest version are fetched. No flag
+  exposes it for the general case.
+
+**Empirically reproduced, both directions, on one fixture.** A Cargo project depending on `arrayref@0.3.7`,
+scanned twice with the same binary: with the crate vendored (an IOC-neutered reproduction of the campaign's
+own build.rs — TLS bypass, fetch, exec) it fires `VC-002f` critical/block and `VC-002e` high, exit 1. With
+`vendor/` removed and `CARGO_HOME` pointed at an empty directory — a cold cache, which is what CI has — the
+same project yields zero hook nodes, one `source-unavailable` gap, exit 0. Same crate, same malicious
+build.rs; the only variable is whether the source was already on disk.
+
+**Why this matters more than an ordinary caveat.** The campaign D-133 was built for is the case where it
+bites hardest. During a compromise's exposure window the malicious versions are LIVE and not yet yanked —
+yanking is what happens after discovery — so the yank-lure fetch path does not reach them either. Detection
+therefore depends entirely on the scanning machine already holding the crate source. A developer who has run
+`cargo build` has it and is covered. A cold CI clone, which is the posture a gating scanner is usually
+deployed in, does not and is not.
+
+**Not silently wrong — the gap IS disclosed.** `GapUnavailable` is recorded per unreachable crate and
+surfaces as `install_surface_gaps` with `source-unavailable`, and the coverage line says the report is not
+an all-clear. The tool tells the truth about what it did not examine; D-133's prose did not. This entry
+corrects the ledger, which is the record people actually read to decide what the markers cover.
+
+**Deliberately not changed here.** Wiring `CrateSourceClient` into the general Cargo install-surface path
+would make an ordinary scan fetch build.rs for every unvendored dependency — a substantial change to the
+tool's network posture (N registry fetches per scan, per-crate, on a project that may have hundreds), and
+one that interacts with `-offline`, cache policy, and the data-source coverage model. That is a design
+decision with real cost, not a defect fix, so it is raised rather than taken unilaterally. The options are:
+leave detection local-only and document it (status quo plus this entry); add an opt-in flag that fetches
+build.rs for unvendored crates; or make fetching the default with `-offline` as the escape. None is chosen
+here.
+
+Residual limitations: this entry corrects D-133's disclosure; it does not change behaviour, so every scan of
+a cold Cargo tree still reports `source-unavailable` rather than analysis. The equivalent question for other
+ecosystems was not examined — PyPI has an `SdistFetcher` used more broadly than the Cargo client, and
+whether npm/gem/nuget dependency analysis has comparable source-availability preconditions is unaudited.
