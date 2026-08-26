@@ -1359,8 +1359,11 @@ func AnalyzeRuby(extconfRb, gemspec, rakefile string) Surface {
 		s.Hooks = append(s.Hooks, h)
 	}
 	if gemspec != "" {
+		caps, ev := scanCaps(gemspec)
 		if strings.Contains(gemspec, "extensions") && strings.Contains(gemspec, "extconf") {
-			caps, ev := scanCaps(gemspec)
+			// A native-extension declaration is itself a narrow precondition, so
+			// ANY capability co-occurring with it is reported — including a bare
+			// CapExec, which the extconf.rb it points at will run at install.
 			if len(caps) > 0 {
 				s.Hooks = append(s.Hooks, Hook{
 					Name:     "gemspec:extensions",
@@ -1369,9 +1372,45 @@ func AnalyzeRuby(extconfRb, gemspec, rakefile string) Surface {
 					Evidence: ev,
 				})
 			}
+		} else if gemspecBodyPayload(caps) {
+			// The gemspec BODY runs as Ruby at `gem build`/`gem install`, so a
+			// payload here needs no extension declaration to execute — the gap
+			// D-150 closes. The gate is deliberately NOT "any capability": a
+			// gemspec near-universally shells out to `git ls-files` to populate
+			// s.files, which trips CapExec on essentially every real gem, so
+			// firing on exec alone would flag the whole ecosystem. Exec is table
+			// stakes for a gemspec; network egress, obfuscation, a fetch-then-run
+			// cradle, or credential access in one is the tell — the same
+			// exec-is-ordinary / capability-is-the-signal split VC-002e/f draw
+			// for other executed hooks.
+			s.Hooks = append(s.Hooks, Hook{
+				Name:     "gemspec:body",
+				Command:  truncateStr(gemspec, 400),
+				Caps:     caps,
+				Evidence: ev,
+				Sinks:    findSinks(gemspec),
+			})
+			for _, u := range dedupe(urlRe.FindAllString(gemspec, -1)) {
+				s.Hooks[len(s.Hooks)-1].Artifacts = append(s.Hooks[len(s.Hooks)-1].Artifacts, Artifact{Ref: u, Remote: true})
+			}
 		}
 	}
 	return s
+}
+
+// gemspecBodyPayload decides whether a gemspec's scanned capabilities, absent a
+// native-extension declaration, are worth a finding. Exec ALONE never is: the
+// `git ls-files` idiom that populates s.files gives nearly every gemspec a
+// CapExec, so exec-only is the benign baseline. Any of the risk capabilities —
+// network, obfuscation, cradle, credentials — present alongside or without it is.
+func gemspecBodyPayload(caps []Capability) bool {
+	for _, c := range caps {
+		switch c {
+		case CapNetwork, CapObfuscation, CapCradle, CapCredentials:
+			return true
+		}
+	}
+	return false
 }
 
 // ---- Rust analysis ----------------------------------------------------------

