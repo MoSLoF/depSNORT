@@ -5782,3 +5782,84 @@ can serve an endless chain of distinct names that the per-node `expanded` guard 
 `AttrFrontier` is still written and still read by nothing; `DepthTruncated` routes around it rather than
 fixing it, and the other two frontier causes remain fused in `Result.Frontier`. The audit covered
 `internal/expand` and `internal/datasource`; the check layer and the emitters were not swept.
+
+## D-144 — the check-layer and emitter cap sweep
+
+**Trigger:** D-143 closed by excluding these two layers explicitly. This is that sweep, and it completes the
+arc D-142 started: every bound in the tool has now been looked at, in extraction, in resolution, in the
+data sources, and here in the checks and the emitters.
+
+**The class of bound is different here, and that changes what "honest" means.** In D-142 and D-143 a bound
+meant *we did not look*. In this layer the tool looked at everything and caps only what it *prints*. A
+display cap is legitimate — the alternative is the 1,284-entry, 224-page report the PDF's own comment
+records as the reason `maxAdvisoryShown` exists. Such a cap is dishonest only when the count is lost, the
+truncation is unsignposted, or **the cut systematically drops the items that matter most**. That third test
+is the one worth applying carefully, and it is the one that found the defect.
+
+**Six of the seven bounds are honest, and the claims attached to them were verified rather than believed.**
+Three separate comments assert some form of "the complete list is in the JSON" — precisely the shape of the
+`maxGoFiles` comment D-142 caught lying — so each was checked against the code:
+`verdict.Result.Findings` carries no cap, so the PDF's advisory-cap disclosure is true; `RootCoverage.Names`
+is the whole split of the attribute, so `maxCoverageNameChars` truncates only the PDF's copy, and
+`truncateRunes` appends an ellipsis rather than cutting silently; `Finding.ReachableRoots` is a real emitted
+field, so `maxListedReachableRoots` caps prose alone. `maxUnverifiableDetails` and `maxGapDetails` both keep
+an uncapped count beside a bounded sample. Every one of these claims held.
+
+### The defect: VC-008's advisory ids stopped existing past the cap
+
+VC-008 aggregates a package's advisories into ONE finding (D-14, and the axios regression that produced 25
+findings for one package). The evidence prose lists at most `maxListedAdvisories` = 8 ids and appends
+"+N more". The count in the title is honest and the truncation is signposted — and the ids past the cap were
+carried in no output format whatsoever. Not JSON, not SARIF, not the PDF. The report told an operator that
+three further advisories applied to this package and gave them no way, in any format, to learn which three.
+
+**The selection rule made it materially worse, in a security-relevant direction.** The listed ids were the
+first 8 of `sort.Strings(ids)`. CVE identifiers sort chronologically, so the sample was the eight OLDEST
+advisories and the ones hidden were systematically the NEWEST — and because "CVE-" sorts before "GHSA-", a
+package with eight or more CVEs hid every GHSA it had. Reproduced before any change: of eleven advisories,
+the prose showed CVE-2015 through CVE-2018 and hid CVE-2025, CVE-2026 and the GHSA behind "+3 more".
+
+**The fix is the one this codebase already reaches for: make the cap cosmetic rather than lossy.**
+`Finding.Advisories` carries the complete sorted set, so the prose bound decides presentation and never
+retention. The same reasoning that put `ReachableRoots` and `EPSS` on the finding as structured data rather
+than prose applies here, and this is the field that was missing from that set.
+
+**Ordering: the principle was already stated in this file, one level up.** VC-008 already ranks FINDINGS by
+peak EPSS so that "the vulnerabilities most likely to be exploited in the wild surface first" — its own
+words. The ids INSIDE a finding were ordered alphabetically. `rankAdvisoryIDs` applies the existing signal
+at the existing granularity: descending exploit probability when EPSS is present, sorted order as the
+deterministic fallback, because an advisory record carries no severity field and inventing a proxy for one
+would be a conclusion the data does not support. Sorted order is also the tie-break, which is what keeps the
+evidence string diffable in a CI gate (D-09).
+
+**SARIF needed the same field, and finding that out required correcting a wrong reading.** An initial check
+appeared to show SARIF already carrying the capped ids. It did not — the flag had landed after the
+positional argument, so Go's `flag` package stopped parsing and the file was JSON. Read correctly, SARIF's
+property bag mapped six fields and `advisories` was not among them. SARIF is the format CI actually ingests,
+so a list recoverable only from `-format json` is not recoverable where it matters most; the property is now
+mapped there too.
+
+**Mutation-proven, and two of my own tests were vacuous until the mutations said so.**
+`TestD144AdvisoriesAreSortedAndComplete` passed against a mutation that populated NOTHING, because a
+sortedness loop over an empty slice is trivially true — the test asserted completeness in its name only. And
+nothing covered the tie-break contract: turning the comparator into the non-strict `>=` left every test
+green. Both were fixed, and both now fail against exactly those mutations. Beyond them: dropping the field
+fails the survival tests; populating it from the capped sample instead of the full set fails; reverting the
+ranking fails the EPSS ordering test; ignoring scores entirely fails; removing the malicious filter fails the
+guard that keeps MAL- advisories with VC-001; deleting the SARIF property fails the SARIF test.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/check/builtin`, `internal/emit`, `internal/verdict`. Live CLI end to end via `-osv-snapshot` (OSV
+itself is unreachable from this environment): a package with eleven advisories reports "11 known
+vulnerabilities", prose "+3 more", and both JSON and SARIF carrying all eleven ids, with CVE-2025-9001,
+CVE-2026-9002 and the GHSA recoverable only through the new field.
+
+Residual limitations: the PDF still shows a bounded sample and still points readers to the JSON for the
+rest, which is now true for advisory ids as well as findings but still means the printed document is not
+self-sufficient. `maxUnverifiableDetails` prints ten examples after a sentence that states the true count,
+so the shortfall is inferable rather than marked — weaker than the explicit "+N more" used elsewhere, and
+left alone rather than widened here. `rankAdvisoryIDs` improves WHICH ids the prose keeps only when `-epss`
+is on; without it the sample is still the alphabetically-first, which for CVE ids is still the oldest — the
+loss is no longer permanent, but the default sample is still not the most interesting one. And ordering by
+exploit probability is not ordering by severity: EPSS predicts exploitation, not impact, and no severity
+field exists in an advisory record to sort by.

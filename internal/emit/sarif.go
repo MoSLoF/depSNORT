@@ -197,6 +197,15 @@ func (SARIF) Emit(w io.Writer, g *graph.Graph, res verdict.Result, info RunInfo)
 		if f.Contained {
 			props["contained"] = "true"
 		}
+		// The COMPLETE advisory set, not the bounded sample the message prose
+		// carries. VC-008 folds a package's advisories into one finding and
+		// spells only the first few into the evidence; without this property a
+		// SARIF consumer read "+3 more" and had no way to learn which three
+		// (D-144). SARIF is the format CI actually ingests, so a list recoverable
+		// only from -format json is not recoverable where it matters most.
+		if len(f.Advisories) > 0 {
+			props["advisories"] = strings.Join(f.Advisories, ", ")
+		}
 		// Exploit-prediction summary as structured properties (from -epss), so a
 		// code-scanning dashboard can rank or threshold on exploit probability
 		// without parsing the evidence prose.

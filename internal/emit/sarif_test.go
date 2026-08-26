@@ -186,3 +186,34 @@ func TestSARIFExposesEPSSProperties(t *testing.T) {
 		t.Errorf("epssPercentile property = %v, want 0.99000", props["epssPercentile"])
 	}
 }
+
+// TestD144SARIFCarriesTheCompleteAdvisorySet: VC-008's evidence prose holds a
+// bounded sample ("+N more"), so without an explicit property the ids past the
+// cap reach no SARIF consumer at all. SARIF is what CI ingests, so a list
+// recoverable only from -format json is not recoverable where it matters.
+func TestD144SARIFCarriesTheCompleteAdvisorySet(t *testing.T) {
+	g := graph.New()
+	id := "pkg:npm/widget@1.0.0"
+	g.AddNode(&graph.Node{ID: id, Kind: graph.KindPackage, Ecosystem: "npm", Name: "widget", Version: "1.0.0"})
+	res := verdict.Result{Findings: []finding.Finding{{
+		CheckID: "VC-008", Axis: finding.AxisVuln, Severity: finding.SevMedium,
+		GateClass: finding.GateAdvisory, Confidence: 1, NodeID: id,
+		Title:      "3 known vulnerabilities",
+		Evidence:   "widget@1.0.0 is affected by CVE-2020-1, +2 more",
+		Advisories: []string{"CVE-2020-1", "CVE-2026-9002", "GHSA-aaaa-bbbb-cccc"},
+	}}}
+
+	var buf bytes.Buffer
+	if err := (SARIF{}).Emit(&buf, g, res, RunInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"CVE-2026-9002", "GHSA-aaaa-bbbb-cccc"} {
+		if strings.Contains(res.Findings[0].Evidence, want) {
+			t.Fatalf("precondition: %s must be past the prose cap", want)
+		}
+		if !strings.Contains(out, want) {
+			t.Errorf("%s is unrecoverable from SARIF", want)
+		}
+	}
+}
