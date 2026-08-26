@@ -123,9 +123,23 @@ func (c *Client) fetch(ctx context.Context, urlPath, cacheKey string) fetchResul
 	if resp.StatusCode != http.StatusOK {
 		return fetchResult{out: outGap, err: fmt.Errorf("go-proxy: %s: status %d", urlPath, resp.StatusCode)}
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	// Read ONE byte past the cap so an oversize body is detectable. Both
+	// consumers of this function parse line-oriented text — @v/list is
+	// newline-separated versions, .mod is go.mod source — not JSON, so a
+	// silently truncated read does not fail to parse the way a cut-off JSON
+	// document would. It yields a SHORTER list, or a go.mod missing requires,
+	// with no error: the caller cannot tell a complete answer from a partial
+	// one. Worse, the cut lands mid-line, so the final entry is a fragment
+	// ("v1.708309.") that never existed — truncation manufacturing a version
+	// rather than merely dropping some (D-143). An oversize body is therefore
+	// a gap, not a partial answer.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
 		return fetchResult{out: outGap, err: err}
+	}
+	if len(raw) > maxResponseSize {
+		return fetchResult{out: outGap, err: fmt.Errorf(
+			"go-proxy: %s: response exceeds %d byte limit; refusing a truncated read", urlPath, maxResponseSize)}
 	}
 	now := c.Now
 	if now == nil {
