@@ -3,6 +3,7 @@ package pypi
 import (
 	"testing"
 
+	"ihbv.io/depsnort/internal/ecosystem/instsurf"
 	"ihbv.io/depsnort/internal/graph"
 	"ihbv.io/depsnort/internal/installsurface"
 )
@@ -146,12 +147,28 @@ func TestAnalyzePythonSafePthFile(t *testing.T) {
 	}
 }
 
+// TestExtractInstallSurfaceNilFetcher pins the CORRECTED contract (D-141).
+//
+// This test previously asserted the opposite — that a nil fetcher returns no
+// error — which encoded the bug: with no fetcher, every dependency's install
+// surface goes unexamined, and returning nothing reported that as "nothing to
+// find". A skip rendered as an absence is the R-01 invisibility this codebase
+// refuses everywhere else. The dependency is now disclosed as a gap.
 func TestExtractInstallSurfaceNilFetcher(t *testing.T) {
 	a := &Adapter{Sdist: nil}
 	g := graph.New()
 	g.AddNode(&graph.Node{ID: "pkg:pypi/foo@1.0.0", Ecosystem: "pypi", Name: "foo", Version: "1.0.0"})
-	if err := a.ExtractInstallSurface(".", g); err != nil {
-		t.Errorf("nil fetcher should return nil, got %v", err)
+
+	err := a.ExtractInstallSurface(".", g)
+	if err == nil {
+		t.Fatal("a nil fetcher leaves the dependency unexamined; that must surface as a gap, not silence")
+	}
+	gaps := instsurf.GapsOf(err)
+	if len(gaps) != 1 || gaps[0].Package != "pkg:pypi/foo@1.0.0" {
+		t.Fatalf("expected one gap naming the unexamined package, got %v", gaps)
+	}
+	if gaps[0].Reason != instsurf.GapUnavailable {
+		t.Errorf("gap reason = %q, want %q", gaps[0].Reason, instsurf.GapUnavailable)
 	}
 }
 

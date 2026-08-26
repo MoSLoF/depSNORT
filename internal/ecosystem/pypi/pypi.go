@@ -54,10 +54,19 @@ func New() *Adapter { return &Adapter{} }
 
 // NewWithSdist returns a PyPI adapter with sdist fetching enabled for
 // install-surface analysis.
+//
+// offline is passed THROUGH to the fetcher rather than used to drop it. The
+// fetcher already refuses the network when offline and serves from its cache,
+// so keeping it has two effects an offline scan wants: an sdist already cached
+// is still analyzed, and one that is not becomes a DISCLOSED gap ("not in
+// cache (offline)") instead of a silent skip.
+//
+// Dropping it did the opposite (D-141): every PyPI dependency's install
+// surface went unexamined and the run still reported "0 partial
+// install-surface extraction(s)" — a skip rendered as an absence, which is
+// the R-01 invisibility this codebase exists to refuse. -offline is a mode
+// people run precisely where honest coverage matters most.
 func NewWithSdist(cache *datasource.Cache, offline bool) *Adapter {
-	if offline {
-		return &Adapter{}
-	}
 	return &Adapter{Sdist: NewSdistFetcher(cache, offline)}
 }
 
