@@ -200,19 +200,26 @@ exit codes:
 // happened (R-01). Exceeding the cap is disclosed by summarizeReasons.
 const maxGapDetails = 25
 
-// aliasCandidates picks the coordinates worth asking OSV about. A package whose
-// advisories are ALL CVE-primary already carries its CVE identity in the id, so
-// querying it would spend a request to learn nothing; only a non-CVE id (GHSA-,
-// GO-, PYSEC-, …) can be hiding one. This is what keeps hydration from adding a
-// request per vulnerable package to every scan (D-146).
-func aliasCandidates(g *graph.Graph, ctx *check.Context) []datasource.Coord {
+// hydrationCandidates picks the coordinates worth asking OSV's /v1/query about.
+//
+// D-146 restricted this to packages holding a non-CVE advisory id, because the
+// only thing being fetched then was a CVE identity and a CVE-primary id already
+// carries its own. D-147 also fetches SEVERITY, which querybatch never returns
+// for ANY advisory, so that restriction no longer holds: a package whose
+// advisories are all CVEs still has no severity until we ask.
+//
+// What still bounds the cost is that only a package with a real, non-malicious
+// advisory is ever queried — malicious ones are VC-001's and never reach VC-008,
+// and a clean package costs nothing. On a scan with no vulnerabilities this
+// makes no requests at all.
+func hydrationCandidates(g *graph.Graph, ctx *check.Context) []datasource.Coord {
 	var out []datasource.Coord
 	for _, n := range g.SortedNodes() {
 		if n.Version == "" {
 			continue
 		}
 		for _, a := range ctx.Advisories[n.ID] {
-			if a.Malicious || strings.HasPrefix(strings.ToUpper(a.ID), "CVE-") {
+			if a.Malicious {
 				continue
 			}
 			out = append(out, datasource.Coord{Ecosystem: n.Ecosystem, Name: n.Name, Version: n.Version})
@@ -1516,27 +1523,35 @@ func cmdScan(args []string) int {
 	// the CVE, an operator searching for one found nothing, and the recency
 	// fallback (D-145) had no year to read. /v1/query returns the aliases, one
 	// cached call per coordinate.
-	aliasByID := map[string][]string{}
+	aliasByID := map[string]osv.Hydration{}
 	aliasDegraded := false
 	if !*offline && osvClient != nil {
-		coords := aliasCandidates(g, ctx)
+		coords := hydrationCandidates(g, ctx)
 		if len(coords) > 0 {
-			hydrated, aErr := osvClient.CVEAliases(context.Background(), coords)
+			hydrated, aErr := osvClient.HydrateAdvisories(context.Background(), coords)
 			if aErr != nil {
 				aliasDegraded = true
-				fmt.Fprintf(os.Stderr, "depsnort: warning: CVE-alias resolution degraded: %v\n", aErr)
+				fmt.Fprintf(os.Stderr, "depsnort: warning: advisory hydration degraded: %v\n", aErr)
 			}
 			aliasByID = hydrated
+			scored := 0
 			for id, advs := range ctx.Advisories {
 				for i := range advs {
-					if cs, ok := aliasByID[advs[i].ID]; ok {
-						advs[i].Aliases = append(advs[i].Aliases, cs...)
+					h, ok := aliasByID[advs[i].ID]
+					if !ok {
+						continue
+					}
+					advs[i].Aliases = append(advs[i].Aliases, h.CVEs...)
+					advs[i].SeverityLabel = h.Label
+					if h.Scored {
+						advs[i].Severity, advs[i].ScoredSeverity = h.Severity, true
+						scored++
 					}
 				}
 				ctx.Advisories[id] = advs
 			}
-			fmt.Fprintf(os.Stderr, "depsnort: resolved CVE aliases for %d of %d coordinate(s) whose advisories are not CVE-identified\n",
-				len(aliasByID), len(coords))
+			fmt.Fprintf(os.Stderr, "depsnort: hydrated %d of %d coordinate(s) from OSV /v1/query (%d advisory severity score(s))\n",
+				len(aliasByID), len(coords), scored)
 		}
 	}
 

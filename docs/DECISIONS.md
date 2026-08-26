@@ -6007,3 +6007,81 @@ now a strictly smaller change than D-145 assumed, since the request is already b
 coordinates that matter, and that is worth revisiting on its own rather than smuggling in here. Aliases
 other than CVEs (PYSEC, GO, OSV cross-references) are still dropped by `mergeAliases`, which predates this
 entry and is unchanged.
+
+## D-147 — severity ranking, and a CVSS scorer verified against published vectors
+
+**Trigger:** D-145 recorded severity as unavailable and ranked on recency instead. D-146 corrected half of
+that — `/v1/query` returns severity, and D-146 was already calling it for the coordinates that mattered —
+and left the ranking itself as a stated residual. This is that work.
+
+**The obstacle was never access, it was that OSV publishes severity as a VECTOR.** `severity[].score` is a
+CVSS vector string (`CVSS:3.1/AV:N/AC:L/…`), not a number, so a tool that wants to rank by severity has to
+score it. The v3.1 base-score formula is published, closed-form and deterministic — no lookup tables, no
+judgement — which is what makes implementing it here safe rather than a dependency (D-10).
+
+**It is verified against an oracle, not against itself.** `TestBaseScoreMatchesPublishedVectors` checks ten
+vectors whose base scores FIRST publishes. That distinction did real work: mutating the Roundup function to
+plain rounding, dropping the Scope-Changed 1.08 multiplier, or shifting the exploitability constant from
+8.22 to 8.0 each still produces confident-looking numbers, and each is caught only by disagreement with a
+published figure.
+
+**v2 and v4 vectors are refused rather than approximated.** v2 uses a different formula; v4 replaces the
+closed form with a much larger table-driven algorithm. Guessing at either would emit numbers that look
+authoritative and are not, so both return unscored and fall through to the qualitative label — which is
+exactly the case `GHSA-label-only` covers in the hydration test.
+
+**Ranking is by TIER first, then exact score.** A label-only CRITICAL and a scored 7.0 HIGH cannot be
+compared as numbers — one has no number at all — so the ordering runs on CVSS's own published bands
+(0.1-3.9 low, 4.0-6.9 medium, 7.0-8.9 high, 9.0-10.0 critical), which both sources can be mapped onto
+without inventing a value. An exact score refines the order only WITHIN a band, where it is genuinely
+known on both sides. The full chain is now: exploit probability (D-145's reasoning stands — a measured
+prediction of exploitation beats any proxy), then severity, then recency, then sorted order as the
+tie-break.
+
+**A scored 0.0 is a rating, not an absence.** A vector describing no impact ranks below every rated
+advisory and ABOVE an unrated one, because "we know this is harmless" carries more information than "we
+know nothing". That is why `Advisory` carries `ScoredSeverity` beside `Severity` rather than treating zero
+as unknown.
+
+**The candidate rule from D-146 had to widen, and its test was corrected rather than worked around.** D-146
+queried only packages holding a non-CVE advisory id, because the only thing being fetched was a CVE identity
+and a CVE-primary advisory already carries its own. Severity is returned for NO advisory by querybatch, so
+that restriction no longer holds: a package whose advisories are all CVEs still has no severity until asked.
+`TestD146OnlyNonCVEAdvisoriesAreWorthQuerying` asserted the narrower rule and is now
+`TestD146EveryVulnerablePackageIsQueried`, with the reversal noted inline. What still bounds the cost is
+unchanged and is the part that always mattered: no advisories, no request.
+
+**A field name collided with the on-disk snapshot format, and the existing tests caught it.** Naming the
+numeric score `severity` in JSON stopped the bundled dataset from parsing, because that format already uses
+`severity` for a qualitative STRING. The score is now `cvss_base_score` and the label keeps `severity` —
+which is both backward-compatible and the more honest naming, since "severity" alone does not say on what
+scale. A side effect worth noting: the bundled dataset's own `"severity": "critical"` now populates
+`SeverityLabel` rather than being discarded.
+
+**Two of my own tests were passing for the wrong reason.** `TestBaseScoreMatchesPublishedVectors` could not
+distinguish the two Privileges-Required weight tables, because its only Scope-Changed vector used `PR:N`,
+which weighs 0.85 in both — two Scope-Changed vectors with `PR:L` and `PR:H` fix it. And
+`TestD147ScoredZeroIsRatedNotUnknown` passed against a mutation treating a scored 0.0 as unknown purely
+because the expected advisory happened to sort first alphabetically; the ids are renamed so the sorted
+tie-break points the OTHER way and only the tier can produce the expected order.
+
+**Mutation-proven, twelve sites** across the formula, the hydration parse and the comparator: rounding,
+scope multiplier, PR table, exploitability constant and version guard in the scorer; first-vector-instead-of-max
+and dropped label in the parse; tier removed, severity promoted above EPSS, raw score instead of tier,
+scored-zero-as-unknown and recency removed in the ranking.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages); `-race` clean on
+`internal/datasource/osv`, `internal/check/builtin`, `internal/emit`, `cmd/depsnort`. Live CLI on a snapshot
+of eight recent-but-unrated advisories, one 2015 CVE scored 9.8, and one label-only HIGH: the prose leads
+`CVE-2015-1000, GHSA-oldhigh, CVE-2026-8001, …` — severity over recency, and the label-only HIGH placed
+above unrated advisories a decade newer. `advisory_severity` carries `{cvss_base_score: 9.8, cvss_scored:
+true, label: CRITICAL, advisory: CVE-2015-1000}`, and SARIF gains `cvssBaseScore` and `advisorySeverity`.
+
+Residual limitations: severity needs the network, like the hydration it rides on, so an offline or `-no-osv`
+scan ranks on whatever its input carried — a snapshot may supply severity, and the bundled dataset now does
+for its own records, but neither is fetched. Only CVSS v3 vectors are scored; a v4-only advisory is ranked
+by its label, and one with a v4 vector and no label is unrated entirely, which will matter more as v4
+adoption grows. The base score ignores temporal and environmental metrics, which is correct for ranking a
+published advisory but means the number is not tailored to this deployment. And severity orders the prose
+sample only — it does not change gate class, since VC-008 stays advisory-class by default (D-14) and a
+CRITICAL CVSS score is still not a reason to fail a build by default.

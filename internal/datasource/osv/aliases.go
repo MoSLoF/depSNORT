@@ -12,23 +12,34 @@ import (
 	"ihbv.io/depsnort/internal/datasource"
 )
 
-// CVEAliases resolves each coordinate's advisories to their CVE aliases.
+// Hydration is what /v1/query knows about one advisory beyond its id.
+type Hydration struct {
+	// CVEs are the advisory's CVE aliases (CVE-only; PYSEC/GHSA cross-references
+	// are dropped because nothing downstream keys on them).
+	CVEs []string
+	// Severity is the CVSS v3.x base score, valid only when Scored is true.
+	Severity float64
+	Scored   bool
+	// Label is the database's qualitative rating, for records whose vector this
+	// tool does not score (v2, v4) or which published no vector at all.
+	Label string
+}
+
+// HydrateAdvisories fills in what OSV's /v1/querybatch leaves out.
 //
-// depSNORT's primary path uses OSV's /v1/querybatch, which returns only advisory
-// IDs (GHSA-…, GO-…) and NO aliases — so a GHSA-primary advisory carries no CVE,
-// and EPSS (which is CVE-keyed) cannot score it. This fills that gap with the
-// fuller /v1/query endpoint (one call per coordinate, cached), which returns each
-// advisory's aliases. It is used only for EPSS enrichment and leaves the core
-// querybatch path untouched. Offline: cache only; a miss is a silent gap.
+// depSNORT's primary path uses querybatch, which returns only advisory IDs and
+// `modified` — no aliases and no severity. So a GHSA-primary advisory arrives
+// with no CVE identity (EPSS is CVE-keyed and cannot score it) and no severity
+// at all. This fills both gaps from the fuller /v1/query endpoint, one call per
+// coordinate, cached. Offline: cache only; a miss is a silent gap.
 //
-// The result maps advisory ID -> its CVE aliases (CVE-only; other aliases such as
-// PYSEC/GHSA are dropped since EPSS cannot use them).
-func (c *Client) CVEAliases(ctx context.Context, coords []datasource.Coord) (map[string][]string, error) {
+// The result maps advisory ID -> what was learned about it.
+func (c *Client) HydrateAdvisories(ctx context.Context, coords []datasource.Coord) (map[string]Hydration, error) {
 	now := time.Now
 	if c.Now != nil {
 		now = c.Now
 	}
-	out := map[string][]string{}
+	out := map[string]Hydration{}
 	var firstErr error
 	seen := map[string]bool{}
 	for _, co := range coords {
@@ -63,32 +74,47 @@ func (c *Client) CVEAliases(ctx context.Context, coords []datasource.Coord) (map
 				_ = c.Cache.PutRaw(key, raw, now())
 			}
 		}
-		mergeAliases(out, raw)
+		mergeHydration(out, raw)
 	}
 	return out, firstErr
 }
 
 type queryAliasResp struct {
 	Vulns []struct {
-		ID      string   `json:"id"`
-		Aliases []string `json:"aliases"`
+		ID       string   `json:"id"`
+		Aliases  []string `json:"aliases"`
+		Severity []struct {
+			Type  string `json:"type"`
+			Score string `json:"score"` // a CVSS VECTOR string, not a number
+		} `json:"severity"`
+		DatabaseSpecific struct {
+			Severity string `json:"severity"`
+		} `json:"database_specific"`
 	} `json:"vulns"`
 }
 
-func mergeAliases(out map[string][]string, raw []byte) {
+func mergeHydration(out map[string]Hydration, raw []byte) {
 	var r queryAliasResp
 	if json.Unmarshal(raw, &r) != nil {
 		return
 	}
 	for _, v := range r.Vulns {
-		var cves []string
+		h := Hydration{Label: strings.ToUpper(strings.TrimSpace(v.DatabaseSpecific.Severity))}
 		for _, a := range v.Aliases {
 			if strings.HasPrefix(strings.ToUpper(a), "CVE-") {
-				cves = append(cves, strings.ToUpper(a))
+				h.CVEs = append(h.CVEs, strings.ToUpper(a))
 			}
 		}
-		if len(cves) > 0 {
-			out[v.ID] = cves
+		// Highest scorable vector wins. A record can carry several (a v3 and a
+		// v4, say); taking the max of the ones we CAN score is safer than
+		// trusting position, and never invents a score for one we cannot.
+		for _, sv := range v.Severity {
+			if score, ok := BaseScore(sv.Score); ok && (!h.Scored || score > h.Severity) {
+				h.Severity, h.Scored = score, true
+			}
+		}
+		if len(h.CVEs) > 0 || h.Scored || h.Label != "" {
+			out[v.ID] = h
 		}
 	}
 }

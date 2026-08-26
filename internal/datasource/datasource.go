@@ -33,7 +33,24 @@ type Advisory struct {
 	Aliases   []string  `json:"aliases,omitempty"`
 	Malicious bool      `json:"malicious"` // known-compromise (FLAG) vs ordinary vuln (WARN)
 	Modified  time.Time `json:"modified,omitempty"`
-	Source    string    `json:"source"` // e.g. "osv"
+	// Severity is the CVSS v3.x base score (0..10) when the advisory published a
+	// v3 vector this tool could score, and ScoredSeverity says whether it did.
+	// The pair is needed because 0.0 is a real score — a vector describing no
+	// impact — and must not read as "unknown" (D-147).
+	//
+	// The JSON name is cvss_base_score, not "severity": the snapshot format that
+	// predates this field already uses "severity" for a qualitative STRING, and
+	// claiming that name for a float stopped the bundled dataset from parsing.
+	// It is also the more honest name — "severity" alone does not say on what
+	// scale.
+	Severity       float64 `json:"cvss_base_score,omitempty"`
+	ScoredSeverity bool    `json:"cvss_scored,omitempty"`
+	// SeverityLabel is the qualitative rating the advisory database published
+	// ("CRITICAL", "HIGH", …). It exists for records with no scorable vector —
+	// a v2 or v4 vector, or none at all — where it is the only severity signal,
+	// and it keeps the "severity" name the snapshot format already gave it.
+	SeverityLabel string `json:"severity,omitempty"`
+	Source        string `json:"source"` // e.g. "osv"
 }
 
 // ClassifyMalicious decides whether an advisory ID denotes a malicious-package

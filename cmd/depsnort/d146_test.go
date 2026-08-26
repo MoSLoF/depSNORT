@@ -25,7 +25,13 @@ func d146Graph(t *testing.T, adv map[string][]datasource.Advisory) (*graph.Graph
 	return g, &check.Context{Graph: g, Advisories: adv}
 }
 
-func TestD146OnlyNonCVEAdvisoriesAreWorthQuerying(t *testing.T) {
+// TestD146EveryVulnerablePackageIsQueried: this test asserted the opposite until
+// D-147. D-146 skipped CVE-primary packages because the only thing being fetched
+// was a CVE identity, which such an advisory already carries in its id. D-147
+// also fetches SEVERITY, which querybatch returns for no advisory at all, so a
+// package whose advisories are all CVEs still has no severity until we ask. The
+// bound that remains is the one that always mattered: no advisories, no request.
+func TestD146EveryVulnerablePackageIsQueried(t *testing.T) {
 	g, ctx := d146Graph(t, map[string][]datasource.Advisory{
 		"cve-only":  {{ID: "CVE-2020-1"}, {ID: "CVE-2020-2"}},
 		"has-ghsa":  {{ID: "CVE-2020-3"}, {ID: "GHSA-aaaa-bbbb-cccc"}},
@@ -33,15 +39,12 @@ func TestD146OnlyNonCVEAdvisoriesAreWorthQuerying(t *testing.T) {
 		"go-only":   {{ID: "GO-2024-1234"}},
 	})
 	got := map[string]bool{}
-	for _, c := range aliasCandidates(g, ctx) {
+	for _, c := range hydrationCandidates(g, ctx) {
 		got[c.Name] = true
 	}
-	if got["cve-only"] {
-		t.Error("a package whose advisories are all CVE-primary already carries its CVE identity; querying it learns nothing")
-	}
-	for _, want := range []string{"has-ghsa", "ghsa-only", "go-only"} {
+	for _, want := range []string{"cve-only", "has-ghsa", "ghsa-only", "go-only"} {
 		if !got[want] {
-			t.Errorf("%s has a non-CVE advisory id that could be hiding a CVE; it must be queried", want)
+			t.Errorf("%s has a real advisory and no severity for it; it must be queried", want)
 		}
 	}
 }
@@ -52,7 +55,7 @@ func TestD146MaliciousAdvisoriesDoNotDriveHydration(t *testing.T) {
 	g, ctx := d146Graph(t, map[string][]datasource.Advisory{
 		"mal-only": {{ID: "MAL-2024-1", Malicious: true}},
 	})
-	if c := aliasCandidates(g, ctx); len(c) != 0 {
+	if c := hydrationCandidates(g, ctx); len(c) != 0 {
 		t.Errorf("a malicious-only package is not a hydration candidate, got %v", c)
 	}
 }
@@ -65,7 +68,7 @@ func TestD146UnversionedPackagesAreSkipped(t *testing.T) {
 	ctx := &check.Context{Graph: g, Advisories: map[string][]datasource.Advisory{
 		"n": {{ID: "GHSA-aaaa-bbbb-cccc"}},
 	}}
-	if c := aliasCandidates(g, ctx); len(c) != 0 {
+	if c := hydrationCandidates(g, ctx); len(c) != 0 {
 		t.Errorf("an unversioned node cannot be queried, got %v", c)
 	}
 }
@@ -74,7 +77,7 @@ func TestD146UnversionedPackagesAreSkipped(t *testing.T) {
 // scan: no advisories at all, so no request.
 func TestD146CleanPackagesAreSkipped(t *testing.T) {
 	g, ctx := d146Graph(t, map[string][]datasource.Advisory{"clean": nil})
-	if c := aliasCandidates(g, ctx); len(c) != 0 {
+	if c := hydrationCandidates(g, ctx); len(c) != 0 {
 		t.Errorf("a package with no advisories is not a hydration candidate, got %v", c)
 	}
 }
@@ -85,7 +88,7 @@ func TestD146EachCoordinateAppearsOnce(t *testing.T) {
 	g, ctx := d146Graph(t, map[string][]datasource.Advisory{
 		"many": {{ID: "GHSA-a"}, {ID: "GHSA-b"}, {ID: "GO-2024-1"}},
 	})
-	if c := aliasCandidates(g, ctx); len(c) != 1 {
+	if c := hydrationCandidates(g, ctx); len(c) != 1 {
 		t.Errorf("three non-CVE advisories on one package is one coordinate, got %v", c)
 	}
 }
