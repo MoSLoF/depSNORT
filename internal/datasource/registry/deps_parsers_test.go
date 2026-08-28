@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -154,17 +155,27 @@ func keysOf(m map[string][]ComposerRequirement) []string {
 // ---- Client.Histories (the shared HTTP orchestrator) -----------------------
 
 // historyDoer routes by the requested package name (last path segment) to a
-// per-name status + body, and counts calls so a cache hit is provable.
+// per-name status + body, and counts calls so a cache hit is provable. Histories
+// fetches misses concurrently, so the call counter is mutex-guarded.
 type historyDoer struct {
 	resp map[string]struct {
 		status int
 		body   string
 	}
+	mu    sync.Mutex
 	calls int
 }
 
+func (d *historyDoer) callCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls
+}
+
 func (d *historyDoer) Do(req *http.Request) (*http.Response, error) {
+	d.mu.Lock()
 	d.calls++
+	d.mu.Unlock()
 	seg := req.URL.Path
 	if i := strings.LastIndex(seg, "/"); i >= 0 {
 		seg = seg[i+1:]
@@ -228,13 +239,13 @@ func TestHistoriesFetchesParsesAndCaches(t *testing.T) {
 	}
 
 	// Second call is served from cache — no new network call.
-	before := doer.calls
+	before := doer.callCount()
 	c2, _ := c.Histories(context.Background(), []string{"ok"})
 	if c2["ok"] == nil {
 		t.Fatalf("expected cached history for ok")
 	}
-	if doer.calls != before {
-		t.Errorf("a cached name must not hit the network again (calls %d -> %d)", before, doer.calls)
+	if doer.callCount() != before {
+		t.Errorf("a cached name must not hit the network again (calls %d -> %d)", before, doer.callCount())
 	}
 	if c.Stats.FromCache != 1 {
 		t.Errorf("FromCache = %d, want 1", c.Stats.FromCache)
@@ -287,8 +298,8 @@ func TestHistoriesOfflineColdCacheIsGap(t *testing.T) {
 	if c.Stats.Gaps != 1 {
 		t.Errorf("offline with a cold cache must be a gap, got Gaps=%d", c.Stats.Gaps)
 	}
-	if doer.calls != 0 {
-		t.Errorf("offline must make no network call, got %d", doer.calls)
+	if doer.callCount() != 0 {
+		t.Errorf("offline must make no network call, got %d", doer.callCount())
 	}
 }
 
