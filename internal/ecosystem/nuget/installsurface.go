@@ -2,6 +2,7 @@ package nuget
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -100,7 +101,12 @@ func scanMSBuildDirs(reader *securefs.Reader, nodeID string, gaps *instsurf.Gaps
 		for _, entry := range entries {
 			name := entry.Name()
 			if entry.IsDir() {
-				subDir := filepath.Join(msbDir, name)
+				// path.Join, not filepath.Join: this value becomes a map key
+				// that surfaces as a hook identifier / graph node ID. Using OS
+				// separators would make a baseline recorded on one OS mismatch a
+				// scan on another (VC-010 drift). securefs normalizes the
+				// forward slashes back for filesystem access.
+				subDir := path.Join(msbDir, name)
 				subEntries, err := reader.ReadDir(subDir)
 				if err != nil {
 					gaps.Add(nodeID, subDir, err)
@@ -111,7 +117,7 @@ func scanMSBuildDirs(reader *securefs.Reader, nodeID string, gaps *instsurf.Gaps
 					if ext != ".targets" && ext != ".props" {
 						continue
 					}
-					relPath := filepath.Join(subDir, sub.Name())
+					relPath := path.Join(subDir, sub.Name())
 					b, err := reader.ReadFile(relPath)
 					if err != nil {
 						gaps.Add(nodeID, relPath, err)
@@ -127,7 +133,7 @@ func scanMSBuildDirs(reader *securefs.Reader, nodeID string, gaps *instsurf.Gaps
 			if ext != ".targets" && ext != ".props" {
 				continue
 			}
-			relPath := filepath.Join(msbDir, name)
+			relPath := path.Join(msbDir, name)
 			b, err := reader.ReadFile(relPath)
 			if err != nil {
 				gaps.Add(nodeID, relPath, err)
