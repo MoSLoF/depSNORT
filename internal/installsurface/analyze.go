@@ -756,6 +756,52 @@ func stripCodeComments(src string) string {
 	return src
 }
 
+// Comment grammars for the non-C-family analyzers. D-153 closed the C-family
+// comment class (build.rs, npm/setup.py referenced files) but its own note
+// flagged Ruby (extconf.rb, Rakefile, gemspec), NuGet PowerShell, and MSBuild
+// XML as still scanning raw — so a license header or documentation URL in one
+// of those reads as CapNetwork exactly as it did for Rust before D-153. These
+// close that class for those three, same heuristic discipline (D-25/D-153):
+// over-stripping only under-cites a reference, it never fabricates a capability.
+var (
+	xmlCommentRe       = regexp.MustCompile(`(?s)<!--.*?-->`)
+	psBlockCommentRe   = regexp.MustCompile(`(?s)<#.*?#>`)
+	rubyBlockCommentRe = regexp.MustCompile(`(?ms)^=begin\b.*?^=end[^\n]*$`)
+	// hashLineCommentRe strips a `#` line comment when the `#` starts a line or
+	// follows whitespace — the canonical comment form. Anchoring on a preceding
+	// whitespace/line-start (and excluding the Ruby interpolation openers `#{`,
+	// `#$`, `#@` via the following-character class, since RE2 has no lookahead)
+	// keeps the strip from eating a `#` that is part of a token — a URL fragment
+	// `x#y`, an interpolation, a hex color — which would otherwise silently drop
+	// a real marker glued to code.
+	hashLineCommentRe = regexp.MustCompile(`(?m)(^|[ \t])#(?:[^{$@\n][^\n]*)?`)
+)
+
+// stripHashComments removes `#` line comments (shell / Ruby / PowerShell).
+func stripHashComments(src string) string {
+	return hashLineCommentRe.ReplaceAllString(src, "$1")
+}
+
+// stripRubyComments removes Ruby `=begin`/`=end` block comments and `#` line
+// comments, so a URL or marker in gemspec/extconf.rb/Rakefile documentation is
+// not read as behavior.
+func stripRubyComments(src string) string {
+	src = rubyBlockCommentRe.ReplaceAllString(src, " ")
+	return stripHashComments(src)
+}
+
+// stripXMLComments removes `<!-- -->` comments (MSBuild .targets/.props).
+func stripXMLComments(src string) string {
+	return xmlCommentRe.ReplaceAllString(src, " ")
+}
+
+// stripPowerShellComments removes `<# #>` block comments and `#` line comments
+// (NuGet install.ps1/init.ps1).
+func stripPowerShellComments(src string) string {
+	src = psBlockCommentRe.ReplaceAllString(src, " ")
+	return stripHashComments(src)
+}
+
 // isIdentByte reports whether b is an identifier character (letter, digit, _).
 func isIdentByte(b byte) bool {
 	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
@@ -842,6 +888,22 @@ func containsWord(hay, word string) bool {
 	}
 }
 
+// splitCommandSegments breaks a command blob at shell command separators
+// (`;`, `&`, `|`, and newlines) so the --dry-run carve-out can be judged per
+// command rather than across the whole hook. It mirrors the `[^;&|\n]` boundary
+// the dry-run pattern itself uses. FieldsFunc drops the separators and any empty
+// runs between them; a leading space left on a segment still satisfies
+// propagationRe's whitespace anchor.
+func splitCommandSegments(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		switch r {
+		case ';', '&', '|', '\n', '\r':
+			return true
+		}
+		return false
+	})
+}
+
 // scanCaps classifies a blob of text (a command line or a file's source).
 func scanCaps(text string) ([]Capability, []string) {
 	var caps []Capability
@@ -871,9 +933,17 @@ func scanCaps(text string) ([]Capability, []string) {
 	scan(execMarkers, CapExec)
 	scan(obfuscationMarkers, CapObfuscation)
 	scan(propagationAPIMarkers, CapPropagate)
-	// A CLI publish counts only when it is not an explicit --dry-run rehearsal.
-	if m := propagationRe.FindString(text); m != "" && !propagationDryRunRe.MatchString(text) {
-		add(CapPropagate, "registry-publish:"+strings.TrimSpace(m))
+	// A CLI publish counts unless it is an explicit --dry-run rehearsal. The
+	// carve-out is judged PER command segment, not across the whole hook: a
+	// rehearsal FOLLOWED BY a real publish (`npm publish --dry-run && npm
+	// publish`, or a decoy `cargo publish --dry-run` beside a genuine one) must
+	// still count. The earlier whole-text check let any single --dry-run
+	// anywhere in the hook mask a real publish — a worm-step false negative on
+	// the critical/block VC-002k signal (assessment follow-up to D-154).
+	for _, seg := range splitCommandSegments(text) {
+		if m := propagationRe.FindString(seg); m != "" && !propagationDryRunRe.MatchString(seg) {
+			add(CapPropagate, "registry-publish:"+strings.TrimSpace(m))
+		}
 	}
 	// Persistence and ordinary install writes are both CapFilesystem; the
 	// persistence/benign distinction lives in the marker (IsPersistenceMarker),
@@ -1405,7 +1475,11 @@ var rakeCompileRe = regexp.MustCompile(`(?i)Rake::(?:Extension|Compiler)Task|tas
 func AnalyzeRuby(extconfRb, gemspec, rakefile string) Surface {
 	var s Surface
 	if extconfRb != "" {
-		caps, ev := scanCaps(extconfRb)
+		// Strip comments first (D-153, extended to Ruby): a URL or marker in an
+		// extconf.rb comment is documentation, not behavior. Command keeps the
+		// raw source for display.
+		clean := stripRubyComments(extconfRb)
+		caps, ev := scanCaps(clean)
 		caps = appendUnique(caps, CapExec)
 		ev = appendStr(ev, "extconf.rb")
 		h := Hook{
@@ -1413,15 +1487,16 @@ func AnalyzeRuby(extconfRb, gemspec, rakefile string) Surface {
 			Command:  truncateStr(extconfRb, 400),
 			Caps:     caps,
 			Evidence: ev,
-			Sinks:    findSinks(extconfRb),
+			Sinks:    findSinks(clean),
 		}
-		for _, u := range dedupe(urlRe.FindAllString(extconfRb, -1)) {
+		for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
 			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
 		}
 		s.Hooks = append(s.Hooks, h)
 	}
 	if rakefile != "" && rakeCompileRe.MatchString(rakefile) {
-		caps, ev := scanCaps(rakefile)
+		clean := stripRubyComments(rakefile)
+		caps, ev := scanCaps(clean)
 		caps = appendUnique(caps, CapExec)
 		ev = appendStr(ev, "Rakefile:compile")
 		h := Hook{
@@ -1429,16 +1504,17 @@ func AnalyzeRuby(extconfRb, gemspec, rakefile string) Surface {
 			Command:  truncateStr(rakefile, 400),
 			Caps:     caps,
 			Evidence: ev,
-			Sinks:    findSinks(rakefile),
+			Sinks:    findSinks(clean),
 		}
-		for _, u := range dedupe(urlRe.FindAllString(rakefile, -1)) {
+		for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
 			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
 		}
 		s.Hooks = append(s.Hooks, h)
 	}
 	if gemspec != "" {
-		caps, ev := scanCaps(gemspec)
-		if strings.Contains(gemspec, "extensions") && strings.Contains(gemspec, "extconf") {
+		clean := stripRubyComments(gemspec)
+		caps, ev := scanCaps(clean)
+		if strings.Contains(clean, "extensions") && strings.Contains(clean, "extconf") {
 			// A native-extension declaration is itself a narrow precondition, so
 			// ANY capability co-occurring with it is reported — including a bare
 			// CapExec, which the extconf.rb it points at will run at install.
@@ -1466,9 +1542,9 @@ func AnalyzeRuby(extconfRb, gemspec, rakefile string) Surface {
 				Command:  truncateStr(gemspec, 400),
 				Caps:     caps,
 				Evidence: ev,
-				Sinks:    findSinks(gemspec),
+				Sinks:    findSinks(clean),
 			})
-			for _, u := range dedupe(urlRe.FindAllString(gemspec, -1)) {
+			for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
 				s.Hooks[len(s.Hooks)-1].Artifacts = append(s.Hooks[len(s.Hooks)-1].Artifacts, Artifact{Ref: u, Remote: true})
 			}
 		}
@@ -2096,7 +2172,10 @@ func AnalyzeDotNet(scripts map[string]string) Surface {
 		if !ok || strings.TrimSpace(content) == "" {
 			continue
 		}
-		caps, ev := scanCaps(content)
+		// Strip PowerShell comments first (D-153, extended): a marker or URL in a
+		// `#` or `<# #>` comment in install.ps1/init.ps1 is documentation.
+		clean := stripPowerShellComments(content)
+		caps, ev := scanCaps(clean)
 		caps = appendUnique(caps, CapExec)
 		ev = appendStr(ev, name)
 		h := Hook{
@@ -2104,9 +2183,9 @@ func AnalyzeDotNet(scripts map[string]string) Surface {
 			Command:  truncateStr(content, 400),
 			Caps:     caps,
 			Evidence: ev,
-			Sinks:    findSinks(content),
+			Sinks:    findSinks(clean),
 		}
-		for _, u := range dedupe(urlRe.FindAllString(content, -1)) {
+		for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
 			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
 		}
 		s.Hooks = append(s.Hooks, h)
@@ -2124,7 +2203,11 @@ func AnalyzeMSBuild(scripts map[string]string) Surface {
 		if strings.TrimSpace(content) == "" {
 			continue
 		}
-		caps, ev := scanCaps(content)
+		// Strip XML comments first (D-153, extended to MSBuild): a URL or marker
+		// inside a <!-- --> comment in a .targets/.props file is documentation,
+		// not a build-time action.
+		clean := stripXMLComments(content)
+		caps, ev := scanCaps(clean)
 		caps = appendUnique(caps, CapExec)
 		ev = appendStr(ev, "msbuild:"+path)
 		h := Hook{
@@ -2132,9 +2215,9 @@ func AnalyzeMSBuild(scripts map[string]string) Surface {
 			Command:  truncateStr(content, 400),
 			Caps:     caps,
 			Evidence: ev,
-			Sinks:    findSinks(content),
+			Sinks:    findSinks(clean),
 		}
-		for _, u := range dedupe(urlRe.FindAllString(content, -1)) {
+		for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
 			h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
 		}
 		s.Hooks = append(s.Hooks, h)
