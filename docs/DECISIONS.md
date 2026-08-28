@@ -6460,3 +6460,56 @@ PowerShell and MSBuild XML still scan raw, and `stripCodeComments` does not hand
 so the same false-positive class remains open in those ecosystems, unaddressed rather than fixed here. And
 comment stripping is a heuristic, not a tokenizer: a `//` inside a string literal that is not a URL scheme
 still truncates, whose only cost is under-citing a reference, never fabricating one.
+
+## D-154 — propagation detection, past npm (OPU-41)
+
+**Trigger:** an external purple-team assessment of depSNORT itself (not a targeted hunt on a scanned
+project). D-152 shipped VC-002k npm-only and said so in its own residual-limitations note: the propagation
+vocabulary — `CapPropagate`, `graph.EdgeRepublish`, `HookSelfPropagation` — was already ecosystem-neutral,
+and "only the marker table needs extending." This closes that gap for the four ecosystems with their own
+CLI publish verb.
+
+**The gap.** `propagationRe` recognized `npm|pnpm|yarn|bun publish` and the npm-family `version` bump, and
+nothing else. A RubyGems `extconf.rb` running `gem push`, a Cargo `build.rs` running `cargo publish`, a
+NuGet install script running `dotnet nuget push`, or a PyPI `setup.py` running `twine upload` all scanned as
+plain `[exec]` — indistinguishable from an ordinary build step — despite VC-002k being CRITICAL/block and
+having no benign reading. Confirmed before writing any fix: reverting the change and rerunning the new
+tests fails all four ecosystems' positive cases, each falling back to `[exec]` alone (D-154/OPU-41 test
+run), proving this was a genuine blind spot and not a hypothetical one.
+
+**The fix.** One marker-table extension, exactly as D-152 predicted: `propagationRe` gained `gem\s+push`,
+`cargo\s+publish`, `(?:dotnet\s+nuget|nuget)\s+push`, and the PyPI build-tool paths (`twine upload` —
+including the `python -m twine upload` form —, `flit publish`, `hatch publish`, `poetry publish`). No
+change to `CapPropagate`, `instsurf.AddToGraph`, or `HookSelfPropagation` — confirmed by grep before
+starting that none of the three name an ecosystem, so the marker table really was the only load-bearing
+piece. Composer and Go are deliberately given no entry: neither ecosystem's registry is reached by a
+client-side publish verb an install hook could invoke (Packagist and the Go proxy both replicate from a
+pushed git tag), so there is no marker to add, not an oversight.
+
+**Dry-run scope, deliberately narrow.** `cargo publish --dry-run` is a confirmed real flag and is excluded
+the same way `npm publish --dry-run` is. `gem push`, `dotnet nuget push`/`nuget push`, and `twine upload`
+have no dry-run flag to exclude. `poetry publish` and `flit`/`hatch publish` were NOT given a dry-run
+exclusion here: a `poetry publish --dry-run` flag could not be confirmed from documentation in the time this
+change took, and guessing at an unverified flag risks the opposite defect from D-153 — an exclusion that
+doesn't actually exist would silently blind the detector on a real publish. Left as a disclosed follow-up
+rather than shipped on a guess.
+
+**Validation:** `gofmt`, `go build`, `go vet` clean; full suite green (34 packages, cached where unaffected);
+`-race` clean on `installsurface`, `check/builtin`, and all four newly-covered ecosystem adapters. New tests
+added at both layers — capability (`internal/installsurface/d154_test.go`) and end-to-end through the
+shipping check pack via `Default()` (`internal/check/builtin/d154_test.go`, RubyGems and Cargo) — each
+proven non-vacuous by reverting the fix and confirming the new positive assertions fail (D-154/OPU-41 test
+run: all four ecosystem positives and both end-to-end tests fail cleanly against the pre-patch regex, with
+the negative/boundary tests unaffected). Live CLI validation on an inert fixture (no gem is built, no
+publish reaches a registry, nothing here is ever executed by depSNORT's static analysis or by this test
+per D-04): a RubyGems `extconf.rb` running `gem build` then `gem push` yields VC-002k critical/block, exit
+code 1, the `republish` edge in both the JSON graph and the DOT emitter, matching the shape of D-152's own
+live validation.
+
+Residual limitations: `poetry publish`/`flit publish`/`hatch publish` dry-run flags remain unverified and
+unexcluded — a real dry-run invocation via one of these three would currently be reported as propagation.
+Composer's install-time surface (Packagist git-tag-based publish flow) was not re-examined for a client-side
+equivalent beyond the reasoning above. And this is the same static ceiling every other install-surface check
+carries (D-04/OPU-32 lineage): a publish command assembled at runtime from string fragments is out of reach
+of a literal marker match, exactly as it is for the npm-family verbs D-152 already accepted this limitation
+for.

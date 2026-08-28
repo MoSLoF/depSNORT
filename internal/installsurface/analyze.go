@@ -603,18 +603,56 @@ var (
 	// matches event emitters, pub/sub libraries and message queues. The forms
 	// below are the ones that actually push a new version to a registry:
 	//
-	//	npm/pnpm/yarn/bun publish     the CLI publish, the Shai-Hulud mechanism
+	//	npm/pnpm/yarn/bun publish     the npm-family CLI publish, the
+	//	                              Shai-Hulud mechanism
 	//	npm version <patch|minor|...> the version bump that precedes it
-	//	libnpmpublish / npm-registry-fetch  the programmatic equivalents
+	//	libnpmpublish / npm-registry-fetch  the npm-family programmatic
+	//	                              equivalents
+	//	gem push                     RubyGems CLI publish (D-154/OPU-41)
+	//	cargo publish                Cargo CLI publish (D-154/OPU-41)
+	//	dotnet nuget push / nuget push  NuGet CLI publish (D-154/OPU-41)
+	//	twine upload                 the standard PyPI upload tool
+	//	                              (D-154/OPU-41)
+	//	flit publish / hatch publish / poetry publish  the PyPI
+	//	                              build-tool-native publish paths
+	//	                              (D-154/OPU-41)
 	//
-	// `npm publish --dry-run` is excluded below: it is the canonical way a
-	// legitimate CI job or release script REHEARSES a publish without one
-	// happening, so treating it as propagation would flag exactly the careful
-	// release tooling that has done nothing.
-	propagationRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(='"` + "`" + `])(?:(?:npm|pnpm|yarn|bun)\s+publish\b|(?:npm|pnpm|yarn)\s+version\s+(?:patch|minor|major|premajor|preminor|prepatch|prerelease)\b)`)
+	// This started npm-only (D-152) with the propagation vocabulary
+	// (graph.EdgeRepublish, CapPropagate) already ecosystem-neutral — this
+	// entry is the marker-table extension the D-152 residual-limitations note
+	// called for, covering the four non-npm ecosystems where a package
+	// manager has its own registry-publish verb. Composer and Go are not
+	// given entries here: neither has a CLI publish-to-registry verb an
+	// install hook could invoke (Packagist and the Go proxy both replicate
+	// from a pushed git tag, not from a client-side publish command), so
+	// there is no marker to add.
+	//
+	// `npm publish --dry-run` and `cargo publish --dry-run` are excluded
+	// below: each is the canonical way a legitimate CI job or release script
+	// REHEARSES a publish without one happening, so treating either as
+	// propagation would flag exactly the careful release tooling that has
+	// done nothing. `gem push`, `dotnet nuget push`/`nuget push`, and `twine
+	// upload` have no such flag to exclude. `poetry publish` and `flit
+	// publish`/`hatch publish` are deliberately NOT given a dry-run
+	// exclusion here — see docs/DECISIONS.md D-154 for why guessing at an
+	// unverified flag was rejected in favor of a disclosed follow-up.
+	propagationRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(='"` + "`" + `])(?:` +
+		`(?:npm|pnpm|yarn|bun)\s+publish\b` +
+		`|(?:npm|pnpm|yarn)\s+version\s+(?:patch|minor|major|premajor|preminor|prepatch|prerelease)\b` +
+		`|gem\s+push\b` +
+		`|cargo\s+publish\b` +
+		`|(?:dotnet\s+nuget|nuget)\s+push\b` +
+		`|(?:python[0-9.]*\s+-m\s+)?twine\s+upload\b` +
+		`|flit\s+publish\b` +
+		`|hatch\s+publish\b` +
+		`|poetry\s+publish\b` +
+		`)`)
 
 	// propagationDryRunRe marks a publish that is explicitly a rehearsal.
-	propagationDryRunRe = regexp.MustCompile(`(?i)(?:npm|pnpm|yarn|bun)\s+publish\b[^;&|
+	// Scoped to the two ecosystems with a CONFIRMED --dry-run flag (npm-family
+	// publish, cargo publish) — see the propagationRe comment above for why
+	// the PyPI build tools are not included.
+	propagationDryRunRe = regexp.MustCompile(`(?i)(?:(?:npm|pnpm|yarn|bun)\s+publish|cargo\s+publish)\b[^;&|
 ]*\s--dry-run\b`)
 
 	// propagationAPIMarkers are the programmatic publish paths. A package that
