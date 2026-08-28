@@ -1,7 +1,8 @@
 # VC-013 — Metadata surface (design note)
 
-Status: **proposal**. Not yet a decision. If adopted, lands as `D-154` in
+Status: **proposal**. Not yet a decision. If adopted, lands as `D-155` in
 [DECISIONS.md](DECISIONS.md) and a new check `internal/check/builtin/vc013_metadata.go`.
+(`D-154` is taken by the cross-ecosystem propagation work, OPU-41.)
 
 **Prototype landed** (analyzer half only, no check/ecosystem wiring): the static
 analyzer and `desktop.ini` parser described in §5 exist as
@@ -207,7 +208,7 @@ The `Surface.Truncated` field already carries exactly this.
 - **D-11 precedent:** the UNC-`IconResource` case is the metadata twin of the one
   heuristic already promoted past advisory. Same reasoning, same bar. ✅
 
-## 10. Open decisions (for the D-154 entry)
+## 10. Open decisions (for the D-155 entry)
 
 1. **Axis of the active case** — keep everything in `AxisHygiene`, or split the
    forced-auth directive into a gate-eligible finding (recommend: split).
@@ -221,7 +222,7 @@ The `Surface.Truncated` field already carries exactly this.
 
 ## 11. Proposed decision-log stub
 
-> **D-154 — metadata surface (VC-013).** Host-interpreted metadata
+> **D-155 — metadata surface (VC-013).** Host-interpreted metadata
 > (`desktop.ini`, `.DS_Store`, `Thumbs.db`, …) is a trigger surface distinct from
 > the package-lifecycle triggers of VC-002: it fires when the OS shell renders
 > the unpacked directory, not when a package manager installs. Assessed by a new
