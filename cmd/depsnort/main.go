@@ -305,6 +305,7 @@ func registrySources(cacheRoot string, offline bool) []datasource.RegistrySource
 		registry.NewComposer(datasource.NewCache(filepath.Join(cacheRoot, "composer"), ttl), offline),
 		registry.NewNuGet(datasource.NewCache(filepath.Join(cacheRoot, "nuget"), ttl), offline),
 		goproxy.New(datasource.NewCache(filepath.Join(cacheRoot, "goproxy-temporal"), ttl), offline),
+		registry.NewMaven(datasource.NewCache(filepath.Join(cacheRoot, "maven"), ttl), offline),
 	}
 }
 
