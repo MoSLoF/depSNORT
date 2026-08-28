@@ -6405,3 +6405,58 @@ gated and rendered while nothing creates it — the same aspirational-vocabulary
 `EdgeRepublish`, still open. And a package whose install hook legitimately publishes a DIFFERENT package
 (a monorepo release runner invoked at install time) would be flagged; no benign instance of that shape was
 found, and the block is deliberate.
+
+## D-153 — a URL in a Rust comment is not a network call
+
+**Trigger:** a routine fluxfang re-baseline after the coverage-disclosure work — not a targeted hunt. Broader
+`build.rs` coverage exposed a pre-existing bug rather than introducing one: these files had previously been
+`source-unavailable` and never read at all.
+
+**The gap.** `AnalyzeRust` called `scanCaps` on raw, unstripped source. Any URL in a Rust comment therefore
+read as `CapNetwork`, identically to a real outbound call. That is not a rare shape: citing a stabilization
+blog post or a GitHub issue to explain a version-gated `cfg` check is among the most common idioms in the
+ecosystem, and license headers routinely embed `http://opensource.org/licenses/MIT` as boilerplate.
+
+Confirmed on a real scan, not synthetically: 17 new VC-002b findings on one project — `serde`, `anyhow`,
+`thiserror`, `proc-macro2`, `quote`, `zerocopy`, `rustix`, `winapi`, and others — moving gate-eligible from 5
+to 22. Every evidence string was a documentation citation or a license URL. Zero were network calls. The
+pattern was the tell before any source was read: dependency-light utility crates, about as far from "does
+networking" as Rust gets, each bundling documentation URLs per finding.
+
+**The fix, and why it is one line.** `stripCodeComments` already existed for exactly this (D-25, the defect
+that made esbuild's installer "reach" snapcraft.io and nodejs.org from a comment block). `AnalyzeLoadTime`,
+the PHP plugin path, and `AnalyzeAIAgentConfig` (OPU-37) all already called it. So did `AnalyzeProcMacro` —
+which makes this an inconsistency inside Rust's own section of the file, not merely with distant functions:
+proc-macro source was comment-stripped while `build.rs`, two hundred lines away, was not. `AnalyzeRust` was
+the last C-family outlier.
+
+Capability scanning, sink detection and URL-artifact extraction now run on comment-free text. `Command` still
+displays the raw source, so a human reading a finding sees real code rather than a stripped rendering.
+
+**The over-correction guard is the part that needed care.** Stripping comments risks destroying real URLs:
+`reqwest::blocking::get("https://…")` contains `//` inside a string literal. `lineCommentRe`'s `(^|[^:])`
+guard means a `//` preceded by `:` never matches, so the URL scheme survives while `// https://blog…` strips
+whole. `TestAnalyzeRustStillDetectsRealNetworkCalls` pins this: a real `reqwest` call one line below an
+unrelated comment URL must still yield `CapNetwork` and the real artifact, and must not yield the comment's.
+Without it, a fix that stripped too aggressively would silently defeat the OPU-32/39 cradle detection.
+
+**A second effect observed and ruled out, not folded in.** The same re-scan showed 26 VC-004 findings escalate
+to gate-eligible carrying "the awakening release also declares an install hook." Traced before assuming
+cause: VC-004 reads `hasInstallHook()`, which tests for an `EdgeDeclaresHook` edge, and `instsurf.AddToGraph`
+draws that edge unconditionally whenever a hook exists. This change alters which capabilities land on a
+hook, never whether the hook is created — so it cannot produce that escalation. Coverage counts were
+identical across both scans (281 `source-unavailable`), ruling out "more source became readable". Best-
+supported explanation is ordinary fetch variability between two live scans against the cargo-source cache.
+Recorded rather than silently omitted, and deliberately not presented as part of this fix.
+
+**Validation:** the three real evidence shapes reproduced structurally (blog+issue citations, license block
+comment, single citation), each confirmed to yield zero `CapNetwork` and zero artifacts; the real-call
+companion test above; full suite green; the exact fluxfang scan rerun with all 17 false positives gone, six
+spot-checked directly; and the adversarial corpus at 8/8 with `cargo-buildrs-exfil` still detecting VC-002d
+through the shipped binary — the guard that proves comment-stripping did not blind a real `build.rs` payload.
+
+Residual limitations: this closes the C-family comment class only. Ruby (`extconf.rb`, Rakefile, gemspec),
+PowerShell and MSBuild XML still scan raw, and `stripCodeComments` does not handle `#` or `<!-- -->` at all —
+so the same false-positive class remains open in those ecosystems, unaddressed rather than fixed here. And
+comment stripping is a heuristic, not a tokenizer: a `//` inside a string literal that is not a URL scheme
+still truncates, whose only cost is under-citing a reference, never fabricating one.
