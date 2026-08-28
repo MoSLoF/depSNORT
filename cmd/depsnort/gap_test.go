@@ -42,6 +42,10 @@ func TestClassifyGapManifest(t *testing.T) {
 		"flake.lock":   "nix",
 		"conan.lock":   "conan",
 		"deno.lock":    "deno",
+		// D-161 — Clojure manifests, missed live on a Leiningen project whose
+		// JDBC driver carried three real advisories.
+		"project.clj": "leiningen",
+		"deps.edn":    "clojure",
 	}
 	for name, wantEco := range gaps {
 		if eco, ok := classifyGapManifest(name); !ok || eco != wantEco {
