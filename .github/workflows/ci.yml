@@ -107,6 +107,8 @@ jobs:
           fuzz ./internal/ecosystem/composer FuzzParseComposerLock
           fuzz ./internal/ecosystem/nuget   FuzzParsePackagesLock
           fuzz ./internal/ecosystem/pypi    FuzzExtractFromTar
+          fuzz ./internal/ecosystem/clojure FuzzParseProjectClj
+          fuzz ./internal/ecosystem/clojure FuzzParseDepsEdn
 
   bench:
     name: benchmarks compile and run

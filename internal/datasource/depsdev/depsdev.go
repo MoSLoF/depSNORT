@@ -63,6 +63,11 @@ func system(ecosystem string) string {
 		return "nuget"
 	case "gem":
 		return "rubygems"
+	case "maven":
+		// Maven-coordinate nodes (the clojure adapter's project.clj /
+		// deps.edn pins, D-162): deps.dev's maven system uses the same
+		// "group:artifact" name form the nodes already carry.
+		return "maven"
 	default:
 		return ""
 	}
@@ -195,6 +200,8 @@ func ecosystemOf(system string) string {
 		return "nuget"
 	case "RUBYGEMS":
 		return "gem"
+	case "MAVEN":
+		return "maven"
 	default:
 		return lower(system)
 	}

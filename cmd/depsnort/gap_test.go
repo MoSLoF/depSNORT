@@ -42,10 +42,6 @@ func TestClassifyGapManifest(t *testing.T) {
 		"flake.lock":   "nix",
 		"conan.lock":   "conan",
 		"deno.lock":    "deno",
-		// D-161 — Clojure manifests, missed live on a Leiningen project whose
-		// JDBC driver carried three real advisories.
-		"project.clj": "leiningen",
-		"deps.edn":    "clojure",
 	}
 	for name, wantEco := range gaps {
 		if eco, ok := classifyGapManifest(name); !ok || eco != wantEco {
@@ -57,6 +53,8 @@ func TestClassifyGapManifest(t *testing.T) {
 	for _, name := range []string{
 		"package.json", "requirements.txt", "pyproject.toml", "composer.json", "go.mod",
 		"packages.lock.json", "packages.config", "Gemfile", "README.md",
+		// Promoted out at D-162: the clojure adapter claims these.
+		"project.clj", "deps.edn",
 		// Adapter-handled .lock files must be excluded from the hail-mary catch-all —
 		// their directories are claimed and scanned, not disclosed as unknown gaps.
 		"Cargo.lock", "composer.lock", "yarn.lock", "Gemfile.lock", "Pipfile.lock", "paket.lock",

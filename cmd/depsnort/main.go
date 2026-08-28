@@ -40,6 +40,7 @@ import (
 	"ihbv.io/depsnort/internal/datasource/registry"
 	"ihbv.io/depsnort/internal/ecosystem"
 	"ihbv.io/depsnort/internal/ecosystem/cargo"
+	"ihbv.io/depsnort/internal/ecosystem/clojure"
 	"ihbv.io/depsnort/internal/ecosystem/composer"
 	"ihbv.io/depsnort/internal/ecosystem/gomod"
 	"ihbv.io/depsnort/internal/ecosystem/instsurf"
@@ -288,6 +289,7 @@ func adapterRegistry(offline bool, scanRoot ...string) *ecosystem.Registry {
 		composer.New(),
 		nuget.New(),
 		gomod.New(),
+		clojure.New(),
 	)
 }
 

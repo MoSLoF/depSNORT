@@ -107,6 +107,13 @@ func NewCargo(name, version string) PURL {
 
 // NewComposer builds a PURL for a Composer (PHP) package. Composer packages
 // are always vendor/package (two segments). The vendor is the namespace.
+// NewMaven builds a PURL for a Maven-coordinate package (groupId:artifactId).
+// The group is the PURL namespace and the artifact the name, per the purl-spec
+// maven type. Coordinates are case-sensitive; nothing is folded.
+func NewMaven(group, artifact, version string) PURL {
+	return PURL{Type: "maven", Namespace: strings.TrimSpace(group), Name: strings.TrimSpace(artifact), Version: version}
+}
+
 func NewComposer(name, version string) PURL {
 	name = strings.TrimSpace(name)
 	if i := strings.IndexByte(name, '/'); i > 0 {

@@ -81,6 +81,11 @@ func ecosystemName(eco string) string {
 		return "NuGet"
 	case "gomod":
 		return "Go"
+	case "maven":
+		// Maven coordinates regardless of manifest family: the clojure
+		// adapter's project.clj / deps.edn nodes resolve here (D-162). Node
+		// names are already "group:artifact", OSV's Maven package spelling.
+		return "Maven"
 	default:
 		return eco
 	}
