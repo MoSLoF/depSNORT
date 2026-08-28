@@ -184,3 +184,29 @@ func ids(g *graph.Graph) []string {
 	}
 	return out
 }
+
+// D-164: the walk seam's identity must equal the adapter's own node identity —
+// one coordinate, one PURL, whichever tier names it first.
+func TestWalkSourceIdentifyMatchesAdapterIdentity(t *testing.T) {
+	ws := &WalkSource{}
+	cases := map[string][2]string{
+		"org.postgresql:postgresql": {"pkg:maven/org.postgresql/postgresql@42.7.4", "org.postgresql:postgresql"},
+		"postgresql":                {"pkg:maven/postgresql/postgresql@42.7.4", "postgresql:postgresql"},
+	}
+	for in, want := range cases {
+		id, canon := ws.Identify(in, "42.7.4")
+		if id != want[0] || canon != want[1] {
+			t.Errorf("Identify(%q) = (%q,%q), want (%q,%q)", in, id, canon, want[0], want[1])
+		}
+	}
+	if id, _ := ws.Identify("", "1"); id != "" {
+		t.Errorf("empty name must yield no identity, got %q", id)
+	}
+	// And it must agree with what Resolve emits for the same manifest.
+	g := resolve(t, writeManifest(t, "project.clj",
+		`(defproject x "1" :dependencies [[org.postgresql/postgresql "42.7.4"]])`))
+	id, _ := ws.Identify("org.postgresql:postgresql", "42.7.4")
+	if g.Nodes[id] == nil {
+		t.Errorf("seam identity %q does not match the adapter's emitted node", id)
+	}
+}

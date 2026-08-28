@@ -6848,3 +6848,42 @@ Residual limitations: one page of 200 versions bounds the OLD end of a very long
 history every temporal check reads stays intact); pagination is the follow-up, not silently assumed away.
 Clojars as above. And the first scan from a network that reaches both `api.osv.dev` and
 `search.maven.org` remains the outstanding live confirmation for the whole D-162/D-163 chain.
+
+## D-164 — one coordinate, one PURL: the maven identity seam for the asserted tier
+
+**Trigger:** the elastic-agent live validation flagged a Maven purl-separator inconsistency at the asserted
+tier's merge fallback, left open from D-162/D-163. Verified against the source before any fix: when
+`mergeResolved` merges a deps.dev-resolved tree and no Declarer seam exists for the node's ecosystem, it
+falls back to `"pkg:" + eco + "/" + name + "@" + version` — for a maven coordinate that keeps the colon in
+the name segment (`pkg:maven/org.postgresql:postgresql@42.7.4`) while the adapter's observed nodes carry
+the namespace form (`pkg:maven/org.postgresql/postgresql@42.7.4`). Two IDs for one package: the
+observed-beats-asserted dedupe at `g.Get` cannot match, so the same direct dependency re-enters the graph
+as a colon-form twin with advisories and registry data split across the pair. This is the D-15 identity
+leak, one tier up — and the Declarer contract's own doc names Identify as where the prevention lives.
+A second consequence compounded it: the walk skips ecosystems without a declarer as expansion candidates,
+so D-162's "the -expand tier can deepen Clojure trees" held only through the asserted tier, whose merged
+children then carried the malformed IDs.
+
+**The fix is an identity-only Declarer.** `clojure.WalkSource` implements the seam for ecosystem `maven`:
+Identify splits `group:artifact` into the adapter's own `purl.NewMaven` namespace form (a bare name maps
+group == artifact, the Leiningen convention), and Declared is deliberately honest-empty — reading a Maven
+package's declared dependencies means fetching and interpreting poms (parents, properties,
+dependencyManagement), the pom.xml problem, its own decision. The walk's contract counts a coordinate
+absent from the returned map as "not read", which is the true state, so presume-tier coverage over maven
+discloses as unread rather than being guessed; real transitive resolution stays with the asserted tier,
+whose children this seam now names correctly.
+
+**Validation:** the seam's Identify pinned against the adapter's emitted node for the same manifest (one
+coordinate, one PURL, whichever tier names it first); an asserted-merge test through the real Walker and a
+deps.dev-shaped stub proving the queried dep dedupes against the observed node, the asserted child lands at
+the namespace-form PURL with asserted truth, and no colon-form ID exists; and the mutation half encoded
+permanently — the same scenario run WITHOUT the seam reproduces the split (with a skip-and-revisit note
+should the engine's raw fallback ever learn purl grammar). Full suite green (35 packages), `-race` clean,
+gofmt/vet silent.
+
+Residual limitations: the registration is one literal in the -expand source list, built inline among a
+dozen clients — unlike D-163's registry list there is no cheap seam to pin it from a test, so its coverage
+is the encoded contrast plus this entry, and extracting the construction for a registration pin is noted
+as the refactor it would be rather than smuggled into a bug fix. Declared stays empty until pom reading is
+its own decision. And the engine's raw fallback still writes `pkg:eco/name@version` for any FUTURE
+ecosystem that gains asserted resolution before its identity seam — the pattern to copy is this one.
