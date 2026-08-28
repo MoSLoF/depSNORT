@@ -6799,3 +6799,52 @@ question, each its own decision), as are `pom.xml` (still a disclosed gap; prope
 parent chains are real work, not a name-table entry) and Homebrew formulae (unchanged from D-161's
 reasoning). And Maven version-range resolution is not implemented anywhere in this tool — a range is
 disclosed as unresolved, never evaluated.
+
+## D-163 — Maven Central release history: the temporal axis reaches maven nodes
+
+**Trigger:** D-162's own residual. The clojure adapter gave maven-coordinate nodes advisory coverage
+(VC-008) while registry metadata stayed dark — no release timeline, so VC-004 and the rest of the temporal
+axis silently never evaluated for the exact dependency class (`org.postgresql:postgresql`) that motivated
+the adapter. This wires a `RegistrySource` for ecosystem `maven` through the existing Spec framework: one
+Spec (`NewMaven`), the shared client's cache/concurrency/stats machinery unchanged.
+
+**The source is Maven Central's solrsearch gav core** — `q=g:"group" AND a:"artifact"`, one page of 200
+versions requested newest-first, `timestamp` in epoch millis decoded to UTC publish instants. Names arrive
+in the `group:artifact` form maven nodes already carry; a bare name maps group == artifact, mirroring the
+Leiningen convention the adapter established.
+
+**Clojars is deliberately absent, and the reason is a data honesty constraint, not effort.** Clojars'
+artifact API serves no per-version publish timestamps, and a `Release` with a zero time would poison every
+temporal computation downstream — a "dormancy gap" measured from the Unix epoch reads as a 55-year
+awakening on every package. A fabricated timeline is strictly worse than a disclosed absence, so a
+Clojars-hosted artifact (the jepsen fixture's `com.taoensso/carmine`) 404s on Central and counts as
+NotFound in the source's stats: disclosed coverage, exactly like any other registry miss. Reaching Clojars
+honestly would take per-version pom probing (one request per version) or an upstream API that serves
+dates — either is its own decision, named here rather than approximated.
+
+**What the registry's own semantics give and withhold.** Central is immutable — a published artifact
+cannot be withdrawn — so `Yanked` stays false as a fact of the registry rather than an unread field, and
+VC-012's yank-lure shape is structurally impossible from this source (pinned in test). No per-version
+publisher identity is exposed, so `Publishers` stays empty and VC-011's honesty predicate
+(`PriorPublishers.Evaluable()`) declines to evaluate rather than claim continuity — also pinned. What
+maven nodes genuinely gain is the timeline: VC-004 dormancy, median cadence, and the republish-burst
+window, all ecosystem-neutral consumers of `ReleaseHistory`.
+
+**Validation:** parser tests two-sided (real-shaped response sorts oldest-first with correct UTC instants;
+empty versions, zero/negative timestamps, and duplicate docs all drop — a fabricated epoch date corrupting
+the dormancy math is the failure the skip exists to prevent; malformed JSON errors rather than returning
+an empty history); the request URL pinned fragment-by-fragment through the shared client with a fake doer
+(`search.maven.org` was egress-blocked in the landing environment, so the wire is the contract, as with
+D-162's OSV mapping); the 404 path pinned as NotFound-not-failure; a registration pin
+(`TestRegistrySourcesCoverEmittedEcosystems`) that fails if any emitting ecosystem loses its release-history
+source — the quiet-regression shape this entry exists to close; and a consumer-side pin that a maven
+history fires VC-004 identically to npm (`TestDormancyFiresOnMavenHistory`). Mutation-checked: unwiring
+`NewMaven` fails the registration pin. Live-fired through the built binary on the jepsen fixture: the
+source issued the exact expected solrsearch query per dependency and, with egress denied, the scan
+disclosed `degraded data source(s): maven-central-registry … NOT an all-clear` — the D-24 machinery
+working unmodified for the new source. Full suite green (35 packages), `-race` clean, gofmt/vet silent.
+
+Residual limitations: one page of 200 versions bounds the OLD end of a very long history (the recent
+history every temporal check reads stays intact); pagination is the follow-up, not silently assumed away.
+Clojars as above. And the first scan from a network that reaches both `api.osv.dev` and
+`search.maven.org` remains the outstanding live confirmation for the whole D-162/D-163 chain.
