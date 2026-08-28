@@ -1468,7 +1468,22 @@ func AnalyzeRust(buildRs string) Surface {
 	if buildRs == "" {
 		return s
 	}
-	caps, ev := scanCaps(buildRs)
+	// Comments stripped before capability/artifact scanning (found via a
+	// fluxfang re-baseline sweep, August 2026): AnalyzeRust was one of the
+	// few Analyze* functions NOT already doing this — AnalyzeLoadTime,
+	// AnalyzeAIAgentConfig (OPU-37), and the PHP plugin path all already
+	// strip comments first. Without it, a URL cited in a documentation
+	// comment (the extremely common Rust idiom of citing a Rust blog post
+	// or GitHub issue to explain why a version-gated `cfg` check exists —
+	// present in nearly every widely-used crate: serde, anyhow, thiserror,
+	// proc-macro2, quote, zerocopy, rustix all do this) or a license-header
+	// URL (winapi's `// http://opensource.org/licenses/MIT`) reads as
+	// CapNetwork exactly like a real outbound call, firing VC-002b on
+	// crates with no networking behavior of any kind. Confirmed against a
+	// real scan: 17 of these on one project, all citation/license URLs,
+	// zero real network calls.
+	clean := stripCodeComments(buildRs)
+	caps, ev := scanCaps(clean)
 	caps = appendUnique(caps, CapExec)
 	ev = appendStr(ev, "build.rs")
 	h := Hook{
@@ -1476,9 +1491,9 @@ func AnalyzeRust(buildRs string) Surface {
 		Command:  truncateStr(buildRs, 400),
 		Caps:     caps,
 		Evidence: ev,
-		Sinks:    findSinks(buildRs),
+		Sinks:    findSinks(clean),
 	}
-	for _, u := range dedupe(urlRe.FindAllString(buildRs, -1)) {
+	for _, u := range dedupe(urlRe.FindAllString(clean, -1)) {
 		h.Artifacts = append(h.Artifacts, Artifact{Ref: u, Remote: true})
 	}
 	s.Hooks = append(s.Hooks, h)
