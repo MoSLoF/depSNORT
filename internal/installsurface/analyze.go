@@ -2479,6 +2479,114 @@ func stripSetupDocStrings(source string) string {
 	return source
 }
 
+// displaySinkOpeners are call openers whose string-literal arguments are
+// DISPLAYED to the user (or become the process exit message) — never fetched,
+// never executed: build-help output, version-gate farewells, deprecation
+// warnings. A network-shaped token inside such a string ("python2 -m pip
+// install psutil==6.1.*" in a sys.exit(textwrap.dedent(...)) Python-2 notice,
+// a readthedocs URL in printed build help) is documentation shown to a human,
+// not egress (pillow/psutil VC-002b FP, D-160). The whole-file suppression in
+// analyzeSetupPy cannot catch these: a setup.py with a REAL build toolchain
+// (psutil runs subprocess for its C build) has a shell-exec sink somewhere in
+// the file, which disarms that guard for every marker in it — the judgment
+// has to be per call site, not per file.
+var displaySinkOpeners = []string{
+	"print(", "sys.exit(", "sys.stderr.write(", "sys.stdout.write(", "warnings.warn(",
+}
+
+func isPyIdentChar(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// displaySinkOpenerAt reports the length of the display-sink call opener
+// beginning at i, or 0. The preceding character must not be an identifier
+// character or a dot: `pprint(` is not `print(`, and `obj.print(` is some
+// object's method whose semantics we cannot know — only the builtin / stdlib
+// spellings above are trusted to display.
+func displaySinkOpenerAt(s string, i int) int {
+	if i > 0 {
+		p := s[i-1]
+		if isPyIdentChar(p) || p == '.' {
+			return 0
+		}
+	}
+	for _, op := range displaySinkOpeners {
+		if strings.HasPrefix(s[i:], op) {
+			return len(op)
+		}
+	}
+	return 0
+}
+
+// stripPyDisplayStrings drops the CONTENTS of plain string literals that sit
+// inside a display-sink call's argument list (see displaySinkOpeners), leaving
+// everything else — including all CODE inside those parentheses — intact for
+// capability scanning. Two deliberate asymmetries keep the guard one-sided:
+// f-strings are kept verbatim, because an f-string can embed executable
+// expressions ({__import__('urllib.request').urlopen(...)}) and displaying a
+// value is not proof the expression that computed it was inert; and only
+// string CONTENTS are dropped, so a real call nested in the same argument
+// list (print(requests.get(url))) still scans. Over-suppression here can only
+// hide text a human was meant to read; it can never hide a call. Expects
+// comment-free input (run after stripPyInert); `name (` with a space before
+// the paren is not matched — the same literal-spelling ceiling every marker
+// in this file carries.
+func stripPyDisplayStrings(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+	i, n := 0, len(src)
+	for i < n {
+		// A string literal OUTSIDE any display sink is copied verbatim, so
+		// quotes and parens inside it can neither open a sink scan nor
+		// unbalance one.
+		if q := pyStringOpen(src, i); q >= 0 && (i == 0 || !isPyIdentChar(src[i-1])) {
+			end := scanPyString(src, q)
+			b.WriteString(src[i:end])
+			i = end
+			continue
+		}
+		if op := displaySinkOpenerAt(src, i); op > 0 {
+			b.WriteString(src[i : i+op])
+			i += op
+			depth := 1
+			for i < n && depth > 0 {
+				if q := pyStringOpen(src, i); q >= 0 && (i == 0 || !isPyIdentChar(src[i-1])) {
+					end := scanPyString(src, q)
+					if hasPyFPrefix(src[i:q]) {
+						b.WriteString(src[i:end]) // f-string: may embed real code
+					} else {
+						b.WriteString(`""`)
+					}
+					i = end
+					continue
+				}
+				c := src[i]
+				if c == '(' {
+					depth++
+				} else if c == ')' {
+					depth--
+				}
+				b.WriteByte(c)
+				i++
+			}
+			continue
+		}
+		b.WriteByte(src[i])
+		i++
+	}
+	return b.String()
+}
+
+// hasPyFPrefix reports whether the string-literal prefix letters include f/F.
+func hasPyFPrefix(prefix string) bool {
+	for i := 0; i < len(prefix); i++ {
+		if prefix[i] == 'f' || prefix[i] == 'F' {
+			return true
+		}
+	}
+	return false
+}
+
 // analyzeSetupPy extracts install-time hooks from setup.py. It identifies
 // module-level side effects (code that runs before setup()) and custom cmdclass
 // overrides (classes that replace pip's default install behavior).
@@ -2493,8 +2601,13 @@ func analyzeSetupPy(source string) []Hook {
 	// that also contain a network function call — those are actual targets.
 	// The documentation metadata fields (long_description / description) are
 	// stripped first: a README embedded there carries example code and tool
-	// names that are metadata, not egress (beats live-fire VC-002b FP).
-	cleaned := urlRe.ReplaceAllString(stripPyInert(stripSetupDocStrings(source)), "")
+	// names that are metadata, not egress (beats live-fire VC-002b FP). Then
+	// the contents of plain strings inside display sinks (print / sys.exit /
+	// warnings.warn / std-stream writes) are dropped: text shown to a human is
+	// not egress even when it names an install command, and the whole-file
+	// suppression below cannot reach it in a file that legitimately execs its
+	// build toolchain (psutil VC-002b FP, D-160).
+	cleaned := urlRe.ReplaceAllString(stripPyDisplayStrings(stripPyInert(stripSetupDocStrings(source))), "")
 
 	allCaps, allEvidence := scanCaps(cleaned)
 	// Shell-tool network words (curl/wget/certutil/...) are egress only if the
@@ -2550,8 +2663,24 @@ func analyzeSetupPy(source string) []Hook {
 				classRe := regexp.MustCompile(`class\s+\w+\s*\([^)]*` + cmd + `[^)]*\)\s*:`)
 				if loc := classRe.FindStringIndex(source); loc != nil {
 					body := extractIndentedBlock(source[loc[1]:])
-					h.Caps, h.Evidence = scanCaps(body)
-					h.Sinks = findSinks(body)
+					// The class body gets the same inert-text discipline as the
+					// module-level pass above — comments/docstring, displayed
+					// string contents, then bare URLs stripped before scanning.
+					// It previously scanned RAW, so a readthedocs link in a
+					// build_ext error message read as url-literal CapNetwork
+					// (pillow VC-002b FP, D-160). Real egress is carried by
+					// function markers, which survive every strip; IMDS runs on
+					// the raw body below, exactly as module-level does.
+					cleanedBody := urlRe.ReplaceAllString(stripPyDisplayStrings(stripPyInert(body)), "")
+					h.Caps, h.Evidence = scanCaps(cleanedBody)
+					// Same shell-tool suppression as module-level: a curl/wget
+					// word with no network-library call and no shell-exec sink
+					// in this body is a printed instruction, not egress.
+					if containsCap(h.Caps, CapNetwork) && !hasLibraryNetworkMarker(cleanedBody) && !hasShellExecSink(cleanedBody) {
+						h.Caps, h.Evidence = dropCap(h.Caps, CapNetwork, h.Evidence,
+							"curl ", "wget ", "certutil", "bitsadmin", "finger.exe", "msiexec")
+					}
+					h.Sinks = findSinks(cleanedBody)
 					if m := imdsRe.FindString(body); m != "" {
 						h.Caps = appendUnique(h.Caps, CapCredentials)
 						h.Evidence = appendStr(h.Evidence, "imds:"+m)
