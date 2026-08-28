@@ -1412,6 +1412,10 @@ func cmdScan(args []string) int {
 				&rubygems.WalkSource{Deps: gemDeps, Index: gemIdx},
 				&composer.WalkSource{Deps: composerDeps, Index: composerIdx},
 				&gomod.WalkSource{Proxy: goProxy},
+				// Identity-only (D-164): names deps.dev-asserted maven children
+				// with the adapter's namespace-form PURLs so observed-beats-
+				// asserted dedupe holds; its presume tier reads nothing, disclosed.
+				&clojure.WalkSource{},
 			}
 			// The asserted tier is default-on (OPU-12 D-2): a verdict presented as
 			// authoritative should rest on resolved facts, not this tool's presumed
