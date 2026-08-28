@@ -69,6 +69,28 @@ func AddToGraph(g *graph.Graph, pkg *graph.Node, s installsurface.Surface) {
 			g.AddEdge(hookID, pkg.ID, graph.EdgeRepublish)
 		}
 
+		// The exfil channel, drawn (the VC-002d signature made visible in the
+		// graph). graph.EdgeExfil was defined as "artifact/sink -> C2", counted
+		// in the install-time subgraph and rendered by the emitters, but like
+		// EdgeRepublish before D-152 no detector ever produced one. A hook that
+		// combines named-credential access with network egress is exfil-capable
+		// (exactly VC-002d's condition, HasCap folding artifact caps in the same
+		// way): the edge links each credential sink to each remote destination
+		// the hook can reach, so the leak is legible in a graph view and not only
+		// in the finding. Both endpoints already sit in the install-time subgraph
+		// (hook->sink, hook->fetch), so this draws no risk propagation the
+		// existing edges did not.
+		if h.HasCap(installsurface.CapCredentials) && h.HasCap(installsurface.CapNetwork) {
+			for _, sk := range h.Sinks {
+				sinkID := "sink:" + pkg.ID + "#" + sk.Name
+				for _, a := range h.Artifacts {
+					if a.Remote {
+						g.AddEdge(sinkID, "artifact:"+pkg.ID+"#"+a.Ref, graph.EdgeExfil)
+					}
+				}
+			}
+		}
+
 		for _, a := range h.Artifacts {
 			artID := "artifact:" + pkg.ID + "#" + a.Ref
 			an := g.AddNode(&graph.Node{

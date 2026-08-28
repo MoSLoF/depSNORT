@@ -678,6 +678,20 @@ func addSurfaceToGraph(g *graph.Graph, pkg *graph.Node, s installsurface.Surface
 			g.AddEdge(hookID, pkg.ID, graph.EdgeRepublish)
 		}
 
+		// The exfil channel — VC-002d's credential+network signature made visible
+		// (see instsurf.AddToGraph for the full rationale). Drawn here too because
+		// this copy is hand-rolled; the conformance test keeps the copies aligned.
+		if h.HasCap(installsurface.CapCredentials) && h.HasCap(installsurface.CapNetwork) {
+			for _, sk := range h.Sinks {
+				sinkID := "sink:" + pkg.ID + "#" + sk.Name
+				for _, a := range h.Artifacts {
+					if a.Remote {
+						g.AddEdge(sinkID, "artifact:"+pkg.ID+"#"+a.Ref, graph.EdgeExfil)
+					}
+				}
+			}
+		}
+
 		for _, a := range h.Artifacts {
 			artID := "artifact:" + pkg.ID + "#" + a.Ref
 			an := g.AddNode(&graph.Node{
