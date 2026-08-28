@@ -6513,3 +6513,118 @@ equivalent beyond the reasoning above. And this is the same static ceiling every
 carries (D-04/OPU-32 lineage): a publish command assembled at runtime from string fragments is out of reach
 of a literal marker match, exactly as it is for the npm-family verbs D-152 already accepted this limitation
 for.
+
+## D-156 — the `--dry-run` carve-out is per command, not per hook
+
+**Trigger:** a follow-up to D-154, not a fresh hunt. The verification pass on the cross-ecosystem
+propagation work surfaced a false-negative class inherited from D-152's npm logic and carried forward when
+D-154 widened the carve-out to cargo — a defect in the most severe finding class the tool has, VC-002k
+critical/block.
+
+**The gap.** `propagationDryRunRe` was matched against the whole hook blob. A single `--dry-run` anywhere in
+a hook therefore suppressed `CapPropagate` for a genuine publish sitting elsewhere in the same script.
+`npm publish --dry-run && npm publish` — a rehearsal chained to the real thing — scanned as no propagation,
+as did a decoy `cargo publish --dry-run` placed next to a real one. This is exactly the shape an author
+evading detection would reach for: park a harmless dry-run beside the live publish and the whole hook reads
+clean. A worm-step false negative on the single most severe signal class.
+
+**The fix.** `scanCaps` now splits the blob at shell command separators (`splitCommandSegments`: `;`, `&`,
+`|`, and newlines) and applies the dry-run carve-out per segment rather than over the whole text. A rehearsal
+standing beside a real publish counts as propagation; a lone rehearsal, the case the carve-out exists to
+protect, still does not.
+
+**Validation:** `internal/installsurface/dryrun_masking_test.go` —
+`TestDryRunFollowedByRealPublishStillPropagates` exercises a real publish beside a rehearsal in four shapes,
+and `TestLoneDryRunIsStillNotPropagation` pins the boundary the fix must not regress. Proven non-vacuous:
+reverting the change fails the former (the caps fall back to `[]`/`[exec]`) while the latter stays green, so
+the fix neither under- nor over-corrects. Full suite green, `-race` clean.
+
+Residual limitations: the segment split is a heuristic, not a shell parser. A publish assembled across a
+pipe-continuation or a here-doc is out of its reach — the same static ceiling every marker in this file
+carries (D-04/OPU-32 lineage), and the same one D-152 already accepted for the npm-family verbs.
+
+## D-157 — draw `graph.EdgeExfil` for VC-002d exfil-capable hooks
+
+**Trigger:** the verification pass's finding #4 — the same aspirational-vocabulary defect D-152 closed for
+`EdgeRepublish`, still open one edge over for `EdgeExfil`.
+
+**The gap.** `EdgeExfil` ("artifact/sink → C2") was defined, counted in the install-time subgraph, and
+rendered by both the Cypher and DOT emitters — but no detector ever produced one. The exfil leak was legible
+in the VC-002d finding text and invisible in the graph, precisely the "an edge drawn for nothing" condition
+D-152 named.
+
+**The fix.** In `instsurf.AddToGraph` — and the three hand-rolled npm, PyPI, and Composer copies that predate
+the helper — a hook carrying both `CapCredentials` and `CapNetwork` now draws an edge from each credential
+sink to each remote artifact. Both endpoints already sit in the install-time subgraph, so nothing new
+propagates risk and no exit code moves; this is a graph-draw over a check (VC-002d) that already fires, not
+new detection logic.
+
+**Validation:** `internal/ecosystem/conformance/exfil_test.go` — `TestExfilEdgeIsDrawnByEveryAdapter` asserts
+the edge across all seven ecosystem adapters, and `TestExfilNoEdgeWithoutBothCaps` pins the boundary that no
+edge is drawn unless both capabilities are present. Mutation-checked across every adapter (reverting the
+wiring fails the draw test, the boundary stays green) and live-fired through the built binary, where
+`sink → exfil → artifact` renders in DOT as intended.
+
+Residual limitations: an edge needs a materialized sink and a remote artifact to connect. The rubygems
+`gemspec:extensions` branch is caps-only (D-150) and materializes neither, so its exfil case is carried in
+the test via a gemspec-body payload rather than that branch.
+
+## D-158 — strip comments before scanning Ruby, PowerShell, and MSBuild
+
+**Trigger:** the verification pass's finding #3, which is really D-153's own residual-limitations note come
+due: D-153 closed the comment false-positive class for the C family and explicitly flagged Ruby, NuGet
+PowerShell, and MSBuild XML as still scanning raw source.
+
+**The gap.** `AnalyzeRuby`, `AnalyzeDotNet`, and `AnalyzeMSBuild` scanned unstripped source, so a license
+header or a documentation URL in an `extconf.rb`/`Rakefile`/`gemspec`, an `install.ps1`/`init.ps1`, or a
+`.targets`/`.props` file read as `CapNetwork` — the identical false-positive class D-153 closed for Rust,
+left open in three more ecosystems.
+
+**The fix.** `stripRubyComments` (`=begin`/`=end` blocks plus `#`), `stripPowerShellComments` (`<# #>` blocks
+plus `#`), and `stripXMLComments` (`<!-- -->`), wired into the three analyzers the same way `AnalyzeRust`
+uses `stripCodeComments`: capability scanning, sink detection, and URL-artifact extraction run on
+comment-free text, while the raw source is retained for `Command` display. The `#` strip is anchored on
+preceding whitespace or line-start and excludes the Ruby interpolation openers `#{`, `#$`, and `#@` — RE2 has
+no lookahead, so this is done by construction — so a marker glued to interpolated code is not swallowed as a
+comment.
+
+**Validation:** `internal/installsurface/comment_stripping_test.go` exercises both directions of D-153's
+over-correction guard for all three grammars (a commented marker must not fire; a real network call must
+still be detected), plus `TestRubyInterpolationNotEatenAsComment` for the interpolation edge. Mutation-
+checked: reverting the change fails the commented-marker cases, and the real-network cases pass either way,
+proving the tests pin behavior and the strip does not swallow real capability.
+
+Residual limitations: the same heuristic discipline as D-25 and D-153 — over-stripping can only under-cite a
+reference, never fabricate a capability, and this is comment removal, not tokenization.
+
+## D-159 — test the untrusted-input parsers: registry, graph, securefs
+
+**Trigger:** the verification pass's finding #2 — coverage inverted relative to the trust boundary. The
+detection logic sat near 90% while the code parsing hostile registry JSON and untrusted filesystem paths sat
+far lower, i.e. the surface most exposed to adversarial input was the least tested.
+
+**The gap — a test gap, not a bug.** `securefs` ReadDir/Contains (the directory-facing containment surface),
+`graph` traversal edge cases, and the `registry` dependency parsers all had thin or no direct coverage. No
+defect was latent behind it; the concern was that the untrusted-input surface had the least protection
+against regression.
+
+**The fix.** Adversarial and edge-case suites, each targeting the parser rather than padding line count.
+`internal/securefs/readdir_contains_test.go` drives real escape vectors — path traversal, absolute-outside
+paths, a symlinked-out directory (the entry-name-leak threat the doc comments name, with a graceful skip
+where the OS lacks symlink support), regular-file refusal, and the prefix-sibling boundary — taking securefs
+from ~55% to 88%. `internal/graph/edgecases_test.go` covers RenameNode, Merge, self-loop, cycle termination,
+a dangling edge, and the empty graph, taking graph from ~60% to 77%. `internal/datasource/registry/
+deps_parsers_test.go` adds malformed-JSON, empty-field, and platform-filter cases against the gem/composer/
+nuget dependency parsers plus a Doer-driven Histories orchestrator test, taking registry from ~42% to 60%.
+
+Folded in here is the race fix that the new registry suite exposed (`38143bf`): the `Histories` test doer's
+call counter was written from concurrent fetch goroutines without synchronization, and `-race` flagged it in
+CI (cgo/`-race` is unavailable on the Windows dev box, so it surfaced only there). Mutex-guarded now, read
+through `callCount()`. Test-only.
+
+**Validation:** the new suites are themselves the validation — all green, and `go test -race ./...` clean
+across the entire repo including the newly guarded doer.
+
+Residual limitations: `registry` at 60.3% remains the lowest in the tree; the gap that remains is the
+HTTP-orchestration paths rather than the parsers, and closing it further is a reasonable next increment, not
+a blocker.
