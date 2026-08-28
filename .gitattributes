@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings in the working tree on every platform.
+# CI runs these on ubuntu; a Windows checkout that rewrote them to CRLF would
+# make the shebang line fail (`/usr/bin/env bash\r`) and break the CI gate.
+*.sh text eol=lf
