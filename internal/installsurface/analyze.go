@@ -842,6 +842,22 @@ func containsWord(hay, word string) bool {
 	}
 }
 
+// splitCommandSegments breaks a command blob at shell command separators
+// (`;`, `&`, `|`, and newlines) so the --dry-run carve-out can be judged per
+// command rather than across the whole hook. It mirrors the `[^;&|\n]` boundary
+// the dry-run pattern itself uses. FieldsFunc drops the separators and any empty
+// runs between them; a leading space left on a segment still satisfies
+// propagationRe's whitespace anchor.
+func splitCommandSegments(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		switch r {
+		case ';', '&', '|', '\n', '\r':
+			return true
+		}
+		return false
+	})
+}
+
 // scanCaps classifies a blob of text (a command line or a file's source).
 func scanCaps(text string) ([]Capability, []string) {
 	var caps []Capability
@@ -871,9 +887,17 @@ func scanCaps(text string) ([]Capability, []string) {
 	scan(execMarkers, CapExec)
 	scan(obfuscationMarkers, CapObfuscation)
 	scan(propagationAPIMarkers, CapPropagate)
-	// A CLI publish counts only when it is not an explicit --dry-run rehearsal.
-	if m := propagationRe.FindString(text); m != "" && !propagationDryRunRe.MatchString(text) {
-		add(CapPropagate, "registry-publish:"+strings.TrimSpace(m))
+	// A CLI publish counts unless it is an explicit --dry-run rehearsal. The
+	// carve-out is judged PER command segment, not across the whole hook: a
+	// rehearsal FOLLOWED BY a real publish (`npm publish --dry-run && npm
+	// publish`, or a decoy `cargo publish --dry-run` beside a genuine one) must
+	// still count. The earlier whole-text check let any single --dry-run
+	// anywhere in the hook mask a real publish — a worm-step false negative on
+	// the critical/block VC-002k signal (assessment follow-up to D-154).
+	for _, seg := range splitCommandSegments(text) {
+		if m := propagationRe.FindString(seg); m != "" && !propagationDryRunRe.MatchString(seg) {
+			add(CapPropagate, "registry-publish:"+strings.TrimSpace(m))
+		}
 	}
 	// Persistence and ordinary install writes are both CapFilesystem; the
 	// persistence/benign distinction lives in the marker (IsPersistenceMarker),
