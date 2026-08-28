@@ -1,0 +1,78 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 4384 >>
+stream
+BT /F2 24.0 Tf 0.080 0.100 0.130 rg 48.00 787.89 Td (depSNORT) Tj ET
+BT /F1 11.0 Tf 0.420 0.460 0.520 rg 48.00 760.89 Td (Dependency supply-chain scan report) Tj ET
+BT /F1 8.5 Tf 0.620 0.660 0.720 rg 48.00 745.89 Td (dev  -  static, zero-execution analysis) Tj ET
+0.080 0.100 0.130 RG 1.60 w 48.00 727.89 m 547.28 727.89 l S
+0.960 0.970 0.980 rg 48.00 703.89 499.28 26.00 re f
+0.660 0.350 0.050 rg 48.00 703.89 3.50 26.00 re f
+BT /F2 11.5 Tf 0.660 0.350 0.050 rg 60.00 711.89 Td (INCOMPLETE - no findings, but degraded data source\(s\): osv. This is NOT an all-clear. Exit 0.) Tj ET
+BT /F2 9.0 Tf 0.620 0.660 0.720 rg 48.00 677.89 Td (SCOPE) Tj ET
+BT /F1 9.5 Tf 0.080 0.100 0.130 rg 48.00 663.89 Td (Root: pkg:pypi/pinned-scan-dir@0.0.0) Tj ET
+BT /F1 9.5 Tf 0.080 0.100 0.130 rg 48.00 651.89 Td (Graph: 17 nodes \(10 packages, 7 install hooks, 0 referenced artifacts, 0 sinks\), 16 edges) Tj ET
+BT /F1 9.5 Tf 0.080 0.100 0.130 rg 48.00 639.89 Td (Findings: 0 block, 0 gate-eligible, 0 advisory \(0 total\)) Tj ET
+BT /F2 9.0 Tf 0.620 0.660 0.720 rg 48.00 621.89 Td (RESOLUTION COVERAGE) Tj ET
+BT /F1 8.5 Tf 0.420 0.460 0.520 rg 48.00 607.89 Td (Flat resolution \(pypi\): this lockfile format records no inter-package relationships, so those packages resolve at depth 1 by) Tj ET
+BT /F1 8.5 Tf 0.420 0.460 0.520 rg 48.00 596.89 Td (construction, not by fact. Transitive structure is unavailable for them and the depth column below should not be read as a) Tj ET
+BT /F1 8.5 Tf 0.420 0.460 0.520 rg 48.00 585.89 Td (dependency tree.) Tj ET
+BT /F1 8.5 Tf 0.660 0.350 0.050 rg 48.00 574.89 Td (Data source\(s\) degraded \(osv\): advisories or release history were unavailable for some coordinates, so vulnerability and) Tj ET
+BT /F1 8.5 Tf 0.660 0.350 0.050 rg 48.00 563.89 Td (temporal checks are a lower bound over them.) Tj ET
+BT /F2 9.0 Tf 0.620 0.660 0.720 rg 48.00 546.89 Td (DATA SOURCE COVERAGE) Tj ET
+BT /F3 8.5 Tf 0.080 0.100 0.130 rg 48.00 532.89 Td (osv            online  -  queried 9, cache 0, network 0, advisories 0, gaps 9) Tj ET
+BT /F1 8.5 Tf 0.660 0.350 0.050 rg 58.00 521.39 Td (Coverage is incomplete: 9 coordinate\(s\) returned no data. Findings below are a lower bound.) Tj ET
+BT /F1 8.5 Tf 0.780 0.090 0.290 rg 58.00 510.39 Td (Error: osv: querybatch: Post "https://api.osv.dev/v1/querybatch": Forbidden) Tj ET
+BT /F3 8.5 Tf 0.080 0.100 0.130 rg 48.00 499.39 Td (npm-registry   online  -  queried 0, cache 0, network 0, advisories 0, gaps 0) Tj ET
+BT /F3 8.5 Tf 0.080 0.100 0.130 rg 48.00 487.89 Td (pypi-registry  online  -  queried 9, cache 9, network 0, advisories 0, gaps 0) Tj ET
+BT /F3 8.5 Tf 0.080 0.100 0.130 rg 48.00 476.39 Td (rubygems-registry online  -  queried 0, cache 0, network 0, advisories 0, gaps 0) Tj ET
+BT /F3 8.5 Tf 0.080 0.100 0.130 rg 48.00 464.89 Td (cargo-registry online  -  queried 0, cache 0, network 0, advisories 0, gaps 0) Tj ET
+BT /F3 8.5 Tf 0.080 0.100 0.130 rg 48.00 453.39 Td (composer-registry online  -  queried 0, cache 0, network 0, advisories 0, gaps 0) Tj ET
+BT /F3 8.5 Tf 0.080 0.100 0.130 rg 48.00 441.89 Td (nuget-registry online  -  queried 0, cache 0, network 0, advisories 0, gaps 0) Tj ET
+0.850 0.870 0.900 RG 0.80 w 48.00 422.39 m 547.28 422.39 l S
+BT /F2 13.0 Tf 0.080 0.100 0.130 rg 48.00 410.39 Td (FINDINGS) Tj ET
+BT /F1 10.0 Tf 0.420 0.460 0.520 rg 48.00 392.39 Td (No findings. Every resolved package was clean against the enabled checks and data sources.) Tj ET
+0.850 0.870 0.900 RG 0.80 w 48.00 373.39 m 547.28 373.39 l S
+BT /F2 13.0 Tf 0.080 0.100 0.130 rg 48.00 361.39 Td (PACKAGE RISK) Tj ET
+BT /F1 9.5 Tf 0.420 0.460 0.520 rg 48.00 343.39 Td (No package carries a risk state: all 10 resolved packages are clean.) Tj ET
+0.850 0.870 0.900 RG 0.80 w 48.00 320.39 m 547.28 320.39 l S
+BT /F1 7.5 Tf 0.620 0.660 0.720 rg 48.00 310.39 Td (depSNORT performs static analysis only: it parses manifests and lockfiles and never runs a package manager or executes a lifecycle hook. It) Tj ET
+BT /F1 7.5 Tf 0.620 0.660 0.720 rg 48.00 300.39 Td (detects capability and indirection, not payload semantics. Advisory findings never affect the exit code; gate-eligible findings do so only when) Tj ET
+BT /F1 7.5 Tf 0.620 0.660 0.720 rg 48.00 290.39 Td (the run opts in; block findings always fail.) Tj ET
+BT /F1 7.5 Tf 0.620 0.660 0.720 rg 48.00 280.39 Td (Report output is deterministic \(no embedded timestamp\).) Tj ET
+
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000267 00000 n 
+0000004703 00000 n 
+0000004800 00000 n 
+0000004902 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R /Info << /Title (depSNORT scan report) /Producer (depSNORT) >> >>
+startxref
+4997
+%%EOF

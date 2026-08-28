@@ -1,0 +1,178 @@
+{
+  "tool": "depSNORT",
+  "version": "dev",
+  "summary": {
+    "nodes": 2,
+    "edges": 1,
+    "roots": [
+      "pkg:pypi/impacket@0.0.0"
+    ],
+    "orphans": 0
+  },
+  "data_sources": [
+    {
+      "name": "osv",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "npm-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "pypi-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "rubygems-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "cargo-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "composer-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "nuget-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "hook:pkg:pypi/impacket@0.0.0#setup.py_module-level",
+      "kind": "install-hook",
+      "ecosystem": "pypi",
+      "name": "setup.py:module-level",
+      "version": "",
+      "direct": false,
+      "depth": 0,
+      "risk": "clean",
+      "attr": {
+        "cap.exec": "true",
+        "hook.command": "#!/usr/bin/env python\n# Impacket - Collection of Python classes for working with network protocols.\n#\n# Copyright Fortra, LLC and its affiliated companies \n#\n# All rights reserved.\n#\n# This software is provided under a slightly modified version\n# of the Apache Software License. See the accompanying LICENSE file\n# for more information.\n#\n# Description:\n#   Setup file\n#\nimport glob\nimport os\nimport ...",
+        "hook.evidence": "system(,popen(",
+        "hook.package": "pkg:pypi/impacket@0.0.0"
+      }
+    },
+    {
+      "id": "pkg:pypi/impacket@0.0.0",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "impacket",
+      "version": "0.0.0",
+      "direct": false,
+      "depth": 0,
+      "risk": "clean",
+      "attr": {
+        "depsnort.unresolved": "charset_normalizer,flask,ldap3,ldapdomaindump,pyOpenSSL,pyasn1,pyasn1_modules,pycryptodomex,setuptools,six",
+        "depsnort.unresolved_count": "10",
+        "pypi.marker_excluded": "pyreadline3",
+        "pypi.version_source": "unresolved-placeholder"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "pkg:pypi/impacket@0.0.0",
+      "to": "hook:pkg:pypi/impacket@0.0.0#setup.py_module-level",
+      "type": "declares-hook"
+    }
+  ],
+  "verdict": {
+    "exit_code": 0,
+    "counts": {
+      "block": 0,
+      "gate_eligible": 0,
+      "advisory": 0,
+      "total": 0
+    },
+    "coverage": {
+      "complete": false,
+      "degraded": true,
+      "unresolved_dependencies": 10,
+      "incomplete_roots": 1,
+      "orphans": 0,
+      "roots": [
+        {
+          "node_id": "pkg:pypi/impacket@0.0.0",
+          "unresolved": 10,
+          "unresolved_names": [
+            "charset_normalizer",
+            "flask",
+            "ldap3",
+            "ldapdomaindump",
+            "pyOpenSSL",
+            "pyasn1",
+            "pyasn1_modules",
+            "pycryptodomex",
+            "setuptools",
+            "six"
+          ]
+        }
+      ]
+    },
+    "risk_by_node": {
+      "hook:pkg:pypi/impacket@0.0.0#setup.py_module-level": "clean",
+      "pkg:pypi/impacket@0.0.0": "clean"
+    },
+    "findings": []
+  }
+}

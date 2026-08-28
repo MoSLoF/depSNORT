@@ -1,0 +1,473 @@
+{
+  "tool": "depSNORT",
+  "version": "dev",
+  "summary": {
+    "nodes": 17,
+    "edges": 16,
+    "roots": [
+      "pkg:pypi/pinned-scan-dir@0.0.0"
+    ],
+    "orphans": 0
+  },
+  "data_sources": [
+    {
+      "name": "osv",
+      "stats": {
+        "queried": 9,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 9
+      },
+      "error": "osv: querybatch: Post \"https://api.osv.dev/v1/querybatch\": Forbidden"
+    },
+    {
+      "name": "npm-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "pypi-registry",
+      "stats": {
+        "queried": 9,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 9,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "rubygems-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "cargo-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "composer-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    },
+    {
+      "name": "nuget-registry",
+      "stats": {
+        "queried": 0,
+        "advisories": 0,
+        "malicious": 0,
+        "from_cache": 0,
+        "from_network": 0,
+        "offline": false,
+        "gaps": 0
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "hook:pkg:pypi/charset-normalizer@3.4.0#setup.py_module-level",
+      "kind": "install-hook",
+      "ecosystem": "pypi",
+      "name": "setup.py:module-level",
+      "version": "",
+      "direct": false,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "cap.env": "true",
+        "hook.command": "#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n\nimport os\nimport sys\nfrom re import search\n\nfrom setuptools import setup\n\n\ndef get_version():\n    with open('charset_normalizer/version.py') as version_file:\n        return search(r\"\"\"__version__\\s+=\\s+(['\"])(?P\u003cversion\u003e.+?)\\1\"\"\",\n                      version_file.read()).group('version')\n\n\nUSE_MYPYC = False\n\nif len(sys.argv) \u003e 1 and sys.argv[1] == \"...",
+        "hook.evidence": "getenv(,os.getenv(",
+        "hook.package": "pkg:pypi/charset-normalizer@3.4.0"
+      }
+    },
+    {
+      "id": "hook:pkg:pypi/ldap3@2.9.1#setup.py_module-level",
+      "kind": "install-hook",
+      "ecosystem": "pypi",
+      "name": "setup.py:module-level",
+      "version": "",
+      "direct": false,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "cap.filesystem": "true",
+        "hook.command": "\"\"\"\r\n\"\"\"\r\n\r\n# Created on 2013.07.11\r\n#\r\n# Author: Giovanni Cannata\r\n#\r\n# Copyright 2013 - 2018 Giovanni Cannata\r\n#\r\n# This file is part of ldap3.\r\n# ldap3 is free software: you can redistribute it and/or modify\r\n# it under the terms of the GNU Lesser General Public License as published\r\n# by the Free Software Foundation, either version 3 of the License, or\r\n# (at your option) any later version.\r\n#...",
+        "hook.evidence": "distutils.",
+        "hook.package": "pkg:pypi/ldap3@2.9.1"
+      }
+    },
+    {
+      "id": "hook:pkg:pypi/pycryptodomex@3.21.0#setup.py_cmdclass.build_ext",
+      "kind": "install-hook",
+      "ecosystem": "pypi",
+      "name": "setup.py:cmdclass.build_ext",
+      "version": "",
+      "direct": false,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "hook.command": "cmdclass override: build_ext",
+        "hook.package": "pkg:pypi/pycryptodomex@3.21.0"
+      }
+    },
+    {
+      "id": "hook:pkg:pypi/pycryptodomex@3.21.0#setup.py_module-level",
+      "kind": "install-hook",
+      "ecosystem": "pypi",
+      "name": "setup.py:module-level",
+      "version": "",
+      "direct": false,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "cap.exec": "true",
+        "cap.filesystem": "true",
+        "hook.command": "#! /usr/bin/env python\n#\n#  setup.py : Distutils setup script\n#\n# ===================================================================\n# The contents of this file are dedicated to the public domain.  To\n# the extent that dedication to the public domain is not available,\n# everyone is granted a worldwide, perpetual, royalty-free,\n# non-exclusive license to exercise all rights associated with the\n# c...",
+        "hook.evidence": "eval(,__import__(,`,sysconfig.,distutils.",
+        "hook.package": "pkg:pypi/pycryptodomex@3.21.0"
+      }
+    },
+    {
+      "id": "hook:pkg:pypi/pyopenssl@24.3.0#pyproject.toml_build-backend",
+      "kind": "install-hook",
+      "ecosystem": "pypi",
+      "name": "pyproject.toml:build-backend",
+      "version": "",
+      "direct": false,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "cap.exec": "true",
+        "hook.command": "no build-backend declared; setup.py runs as legacy build",
+        "hook.evidence": "legacy-setup.py-fallback",
+        "hook.package": "pkg:pypi/pyopenssl@24.3.0"
+      }
+    },
+    {
+      "id": "hook:pkg:pypi/pyopenssl@24.3.0#setup.py_module-level",
+      "kind": "install-hook",
+      "ecosystem": "pypi",
+      "name": "setup.py:module-level",
+      "version": "",
+      "direct": false,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "cap.exec": "true",
+        "hook.command": "#!/usr/bin/env python\n#\n# Copyright (C) Jean-Paul Calderone 2008-2015, All rights reserved\n#\n\n\"\"\"\nInstallation script for the OpenSSL package.\n\"\"\"\n\nimport os\nimport re\n\nfrom setuptools import find_packages, setup\n\nHERE = os.path.abspath(os.path.dirname(__file__))\nMETA_PATH = os.path.join(\"src\", \"OpenSSL\", \"version.py\")\n\n\ndef read_file(*parts):\n    \"\"\"\n    Build an absolute path from *parts* and re...",
+        "hook.evidence": "`",
+        "hook.package": "pkg:pypi/pyopenssl@24.3.0"
+      }
+    },
+    {
+      "id": "hook:pkg:pypi/six@1.17.0#setup.py_module-level",
+      "kind": "install-hook",
+      "ecosystem": "pypi",
+      "name": "setup.py:module-level",
+      "version": "",
+      "direct": false,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "cap.filesystem": "true",
+        "hook.command": "# Copyright (c) 2010-2024 Benjamin Peterson\n#\n# Permission is hereby granted, free of charge, to any person obtaining a copy\n# of this software and associated documentation files (the \"Software\"), to deal\n# in the Software without restriction, including without limitation the rights\n# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n# copies of the Software, and to permit ...",
+        "hook.evidence": "distutils.",
+        "hook.package": "pkg:pypi/six@1.17.0"
+      }
+    },
+    {
+      "id": "pkg:pypi/charset-normalizer@3.4.0",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "charset-normalizer",
+      "version": "3.4.0",
+      "direct": true,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "pypi.source": "requirements.txt"
+      }
+    },
+    {
+      "id": "pkg:pypi/flask@3.1.0",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "flask",
+      "version": "3.1.0",
+      "direct": true,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "pypi.source": "requirements.txt"
+      }
+    },
+    {
+      "id": "pkg:pypi/ldap3@2.9.1",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "ldap3",
+      "version": "2.9.1",
+      "direct": true,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "pypi.source": "requirements.txt"
+      }
+    },
+    {
+      "id": "pkg:pypi/ldapdomaindump@0.9.4",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "ldapdomaindump",
+      "version": "0.9.4",
+      "direct": true,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "pypi.source": "requirements.txt"
+      }
+    },
+    {
+      "id": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "pinned-scan-dir",
+      "version": "0.0.0",
+      "direct": false,
+      "depth": 0,
+      "risk": "clean",
+      "attr": {
+        "depsnort.flat_resolution": "pypi",
+        "pypi.version_source": "unresolved-placeholder"
+      }
+    },
+    {
+      "id": "pkg:pypi/pyasn1-modules@0.4.1",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "pyasn1-modules",
+      "version": "0.4.1",
+      "direct": true,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "pypi.source": "requirements.txt"
+      }
+    },
+    {
+      "id": "pkg:pypi/pyasn1@0.6.1",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "pyasn1",
+      "version": "0.6.1",
+      "direct": true,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "pypi.source": "requirements.txt"
+      }
+    },
+    {
+      "id": "pkg:pypi/pycryptodomex@3.21.0",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "pycryptodomex",
+      "version": "3.21.0",
+      "direct": true,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "pypi.source": "requirements.txt"
+      }
+    },
+    {
+      "id": "pkg:pypi/pyopenssl@24.3.0",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "pyopenssl",
+      "version": "24.3.0",
+      "direct": true,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "pypi.source": "requirements.txt"
+      }
+    },
+    {
+      "id": "pkg:pypi/six@1.17.0",
+      "kind": "package",
+      "ecosystem": "pypi",
+      "name": "six",
+      "version": "1.17.0",
+      "direct": true,
+      "depth": 1,
+      "risk": "clean",
+      "attr": {
+        "pypi.source": "requirements.txt"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "pkg:pypi/charset-normalizer@3.4.0",
+      "to": "hook:pkg:pypi/charset-normalizer@3.4.0#setup.py_module-level",
+      "type": "declares-hook"
+    },
+    {
+      "from": "pkg:pypi/ldap3@2.9.1",
+      "to": "hook:pkg:pypi/ldap3@2.9.1#setup.py_module-level",
+      "type": "declares-hook"
+    },
+    {
+      "from": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "to": "pkg:pypi/charset-normalizer@3.4.0",
+      "type": "depends-on"
+    },
+    {
+      "from": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "to": "pkg:pypi/flask@3.1.0",
+      "type": "depends-on"
+    },
+    {
+      "from": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "to": "pkg:pypi/ldap3@2.9.1",
+      "type": "depends-on"
+    },
+    {
+      "from": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "to": "pkg:pypi/ldapdomaindump@0.9.4",
+      "type": "depends-on"
+    },
+    {
+      "from": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "to": "pkg:pypi/pyasn1-modules@0.4.1",
+      "type": "depends-on"
+    },
+    {
+      "from": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "to": "pkg:pypi/pyasn1@0.6.1",
+      "type": "depends-on"
+    },
+    {
+      "from": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "to": "pkg:pypi/pycryptodomex@3.21.0",
+      "type": "depends-on"
+    },
+    {
+      "from": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "to": "pkg:pypi/pyopenssl@24.3.0",
+      "type": "depends-on"
+    },
+    {
+      "from": "pkg:pypi/pinned-scan-dir@0.0.0",
+      "to": "pkg:pypi/six@1.17.0",
+      "type": "depends-on"
+    },
+    {
+      "from": "pkg:pypi/pycryptodomex@3.21.0",
+      "to": "hook:pkg:pypi/pycryptodomex@3.21.0#setup.py_cmdclass.build_ext",
+      "type": "declares-hook"
+    },
+    {
+      "from": "pkg:pypi/pycryptodomex@3.21.0",
+      "to": "hook:pkg:pypi/pycryptodomex@3.21.0#setup.py_module-level",
+      "type": "declares-hook"
+    },
+    {
+      "from": "pkg:pypi/pyopenssl@24.3.0",
+      "to": "hook:pkg:pypi/pyopenssl@24.3.0#pyproject.toml_build-backend",
+      "type": "declares-hook"
+    },
+    {
+      "from": "pkg:pypi/pyopenssl@24.3.0",
+      "to": "hook:pkg:pypi/pyopenssl@24.3.0#setup.py_module-level",
+      "type": "declares-hook"
+    },
+    {
+      "from": "pkg:pypi/six@1.17.0",
+      "to": "hook:pkg:pypi/six@1.17.0#setup.py_module-level",
+      "type": "declares-hook"
+    }
+  ],
+  "verdict": {
+    "exit_code": 0,
+    "counts": {
+      "block": 0,
+      "gate_eligible": 0,
+      "advisory": 0,
+      "total": 0
+    },
+    "coverage": {
+      "complete": false,
+      "degraded": false,
+      "unresolved_dependencies": 0,
+      "incomplete_roots": 0,
+      "flat_resolution_ecosystems": [
+        "pypi"
+      ],
+      "orphans": 0,
+      "roots": [
+        {
+          "node_id": "pkg:pypi/pinned-scan-dir@0.0.0",
+          "flat_resolution": "pypi"
+        }
+      ],
+      "data_source_gaps": [
+        "osv"
+      ]
+    },
+    "risk_by_node": {
+      "hook:pkg:pypi/charset-normalizer@3.4.0#setup.py_module-level": "clean",
+      "hook:pkg:pypi/ldap3@2.9.1#setup.py_module-level": "clean",
+      "hook:pkg:pypi/pycryptodomex@3.21.0#setup.py_cmdclass.build_ext": "clean",
+      "hook:pkg:pypi/pycryptodomex@3.21.0#setup.py_module-level": "clean",
+      "hook:pkg:pypi/pyopenssl@24.3.0#pyproject.toml_build-backend": "clean",
+      "hook:pkg:pypi/pyopenssl@24.3.0#setup.py_module-level": "clean",
+      "hook:pkg:pypi/six@1.17.0#setup.py_module-level": "clean",
+      "pkg:pypi/charset-normalizer@3.4.0": "clean",
+      "pkg:pypi/flask@3.1.0": "clean",
+      "pkg:pypi/ldap3@2.9.1": "clean",
+      "pkg:pypi/ldapdomaindump@0.9.4": "clean",
+      "pkg:pypi/pinned-scan-dir@0.0.0": "clean",
+      "pkg:pypi/pyasn1-modules@0.4.1": "clean",
+      "pkg:pypi/pyasn1@0.6.1": "clean",
+      "pkg:pypi/pycryptodomex@3.21.0": "clean",
+      "pkg:pypi/pyopenssl@24.3.0": "clean",
+      "pkg:pypi/six@1.17.0": "clean"
+    },
+    "findings": []
+  }
+}
