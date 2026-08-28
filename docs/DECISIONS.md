@@ -6727,3 +6727,75 @@ ask the run's report itself judged it. Actually PARSING Maven/Clojars manifests 
 dependencies against OSV's strong Maven data) remains ecosystem work of a different size, tracked as a
 backlog item, not smuggled in here. And `-require-project` asserts only that at least one project or
 recognized gap was discovered — it does not (and should not) judge how many, or which.
+
+## D-162 — a Clojure adapter: project.clj and deps.edn resolve to Maven coordinates
+
+**Trigger:** the swytchdb live scan left two of four repos unscanned, and D-161 closed only the honesty
+half — `swytch.jepsen`'s `project.clj` went from a silent clean pass to a disclosed gap, but its JDBC
+driver's three real advisories stayed invisible. D-161's own residual named the remaining work: actually
+resolving the declared dependencies. This is that increment, scoped deliberately to the Clojure manifest
+family (Leiningen `project.clj`, tools.deps `deps.edn`) — the demonstrated live miss — with `pom.xml` left
+a disclosed gap and Homebrew untouched.
+
+**The identity decision that shapes everything else: nodes carry Ecosystem `maven`, not `clojure`.** The
+manifest family is Clojure, but the packages live at Maven coordinates in Maven Central and Clojars, and
+every downstream authority speaks Maven: OSV's ecosystem is "Maven" with `group:artifact` names, deps.dev's
+system is `maven` with the same form, the PURL type is `pkg:maven`. The adapter's Name() is "clojure" (what
+it reads); its nodes say where the packages actually live (what they are). A future pom.xml or Gradle
+adapter emits into the same coordinate space and every mapping added here serves it unchanged. One switch
+case each in the OSV client ("maven" → "Maven" — the default pass-through would have silently returned
+zero advisories, the exact failure the mapping's own comment warns about) and in deps.dev (both
+directions), and the existing `-expand` tier can deepen a Clojure tree from deps.dev with no new code.
+
+**What the adapter claims, and what it refuses to claim (D-24).** A direct dependency with a literal
+version IS an observed pin — Leiningen and tools.deps fetch exactly the stated version for direct deps —
+so `[org.postgresql/postgresql "42.7.4"]` enters the graph as fact, `AttrSourceClass` registry. Everything
+short of that literal is disclosed, never guessed: a range (`"[1.0,2.0)"`), `RELEASE`/`LATEST`, or a
+build-time symbol version is declared-but-unresolved; a `:git/url` or `:local/root` coordinate carries
+`SourceGit`/`SourcePath` with its ref — no registry coordinate, no advisory coverage, counted like any
+other non-registry source; an entry the reader cannot parse at all becomes a placeholder in
+`AttrUnresolved` (a shape we cannot name degrades coverage; it does not vanish). Neither format records
+the transitive closure, so every root sets `AttrFlatResolution` — the Pipfile.lock precedent: a limitation
+of the format disclosed, not a scan defect, and not a gate. Profile `:dependencies` and alias
+`:extra-deps`/`:replace-deps` are read — a dev-profile dependency is fetched from the same registries and
+is the same surface. Lein bare symbols map per Leiningen's own convention (`[postgresql "42.7.4"]` is
+`postgresql:postgresql`).
+
+**The reader is a scanner, not an EDN parser.** depSNORT is zero-dependency, and these manifests need
+three structural facts: where a `;` comment ends (respecting strings and `\;` character literals), where a
+string literal ends, and where a balanced form ends. `#_` reader-discards are skipped as the
+commented-out declarations they are; a coordinate symbol must match the Maven id shape or the entry is
+unparsed rather than a mangled token entering the graph; a dependency spelled inside a comment or a
+docstring never becomes a node (the D-153 lesson, applied at parse time rather than patched in later).
+
+**Promotion out of the gap tables.** `project.clj` and `deps.edn` leave `gapManifestByName` per that
+table's own contract — a supported manifest is claimed by Detect and must not also be listed, or a
+legitimately dependency-less one would read as a gap. Detect claims only a manifest that declares
+something (the Gemfile bar, OPU-16). D-161's CLI regression is superseded knowingly: the jepsen fixture
+now RESOLVES (asserted non-vacuously — the verdict must contain the postgresql PURL, so an unregistered
+adapter cannot pass on exit codes alone), a fully-pinned project.clj passes `-fail-on-incomplete` (flat
+discloses, nothing gates), and the D-161 gap behavior itself stays pinned on `pom.xml`, which remains
+recognized-but-unread.
+
+**Validation:** two-sided unit tests (pins resolve with correct PURLs/coordinates; ranges, meta-versions,
+symbol versions, and unparsed shapes disclose; discarded and comment/string-embedded "dependencies" never
+resolve; git/local classify with refs); two fuzz targets over the untrusted-input readers
+(`FuzzParseProjectClj`, `FuzzParseDepsEdn` — never panic, never stall, no coordinate escapes the symbol
+shape), seeded, run 20s locally and added to the CI fuzz roster; mutation-checked at both load-bearing
+wires (reverting the OSV mapping fails the wire-format test; reverting the registration fails the CLI
+resolution test); full suite green (35 packages), `-race` clean, gofmt/vet silent. Live-fired through the
+built binary on the jepsen shape: discovered, resolved to four `pkg:maven` nodes, and — with `api.osv.dev`
+egress-blocked in the landing environment — the scan disclosed `degraded data source(s): osv … NOT an
+all-clear` rather than passing quietly, which is itself the D-24 machinery working for the new ecosystem.
+The OSV round-trip that egress denied is pinned at the wire instead (`maven_test.go`): the request body
+must carry `"ecosystem":"Maven"` and the verbatim `group:artifact` name.
+
+Residual limitations: transitive coverage exists only through the `-expand` tier (asserted/presumed,
+labelled, never gating) — there is no committed lockfile format to read. No Maven Central/Clojars registry
+metadata source exists yet, so VC-004/VC-005/VC-011/VC-012 do not fire on maven nodes — the same shape as
+any ecosystem before its registry source landed, and the natural next increment. `:plugins` and
+`:managed-dependencies` are deliberately unread (a Leiningen-process surface and a version-authority
+question, each its own decision), as are `pom.xml` (still a disclosed gap; property interpolation and
+parent chains are real work, not a name-table entry) and Homebrew formulae (unchanged from D-161's
+reasoning). And Maven version-range resolution is not implemented anywhere in this tool — a range is
+disclosed as unresolved, never evaluated.

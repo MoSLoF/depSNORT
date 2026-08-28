@@ -50,14 +50,10 @@ var gapManifestByName = map[string]string{
 	"pubspec.yaml":             "dart",
 	"Podfile":                  "cocoapods",
 	"Package.swift":            "swift",
-	// D-161: the swytchdb live scan walked a Leiningen project whose project.clj
-	// declared a JDBC driver carrying three real advisories, and exited 0 with
-	// "nothing to scan" — these two names were simply missing from this table
-	// while the D-59 machinery for them already existed. .clj is any Clojure
-	// source and .edn any EDN data, so both are exact-name per the dedication
-	// rule above.
-	"project.clj": "leiningen", // Clojure/Leiningen; resolves from Clojars + Maven Central
-	"deps.edn":    "clojure",   // Clojure tools.deps
+	// project.clj / deps.edn entered this table at D-161 and were promoted out
+	// at D-162: the clojure adapter now claims and RESOLVES them, so per the
+	// supported-manifests rule at the top of this table they must not also be
+	// listed here (a dependency-less one is legitimately empty, not a gap).
 	// go.work is deliberately omitted: it is a workspace aggregator whose local
 	// `use` modules are each scanned on their own, so disclosing the workspace
 	// file as an unread gap would be a spurious note on an already-covered repo —
