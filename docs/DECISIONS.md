@@ -6686,3 +6686,44 @@ and treating raise arguments as inert text would be wrong for exceptions whose c
 effects. And this closes the class for setup.py only; the same displayed-instruction shape in other
 grammars (a Rakefile `puts`, a PowerShell `Write-Host`) is unexamined here, disclosed rather than assumed
 closed.
+
+## D-161 — zero coverage is not a clean pass: Clojure gap names, and -require-project
+
+**Trigger:** the swytchdb live scan (2026-08-28, four repos). `swytch.jepsen` — a Leiningen project whose
+`project.clj` declares `org.postgresql:postgresql@42.7.4`, a JDBC driver carrying three real advisories —
+produced `no supported projects found (nothing to scan)` at exit 0, with `-fail-on-incomplete` set. The
+run's report framed this as "-fail-on-incomplete passes the zero-coverage case", a silent-failure shape.
+
+**Verification narrowed the diagnosis.** The report's framing was half right. The D-59 machinery for
+exactly this — a RECOGNIZED manifest no adapter can resolve is disclosed as incomplete coverage and fails
+the coverage gate — already existed and works: a bare `pom.xml` under `-fail-on-incomplete` exits 3 today.
+The jepsen miss was two absent table entries, not an absent mechanism: `project.clj` and `deps.edn` were
+simply not in `gapManifestByName`, so a Clojure repo fell through to the nothing-to-scan clean exit. What
+remained genuinely open was the OTHER zero-coverage shape, which D-59 cannot reach by design: a directory
+with NO recognized manifest at all. That clean exit is deliberate (a full-send sweep across many repos must
+not fail on an empty or Go-only one), but for a CI job pointed at a repo that MUST contain a project, a
+deleted or renamed manifest is indistinguishable from a clean pass.
+
+**The fix, in two parts matching the two shapes.** `project.clj` ("leiningen") and `deps.edn` ("clojure")
+join the exact-name gap table — both extensions are general (.clj is any Clojure source, .edn any EDN
+data), so name-only per the OPU-18 dedication rule. A jepsen-shaped repo now flows through the normal
+pipeline: disclosed as incomplete coverage, a real JSON verdict emitted (previously: no output at all),
+exit 3 under `-fail-on-incomplete`. And `-require-project`, opt-in, makes zero discovered projects fail
+the run at exit 3 — in both discovery modes — instead of the clean nothing-to-scan pass. The default is
+unchanged: sweeps still cross empty repos clean, and `-fail-on-incomplete` alone still passes a genuinely
+empty directory, because nothing was expected there.
+
+**Validation:** `d161_zero_coverage_test.go` — the jepsen shape (ungated: disclosed at exit 0; gated:
+exit 3), the empty directory (clean by default and under `-fail-on-incomplete`; exit 3 under
+`-require-project`, recursive and `-no-recursive` both), and `-require-project` passing on a real project.
+Mutation-checked: reverting the two fix files fails all three new tests while the pre-existing suite is
+untouched. Live-fired through the built binary on the original repro directories with the same results.
+Full suite green (34 packages), `-race` clean on the touched packages, gofmt/vet silent.
+
+Residual limitations: Homebrew formulae (the other unscanned swytchdb repo) are deliberately not added —
+a formula is a distribution-integrity surface, not a dependency manifest, and `.rb` is any Ruby source, so
+recognizing it would need real formula parsing, not a name-table entry; left as the narrower, speculative
+ask the run's report itself judged it. Actually PARSING Maven/Clojars manifests (resolving the declared
+dependencies against OSV's strong Maven data) remains ecosystem work of a different size, tracked as a
+backlog item, not smuggled in here. And `-require-project` asserts only that at least one project or
+recognized gap was discovered — it does not (and should not) judge how many, or which.

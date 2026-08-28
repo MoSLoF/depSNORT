@@ -6,7 +6,8 @@
 //	0   clean, or only advisory findings
 //	1   a block-class finding (FLAG) was present
 //	2   a gate-eligible finding was present AND --fail-on-eligible was set
-//	3   resolution coverage was degraded AND --fail-on-incomplete was set
+//	3   resolution coverage was degraded AND --fail-on-incomplete was set,
+//	    or zero projects were discovered AND --require-project was set
 //	64  usage error
 //	70  internal/operational error
 //
@@ -144,6 +145,9 @@ scan flags:
                            proof attached — never hidden, never re-gated
   -fail-on-incomplete      let degraded resolution coverage fail the run (exit 3);
                            coverage is always REPORTED, this only makes it gate
+  -require-project         let zero discovered projects fail the run (exit 3)
+                           instead of the clean nothing-to-scan pass — for a CI
+                           job pointed at a repo that must contain one
   -offline                 use only the local OSV cache; never touch the network
   -no-osv                  skip the OSV data-source layer entirely
   -osv-cache string        OSV advisory cache directory
@@ -1025,6 +1029,7 @@ func cmdScan(args []string) int {
 	failEligible := fs.Bool("fail-on-eligible", false, "gate-eligible warnings fail the run (exit 2)")
 	realRoots := fs.String("real-roots", "", "comma-separated substrings naming the roots you actually build/ship; findings no designated root can reach are labeled contained (with proof) — never hidden, never re-gated")
 	failIncomplete := fs.Bool("fail-on-incomplete", false, "degraded resolution coverage fails the run (exit 3)")
+	requireProject := fs.Bool("require-project", false, "zero discovered projects fails the run (exit 3) instead of the clean nothing-to-scan pass")
 	offline := fs.Bool("offline", false, "use only the local OSV cache; never touch the network")
 	noOSV := fs.Bool("no-osv", false, "skip the OSV data-source layer entirely")
 	noCargoFetchSrc := fs.Bool("no-cargo-fetch-source", false, "skip fetching build.rs from crates.io for cargo dependencies whose source is not on disk (vendor/ or CARGO_HOME); the unexamined crates stay disclosed as source-unavailable (-offline also stops the fetch)")
@@ -1121,6 +1126,13 @@ func cmdScan(args []string) int {
 			// a full-send sweep legitimately crosses repos with no supported
 			// ecosystem (Go, C, a docs tree). Exit clean with a loud stderr
 			// note, so a CI gate over many repos is not failed by an empty one.
+			// -require-project inverts that default for a CI job pointed at a
+			// repo that MUST contain one: there, a deleted or renamed manifest
+			// would otherwise be indistinguishable from a clean pass (D-161).
+			if *requireProject {
+				fmt.Fprintf(os.Stderr, "depsnort: no supported projects found under %q and -require-project is set — zero coverage is not a clean pass\n", path)
+				return verdict.ExitIncomplete
+			}
 			fmt.Fprintf(os.Stderr, "depsnort: no supported projects found under %q (nothing to scan)\n", path)
 			return exitClean
 		}
@@ -1153,7 +1165,12 @@ func cmdScan(args []string) int {
 		notes := discoveryCoverageGaps(path, projects, adapters, *noBuildDirs)
 		if len(projects) == 0 && len(notes) == 0 {
 			// No supported manifest here and nothing below — genuinely nothing to
-			// scan, not an internal error. Exit clean.
+			// scan, not an internal error. Exit clean, unless the operator said
+			// this path must contain a project (D-161, as above).
+			if *requireProject {
+				fmt.Fprintf(os.Stderr, "depsnort: no supported project at %q and -require-project is set — zero coverage is not a clean pass\n", path)
+				return verdict.ExitIncomplete
+			}
 			fmt.Fprintf(os.Stderr, "depsnort: no supported project at %q (nothing to scan)\n", path)
 			return exitClean
 		}
