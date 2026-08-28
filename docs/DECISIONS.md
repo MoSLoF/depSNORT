@@ -6628,3 +6628,61 @@ across the entire repo including the newly guarded doer.
 Residual limitations: `registry` at 60.3% remains the lowest in the tree; the gap that remains is the
 HTTP-orchestration paths rather than the parsers, and closing it further is a reasonable next increment, not
 a blocker.
+
+## D-160 — text shown to a human is not egress: display-sink strings in setup.py
+
+**Trigger:** the 2026-08-28 live end-to-end assessment (five repos, four ecosystems). VC-002b flagged
+`CapNetwork` on `pillow@12.2.0` and `psutil@7.2.2` setup.py hooks; sdist ground truth showed both were
+display text — pillow's basis was a `url-literal` from `https://pillow.readthedocs.io/...` in build_ext
+error/help messages, psutil's a `pkg-install:python2 -m pip install` from the Python-2 farewell inside
+`sys.exit(textwrap.dedent("""..."""))`. Both reproduced exactly on the shipped analyzer before this fix.
+
+**The gap was two distinct mechanisms, not one.** For psutil, the whole-file inert suppression D-25-era
+work added ("drop CapNetwork when its only basis is a shell-tool word with no library call and no exec
+sink") could never fire: psutil legitimately runs `subprocess` for its C build, so the file HAS an exec
+sink, and the per-file gate was disarmed by real build machinery two hundred lines from the inert string.
+The judgment has to be made at the call site, not over the file. For pillow, the cmdclass class body was
+scanned RAW — none of the module-level pipeline (docstring/comment strip, display strip, URL strip,
+shell-tool suppression) applied — so a documentation URL in an error message read as network in a
+`build_ext` override while the identical string at module level would have been stripped.
+
+**The fix.** `stripPyDisplayStrings` drops the CONTENTS of plain string literals inside a display-sink
+call's argument list — `print(`, `sys.exit(`, `sys.stderr.write(`, `sys.stdout.write(`, `warnings.warn(` —
+and nothing else. It is wired into the module-level cleaning pipeline after `stripPyInert`, and the
+cmdclass body now runs the same full pipeline as module-level code (inert strip, display strip, URL strip,
+and the shell-tool suppression), with IMDS still recognized on the raw body exactly as before. Two
+deliberate asymmetries keep the guard one-sided: f-strings are kept verbatim, because an f-string can
+embed executable expressions and displaying a value is not proof the expression that computed it was
+inert; and only string contents are dropped, so code nested in the same argument list
+(`sys.exit(requests.get(url).text)`) still scans. Over-suppression can only hide text a human was meant to
+read; it can never hide a call. An opener is trusted only in its exact builtin/stdlib spelling with no
+preceding identifier character or dot — `pprint(` and `obj.print(` are not display sinks.
+
+**A third instance surfaced during validation, and corrected the assessment.** The live report classified
+`blis` as a VC-002b true positive ("real pip install invocations in setup.py"). Ground truth disagrees:
+blis's `pkg-install` marker came from "please upgrade pip with `pip install --upgrade pip`" inside a
+`print(...)` warning, and its setup.py fetches nothing — it compiles bundled C sources. Post-fix blis
+correctly reads `[env exec]`, its real build capabilities intact. The FP class had three confirmed members,
+one of them previously miscounted as signal.
+
+**Validation:** `d160_display_context_test.go`, two-sided in the D-153/D-158 tradition. Inert direction:
+the psutil shape (which asserts the fixture retains a REAL exec sink, so the test cannot pass via the old
+whole-file guard), the pillow cmdclass shape, and a printed wget in a cmdclass body. Real direction: a
+pip install run through `subprocess.check_call(..., shell=True)`, display chatter beside a real
+`os.system` install, `urlopen` inside an f-string inside `print(...)`, `requests.get` as a `sys.exit`
+argument, and a real `urlopen` in a cmdclass body beside documentation URLs. Mutation-checked: reverting
+the fix fails all three inert-direction tests while every real-direction test passes either way. Live-fired
+against the actual sdists: pillow build_ext `[env exec network]` → `[env exec]`, psutil module-level
+`[env exec filesystem network]` → `[env exec filesystem]`, blis `[env exec network]` → `[env exec]` — in
+each case only the network cap and its display-text evidence moved. Full suite green (34 packages),
+`go test -race ./...` clean, gofmt/vet silent.
+
+Residual limitations: openers are matched by literal spelling — `print (` with a space, an aliased
+`p = print`, or a message assembled in a variable and displayed later are not recognized, so a marker in
+those shapes still scans (the failure mode is a false positive, never a missed call — the same
+conservative direction as D-25/D-153/D-158). `raise` is deliberately not a display sink: exception
+messages reach the operator through the URL strip instead (pillow's raise-message URL is covered there),
+and treating raise arguments as inert text would be wrong for exceptions whose construction has side
+effects. And this closes the class for setup.py only; the same displayed-instruction shape in other
+grammars (a Rakefile `puts`, a PowerShell `Write-Host`) is unexamined here, disclosed rather than assumed
+closed.
