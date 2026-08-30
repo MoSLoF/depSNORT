@@ -2,6 +2,7 @@ package pypi
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,14 +81,15 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 			}
 			n.Attr["pypi.wheel_only"] = "true"
 			// A wheel has no setup.py/build-backend to analyze (build-time/sdist
-			// concepts) — only .pth files recovered from the wheel's zip, if any.
-			if len(files.PthFiles) == 0 {
-				continue
+			// concepts) — only .pth files and runtime .py modules recovered from
+			// the wheel's zip.
+			if len(files.PthFiles) > 0 {
+				surface := installsurface.AnalyzePython("", "", files.PthFiles)
+				if len(surface.Hooks) > 0 {
+					addPySurfaceToGraph(g, n, surface)
+				}
 			}
-			surface := installsurface.AnalyzePython("", "", files.PthFiles)
-			if len(surface.Hooks) > 0 {
-				addPySurfaceToGraph(g, n, surface)
-			}
+			addLoadTimeSurface(g, n, files.Modules, files.ModulesTruncated, &gaps)
 			continue
 		}
 
@@ -97,6 +99,7 @@ func (a *Adapter) ExtractInstallSurface(path string, g *graph.Graph) error {
 		if len(surface.Hooks) > 0 {
 			addPySurfaceToGraph(g, n, surface)
 		}
+		addLoadTimeSurface(g, n, files.Modules, files.ModulesTruncated, &gaps)
 	}
 	return gaps.Err()
 }
@@ -133,6 +136,34 @@ func (a *Adapter) extractLocalPython(ctx context.Context, dir string, g *graph.G
 	surface := installsurface.AnalyzePython(string(setupPy), string(pyprojectToml), nil)
 	if len(surface.Hooks) > 0 {
 		addPySurfaceToGraph(g, n, surface)
+	}
+	// Deferred: import-time analysis of the ROOT project's own runtime modules
+	// (VC-002L wiring, phase 2). It needs a bounded, containment-safe walk of the
+	// local project tree for .py modules, distinct from the sdist/wheel archive
+	// path used for dependencies. The supply-chain threat this closes lives in
+	// published dependencies, which the sdist/wheel path above already covers; the
+	// root is the developer's own code.
+}
+
+// addLoadTimeSurface runs the import-time analyzer (VC-002L) over a package's
+// runtime modules and materializes any import-time hooks onto the graph. The
+// unexamined import surface — modules dropped at the retention cap, or a scan
+// bound the analyzer hit — is disclosed as coverage gaps, never a clean result
+// (R-01/R-02). These "import-time:"-named hooks are judged only by VC-002L (at an
+// advisory ceiling, D-165); the block-class VC-002 family excludes them.
+func addLoadTimeSurface(g *graph.Graph, n *graph.Node, modules map[string]string, modulesTruncated bool, gaps *instsurf.Gaps) {
+	if len(modules) > 0 {
+		ls := installsurface.AnalyzePythonLoadTime(modules)
+		if len(ls.Hooks) > 0 {
+			addPySurfaceToGraph(g, n, ls)
+		}
+		for _, t := range ls.Truncated {
+			gaps.AddReason(n.ID, n.Name+"@"+n.Version, instsurf.GapTruncated, errors.New(t))
+		}
+	}
+	if modulesTruncated {
+		gaps.AddReason(n.ID, n.Name+"@"+n.Version, instsurf.GapTruncated,
+			errors.New("import-time module retention cap hit; some of the package's import surface was unexamined"))
 	}
 }
 

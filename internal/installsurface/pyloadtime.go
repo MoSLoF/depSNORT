@@ -39,6 +39,12 @@ import (
 //
 // Nothing is executed (Decision D-04). This analyzer only produces FACTS; a check
 // judges them, and per D-165 that judgment is capped at advisory until §7 is met.
+// maxImportTimeModules bounds how many modules a single call scans. The sdist
+// extractor caps retained modules well below this (maxModuleFiles), so in
+// production this is a defense-in-depth backstop, not the binding limit; a caller
+// that passes more has the overflow disclosed via Surface.Truncated.
+const maxImportTimeModules = 512
+
 func AnalyzePythonLoadTime(modules map[string]string) Surface {
 	var s Surface
 
@@ -50,9 +56,9 @@ func AnalyzePythonLoadTime(modules map[string]string) Surface {
 
 	scanned := 0
 	for _, name := range names {
-		if scanned >= maxLoadTimeRefs {
+		if scanned >= maxImportTimeModules {
 			s.Truncated = appendStr(s.Truncated,
-				fmt.Sprintf("import-time module scan capped at %d modules", maxLoadTimeRefs))
+				fmt.Sprintf("import-time module scan capped at %d modules", maxImportTimeModules))
 			break
 		}
 		scanned++
@@ -101,7 +107,7 @@ func analyzeLoadTimeModule(rel, source string) (Hook, bool) {
 	}
 
 	h := Hook{
-		Name:     "module-load:" + rel,
+		Name:     "import-time:" + rel,
 		Command:  "module executes at import (no lifecycle hook required): " + rel,
 		Caps:     caps,
 		Evidence: appendStr(ev, "import-time-execution"),

@@ -29,12 +29,14 @@ import (
 // consts, purely so hostile-input tests can shrink a threshold and exercise it
 // without allocating a real bomb; production never mutates them.
 var (
-	maxSdistSize     int64 = 50 * 1024 * 1024  // compressed download cap
-	maxDecompressed  int64 = 100 * 1024 * 1024 // total DEcompressed bytes across all tar entries (bomb guard)
-	maxFileSize      int64 = 2 * 1024 * 1024   // per extracted file
-	maxTarEntries          = 20000             // tar entry count cap (entry-flood guard)
-	maxPthFiles            = 64                // retained .pth file count cap
-	maxPthTotalBytes int64 = 1 * 1024 * 1024   // cumulative retained .pth bytes
+	maxSdistSize        int64 = 50 * 1024 * 1024  // compressed download cap
+	maxDecompressed     int64 = 100 * 1024 * 1024 // total DEcompressed bytes across all tar entries (bomb guard)
+	maxFileSize         int64 = 2 * 1024 * 1024   // per extracted file
+	maxTarEntries             = 20000             // tar entry count cap (entry-flood guard)
+	maxPthFiles               = 64                // retained .pth file count cap
+	maxPthTotalBytes    int64 = 1 * 1024 * 1024   // cumulative retained .pth bytes
+	maxModuleFiles            = 256               // retained runtime-module count cap (VC-002L)
+	maxModuleTotalBytes int64 = 4 * 1024 * 1024   // cumulative retained module bytes
 	// maxWheelSize bounds the whole wheel download, buffered in memory in one
 	// shot (archive/zip needs the full byte stream, unlike the tar path's
 	// sequential read) — large compiled wheels commonly exceed this and become a
@@ -143,6 +145,18 @@ type sdistFiles struct {
 	PyprojectToml string            `json:"pyproject_toml,omitempty"`
 	PthFiles      map[string]string `json:"pth_files,omitempty"`
 	WheelOnly     bool              `json:"wheel_only,omitempty"`
+	// Modules maps a package-relative module path (e.g. "telnyx/_client.py") to
+	// its source, for import-time analysis (VC-002L). Only runtime package
+	// modules are retained — setup.py, conftest.py, and test/docs/build trees are
+	// excluded (isRuntimeModule).
+	Modules map[string]string `json:"modules,omitempty"`
+	// ModulesTruncated records that module retention hit a cap and stopped, so
+	// some of the package's import surface went unexamined. Unlike the .pth caps
+	// (a hard ErrSdistRetentionExceeded, because persistence payloads splinter
+	// across many tiny files), a large legitimate module tree degrades to PARTIAL
+	// disclosed coverage rather than gapping the whole package — but it is still
+	// disclosed, never a silent clean result.
+	ModulesTruncated bool `json:"modules_truncated,omitempty"`
 }
 
 // sdistSemantics versions the MEANING of a cached extraction result, not just
@@ -156,7 +170,11 @@ type sdistFiles struct {
 // v2 -> v3: WheelOnly:true used to mean "no .pth evidence was ever looked for";
 // it now means a wheel was fetched and its .pth files (if any) were examined. A
 // stale v2 record would silently suppress newly-recoverable .pth evidence.
-const sdistSemantics = "v3"
+// v3 -> v4: extraction now also retains runtime .py modules for import-time
+// analysis (VC-002L). A stale v3 record carries no Modules, which would read as
+// "the import surface was examined and found nothing" — the exact false-clean a
+// semantics bump exists to prevent.
+const sdistSemantics = "v4"
 
 func sdistCacheKey(name, version string) string {
 	return "pypi-sdist|" + sdistSemantics + "|" + name + "|" + version
@@ -210,6 +228,8 @@ func (f *SdistFetcher) Fetch(ctx context.Context, name, version string) (*sdistF
 				return nil, fmt.Errorf("pypi-sdist: extracting wheel %s@%s: %w", name, version, err)
 			}
 			files.PthFiles = extracted.PthFiles
+			files.Modules = extracted.Modules
+			files.ModulesTruncated = extracted.ModulesTruncated
 		}
 	}
 
@@ -462,10 +482,64 @@ func (f *SdistFetcher) downloadAndExtractWheel(ctx context.Context, rawURL, want
 	return extractPthFromZip(raw)
 }
 
-// extractPthFromZip reads a wheel's zip central directory and extracts any
-// .pth files it contains. It reuses the sdist path's Err* sentinels and
-// retention caps as-is: it's the same resource (an attacker-controlled
-// archive) being protected, and the container format is incidental.
+// moduleExcludeDirs are path segments whose subtree is not runtime import code —
+// tests, docs, build output, packaging metadata. A module under any of them is
+// not scanned for import-time behavior.
+var moduleExcludeDirs = map[string]bool{
+	"test": true, "tests": true, "testing": true,
+	"doc": true, "docs": true,
+	"example": true, "examples": true,
+	"build": true, "dist": true,
+	"__pycache__": true, ".eggs": true, ".tox": true,
+	"benchmarks": true, "bench": true,
+}
+
+// isRuntimeModule reports whether a package-relative path is a runtime Python
+// module worth import-time analysis: a .py file that is not setup.py/conftest.py,
+// and is not inside a test / docs / build / packaging-metadata tree. It is
+// deliberately inclusive within those bounds — the analyzer's escalating-capability
+// gate (VC-002L), not this filter, is what controls false positives.
+func isRuntimeModule(rel string) bool {
+	if rel == "" || !strings.HasSuffix(rel, ".py") {
+		return false
+	}
+	switch path.Base(rel) {
+	case "setup.py", "conftest.py", "versioneer.py":
+		return false
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		low := strings.ToLower(seg)
+		if moduleExcludeDirs[low] {
+			return false
+		}
+		if strings.HasSuffix(low, ".egg-info") || strings.HasSuffix(low, ".dist-info") || strings.HasSuffix(low, ".data") {
+			return false
+		}
+	}
+	return true
+}
+
+// retainModule stores a runtime module under the count/byte caps, setting
+// ModulesTruncated (partial disclosed coverage) rather than erroring when a cap
+// is hit — see the sdistFiles.ModulesTruncated doc for why modules degrade to
+// partial coverage where .pth degrades to a hard gap.
+func retainModule(files *sdistFiles, rel string, content []byte, moduleBytes *int64) {
+	if len(files.Modules) >= maxModuleFiles || *moduleBytes+int64(len(content)) > maxModuleTotalBytes {
+		files.ModulesTruncated = true
+		return
+	}
+	if files.Modules == nil {
+		files.Modules = map[string]string{}
+	}
+	files.Modules[rel] = string(content)
+	*moduleBytes += int64(len(content))
+}
+
+// extractPthFromZip reads a wheel's zip central directory and extracts any .pth
+// files AND runtime .py modules it contains. It reuses the sdist path's Err*
+// sentinels and retention caps as-is: it's the same resource (an
+// attacker-controlled archive) being protected, and the container format is
+// incidental.
 func extractPthFromZip(raw []byte) (*sdistFiles, error) {
 	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
 	if err != nil {
@@ -476,12 +550,14 @@ func extractPthFromZip(raw []byte) (*sdistFiles, error) {
 	}
 
 	files := &sdistFiles{}
-	var pthBytes int64
+	var pthBytes, moduleBytes int64
 
 	for _, zf := range zr.File {
 		name := path.Clean(zf.Name)
 		basename := path.Base(name)
-		if !strings.HasSuffix(basename, ".pth") {
+		isPth := strings.HasSuffix(basename, ".pth")
+		isMod := isRuntimeModule(name) && !files.ModulesTruncated
+		if !isPth && !isMod {
 			continue
 		}
 
@@ -508,16 +584,20 @@ func extractPthFromZip(raw []byte) (*sdistFiles, error) {
 				ErrSdistTooLarge, name, maxFileSize)
 		}
 
-		// Same retention discipline as the tar path (R-02): exceeding a cap is a
-		// coverage gap, never a silent discard of unexamined .pth content.
-		if len(files.PthFiles) >= maxPthFiles || pthBytes+int64(len(content)) > maxPthTotalBytes {
-			return nil, fmt.Errorf("%w (%s)", ErrSdistRetentionExceeded, name)
+		if isPth {
+			// Same retention discipline as the tar path (R-02): exceeding a cap is
+			// a coverage gap, never a silent discard of unexamined .pth content.
+			if len(files.PthFiles) >= maxPthFiles || pthBytes+int64(len(content)) > maxPthTotalBytes {
+				return nil, fmt.Errorf("%w (%s)", ErrSdistRetentionExceeded, name)
+			}
+			if files.PthFiles == nil {
+				files.PthFiles = map[string]string{}
+			}
+			files.PthFiles[basename] = string(content)
+			pthBytes += int64(len(content))
+		} else { // isMod
+			retainModule(files, name, content, &moduleBytes)
 		}
-		if files.PthFiles == nil {
-			files.PthFiles = map[string]string{}
-		}
-		files.PthFiles[basename] = string(content)
-		pthBytes += int64(len(content))
 	}
 	return files, nil
 }
@@ -529,8 +609,9 @@ func extractFromTar(r io.Reader) (*sdistFiles, error) {
 	tr := tar.NewReader(cr)
 	files := &sdistFiles{}
 	var (
-		entries  int
-		pthBytes int64
+		entries     int
+		pthBytes    int64
+		moduleBytes int64
 	)
 
 	for {
@@ -567,6 +648,12 @@ func extractFromTar(r io.Reader) (*sdistFiles, error) {
 		if len(parts) == 3 {
 			basename = parts[2]
 		}
+		// rel is the package-relative path (everything past the top {name}-{version}
+		// directory) — the identity a runtime module is imported by.
+		rel := name[strings.IndexByte(name, '/')+1:]
+		// A runtime module is only collected while retention is under its caps;
+		// once truncation is set, further modules are skipped unread.
+		isMod := isRuntimeModule(rel) && !files.ModulesTruncated
 
 		var target *string
 		switch {
@@ -576,6 +663,8 @@ func extractFromTar(r io.Reader) (*sdistFiles, error) {
 			target = &files.PyprojectToml
 		case strings.HasSuffix(basename, ".pth"):
 			// .pth files can be at various depths
+		case isMod:
+			// runtime .py module — read and retain below for import-time analysis
 		default:
 			continue
 		}
@@ -613,6 +702,8 @@ func extractFromTar(r io.Reader) (*sdistFiles, error) {
 			}
 			files.PthFiles[basename] = string(content)
 			pthBytes += int64(len(content))
+		} else if isMod {
+			retainModule(files, rel, content, &moduleBytes)
 		}
 	}
 	// The loop checks the decompressed total on the NEXT iteration, so a final

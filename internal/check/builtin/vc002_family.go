@@ -45,6 +45,14 @@ func collectHooks(g *graph.Graph) []hookView {
 			if hook == nil {
 				continue
 			}
+			// Python import-time module hooks (VC-002L) are judged ONLY by their
+			// own check, at an advisory ceiling (D-165): the block-class family
+			// must not gate on a brand-new, benign-heavy runtime surface. npm's
+			// "module-load:" entry-module hooks are deliberately NOT excluded —
+			// VC-002j legitimately gates those (OPU-31).
+			if strings.HasPrefix(hook.Name, "import-time:") {
+				continue
+			}
 			v := hookView{Pkg: pkg, Hook: hook, Caps: map[string]bool{}}
 			absorb := func(n *graph.Node) {
 				for k, val := range n.Attr {
