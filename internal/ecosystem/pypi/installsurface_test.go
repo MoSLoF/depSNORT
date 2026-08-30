@@ -147,6 +147,62 @@ func TestAnalyzePythonSafePthFile(t *testing.T) {
 	}
 }
 
+// pthHookHasCap reports whether the single pth:import hook carries a capability.
+func pthHookHasCap(h installsurface.Hook, c installsurface.Capability) bool {
+	for _, cap := range h.Caps {
+		if cap == c {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAnalyzePythonLitellmInitPth reproduces the real litellm 1.82.8 trigger
+// (TeamPCP campaign, TEAMPCP-2026-0324): a single .pth line that spawns a
+// detached interpreter which base64-decodes and exec()s an embedded payload. The
+// credential theft itself lives in the decoded blob — a coverage frontier the
+// static analyzer cannot read — but the decode-and-execute shape is visible on
+// the .pth line and is what drives VC-002e. The analyzer must surface obfuscation
+// AND exec so the check can fire.
+func TestAnalyzePythonLitellmInitPth(t *testing.T) {
+	pth := map[string]string{
+		"litellm_init.pth": `import os, subprocess, sys; subprocess.Popen([sys.executable, "-c", "import base64; exec(base64.b64decode('aW1wb3J0IHNvY2tldA=='))"])`,
+	}
+	s := installsurface.AnalyzePython("", "", pth)
+	if len(s.Hooks) != 1 {
+		t.Fatalf("expected 1 pth hook, got %d", len(s.Hooks))
+	}
+	h := s.Hooks[0]
+	if h.Name != "pth:import" {
+		t.Errorf("hook name = %q, want pth:import", h.Name)
+	}
+	if !pthHookHasCap(h, installsurface.CapObfuscation) {
+		t.Error("missing obfuscation capability (base64.b64decode) — VC-002e would not fire")
+	}
+	if !pthHookHasCap(h, installsurface.CapExec) {
+		t.Error("missing exec capability (subprocess/exec)")
+	}
+}
+
+// TestAnalyzePythonBenignBootstrapPth is the false-positive control: a real,
+// legitimate pattern — a .pth that imports a package's own bootstrap module.
+// analyzePthFile flags any import line as exec (a deliberate lower bound), so a
+// hook IS produced, but it must NOT gain the obfuscation capability, so VC-002e
+// (decode-and-execute) stays silent on it. This is the line the litellm case
+// must sit on the far side of.
+func TestAnalyzePythonBenignBootstrapPth(t *testing.T) {
+	pth := map[string]string{
+		"pkg_bootstrap.pth": "import mypkg._bootstrap",
+	}
+	s := installsurface.AnalyzePython("", "", pth)
+	if len(s.Hooks) != 1 {
+		t.Fatalf("expected 1 pth hook for the import line, got %d", len(s.Hooks))
+	}
+	if pthHookHasCap(s.Hooks[0], installsurface.CapObfuscation) {
+		t.Error("a plain bootstrap import must not read as obfuscation — this would be a false positive")
+	}
+}
+
 // TestExtractInstallSurfaceNilFetcher pins the CORRECTED contract (D-141).
 //
 // This test previously asserted the opposite — that a nil fetcher returns no

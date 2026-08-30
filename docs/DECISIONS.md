@@ -6887,3 +6887,36 @@ is the encoded contrast plus this entry, and extracting the construction for a r
 as the refactor it would be rather than smuggled into a bug fix. Declared stays empty until pom reading is
 its own decision. And the engine's raw fallback still writes `pkg:eco/name@version` for any FUTURE
 ecosystem that gains asserted resolution before its identity seam — the pattern to copy is this one.
+
+## D-165 — the Python import-time module surface is a known gap, held out of scope until a spec is met
+
+**Trigger:** the TeamPCP telnyx 4.87.1 / 4.87.2 compromise (analyzed 2026-03-27; recorded in
+[ioc-teampcp.example.json](ioc-teampcp.example.json)). The malicious code was injected into
+`telnyx/_client.py` — an ordinary SDK runtime module — as module-level code that runs on `import telnyx`.
+depSNORT's PyPI install-surface model (`AnalyzePython`) reads exactly three entrypoints: `setup.py`,
+`pyproject.toml` build-backend, and `.pth` files. All three are install- or interpreter-startup triggers;
+none is an ordinary module. The telnyx payload sidesteps every one of them and is invisible to the shipped
+analyzer. The sibling litellm 1.82.8 sample, by contrast, used a `.pth` file and IS in scope — its
+detection is pinned by the Track-A tests added alongside this entry.
+
+**The decision is a boundary, not a feature.** Extending static analysis to read ordinary runtime modules
+is a real scope expansion, and — per the zero-silent-failure and gate-vs-severity disciplines — expanding
+it quietly, or letting a broad new surface gate a build, would be worse than the gap. Import-time code is
+overwhelmingly benign (config loading, plugin registration, capability probing); a naive "scan every `.py`
+at import" is a false-positive catastrophe. So the decision is: **acknowledge the gap explicitly, keep it
+out of scope, and require a met specification before any code lands.** The specification is
+[VC-002L-python-import-time.md](VC-002L-python-import-time.md): a narrow, capability-gated
+`AnalyzePythonLoadTime` analyzer (mirroring npm's OPU-31 `AnalyzeLoadTime`, bounded by the same
+`maxLoadTimeRefs` cap), reusing the existing `scanCaps` and the D-25/D-160 stripping pipeline, feeding the
+existing VC-002 family with synthetic `module-load:` hooks. It ships **advisory-only** and earns a gate
+class only through the corpus evaluation in the spec's §7 — never before.
+
+**Coverage, not truth.** Until the analyzer exists, an import-time payload in a non-entrypoint Python
+module is unseen. That is a coverage limitation, and it is now named here and in the spec rather than
+implied by a clean scan. A scan that does not read a package's runtime modules must not be read as evidence
+that those modules are safe — the frontier is the module tree, and it is disclosed, not laundered.
+
+Residual limitations: this entry covers Python only. npm's entry-module import-time case is already handled
+by `AnalyzeLoadTime`; npm NON-entry runtime modules (a `lib/` file not reachable through `exports`) are the
+same class of gap and are noted here as a parallel, not closed. Other ecosystems' runtime-module surfaces
+are separate notes if and when a sample motivates them.

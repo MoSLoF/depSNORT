@@ -60,3 +60,41 @@ func TestLoadRejectsUnknownVersion(t *testing.T) {
 		t.Error("an unsupported feed version must be rejected")
 	}
 }
+
+// TestTeamPCPExampleLedger keeps the shipped reference feed
+// (docs/ioc-teampcp.example.json) honest: it must parse, and it must match the
+// compromised releases by exact version while leaving a clean release alone. If
+// the feed schema drifts, this fails rather than silently loading nothing.
+func TestTeamPCPExampleLedger(t *testing.T) {
+	f, err := Load(filepath.Join("..", "..", "..", "docs", "ioc-teampcp.example.json"))
+	if err != nil {
+		t.Fatalf("shipped TeamPCP ledger must load: %v", err)
+	}
+	if f.Len() != 3 {
+		t.Fatalf("ledger Len=%d, want 3 (litellm 1.82.8, telnyx 4.87.1, telnyx 4.87.2)", f.Len())
+	}
+
+	// Every compromised release must match by exact version.
+	compromised := []struct{ purl, eco, name, ver string }{
+		{"pkg:pypi/litellm@1.82.8", "pypi", "litellm", "1.82.8"},
+		{"pkg:pypi/telnyx@4.87.1", "pypi", "telnyx", "4.87.1"},
+		{"pkg:pypi/telnyx@4.87.2", "pypi", "telnyx", "4.87.2"},
+	}
+	for _, c := range compromised {
+		ind := f.Match(c.purl, c.eco, c.name, c.ver)
+		if ind == nil {
+			t.Errorf("%s must match the TeamPCP ledger", c.purl)
+			continue
+		}
+		if ind.Severity != "critical" {
+			t.Errorf("%s severity = %q, want critical", c.purl, ind.Severity)
+		}
+	}
+
+	// A clean telnyx release must NOT match — a version-pinned indicator is
+	// exact, so the ledger must never over-block a good version of a package
+	// that also shipped a bad one.
+	if ind := f.Match("pkg:pypi/telnyx@4.85.0", "pypi", "telnyx", "4.85.0"); ind != nil {
+		t.Errorf("a clean telnyx release must not match the ledger; got %+v", ind)
+	}
+}
