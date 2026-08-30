@@ -1,13 +1,45 @@
 # VC-002L — Python import-time module surface (design note)
 
-Status: **proposal**. Not yet implemented. If adopted it lands as a new analyzer
-`AnalyzePythonLoadTime` in `internal/installsurface/`, wired through the pypi
-adapter, feeding the existing VC-002 family — and a decision record. The
-scope-boundary decision to keep this OUT of scope until the spec is met is
-already recorded as [D-165](DECISIONS.md).
+Status: **analyzer prototype landed** (analyzer half only, no check / ecosystem
+wiring — the same staging used for VC-013). The scope-boundary decision that
+keeps this out of the shipped verdict until the spec is met is recorded as
+[D-165](DECISIONS.md).
 
 The trigger is a real sample: the **telnyx 4.87.1 / 4.87.2** compromise (TeamPCP
 campaign). See [`ioc-teampcp.example.json`](ioc-teampcp.example.json).
+
+**Prototype landed.** The static analyzer described in §4 exists as
+`internal/installsurface/pyloadtime.go` (`AnalyzePythonLoadTime`), with a
+table-driven corpus in `pyloadtime_test.go` covering the telnyx called-function
+shape, the litellm module-level decode-exec shape, credential exfil, a named-secret
+read, the reachability pair (same body detected when called, ignored when not),
+seven benign false-positive controls (§6), and the disclosed module bound. It
+produces facts only and is **not yet called by anything** — importing it into the
+verdict is deliberately a separate change.
+
+**What is NOT built yet:**
+
+1. **Ecosystem wiring.** The pypi adapter does not enumerate a package's runtime
+   `.py` modules. That requires the sdist fetcher (`internal/ecosystem/pypi/sdist.go`)
+   to expose module files — itself a hostile-input surface (decompression,
+   containment, count/size bounds) — and the adapter to select the import surface
+   and call `AnalyzePythonLoadTime`. Until then the analyzer has no input in
+   production.
+2. **The check + its gate decision (§5).** This note originally said "no new
+   check logic is required — a `module-load:` hook fires VC-002d/e." That conflicts
+   with D-165's advisory-only ceiling: VC-002d/f/k are **block-class**, so letting
+   `module-load:` hooks flow into the family unchanged would gate on a brand-new,
+   broad, benign-heavy surface. The resolved design is a **dedicated `VC-002L`
+   check at an advisory ceiling** that reads `module-load:` hooks, plus an
+   exclusion of those hooks from the block/gate-eligible family members. That is a
+   check-layer change and lands with the wiring, not here.
+
+**Threshold refinement vs §5.** The prototype's emit gate (`loadTimeEscalates`)
+requires a capability *combination* the family acts on — decode+exec,
+credential+network, a cradle, or a named-credential read — and deliberately does
+NOT fire on the bare `exec` or bare `network` that §5 lists as escalating, because
+both are common and benign at import. The bare-signal thresholds are left to the
+§7 corpus evaluation before any promotion.
 
 ---
 
