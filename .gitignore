@@ -21,6 +21,8 @@ Thumbs.db
 # Tooling / session scratch
 .claude/
 reports/
+CLAUDE.md
+depSNORT_Next_Generation_Development_Blueprint.pdf
 
 # Python build artifacts
 build/
