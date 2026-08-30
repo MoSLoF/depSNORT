@@ -1,45 +1,57 @@
 # VC-002L — Python import-time module surface (design note)
 
-Status: **analyzer prototype landed** (analyzer half only, no check / ecosystem
-wiring — the same staging used for VC-013). The scope-boundary decision that
-keeps this out of the shipped verdict until the spec is met is recorded as
-[D-165](DECISIONS.md).
+Status: **wired at advisory** ([D-166](DECISIONS.md)). The analyzer, the sdist/wheel
+module enumeration, the adapter wiring, and the dedicated `VC-002L` check are all
+landed; VC-002L is a registered check at **advisory** severity that never gates,
+per the boundary set in [D-165](DECISIONS.md).
 
 The trigger is a real sample: the **telnyx 4.87.1 / 4.87.2** compromise (TeamPCP
 campaign). See [`ioc-teampcp.example.json`](ioc-teampcp.example.json).
 
-**Prototype landed.** The static analyzer described in §4 exists as
-`internal/installsurface/pyloadtime.go` (`AnalyzePythonLoadTime`), with a
-table-driven corpus in `pyloadtime_test.go` covering the telnyx called-function
-shape, the litellm module-level decode-exec shape, credential exfil, a named-secret
-read, the reachability pair (same body detected when called, ignored when not),
-seven benign false-positive controls (§6), and the disclosed module bound. It
-produces facts only and is **not yet called by anything** — importing it into the
-verdict is deliberately a separate change.
+**What is built:**
 
-**What is NOT built yet:**
+- **Analyzer** — `internal/installsurface/pyloadtime.go` (`AnalyzePythonLoadTime`),
+  with the table-driven corpus in `pyloadtime_test.go` (telnyx called-function
+  shape, litellm module-level decode-exec, credential exfil, named-secret read,
+  the reachability pair, seven benign false-positive controls, the disclosed
+  module bound). Emits `import-time:<rel>` hooks.
+- **Module enumeration** — the sdist fetcher (`internal/ecosystem/pypi/sdist.go`)
+  now retains runtime `.py` modules from BOTH the sdist tar and the wheel zip,
+  under count/byte caps (`maxModuleFiles` / `maxModuleTotalBytes`), excluding
+  setup.py and test/docs/build trees (`isRuntimeModule`). Exceeding a cap degrades
+  to `ModulesTruncated` (partial disclosed coverage), not a silent drop.
+- **Adapter wiring** — `installsurface.go` runs the analyzer over the retained
+  modules for every dependency and discloses the unexamined import surface as
+  coverage gaps.
+- **The check** — `VC-002L` (`internal/check/builtin/vc002l_import.go`), registered,
+  advisory ceiling. To hold that ceiling the block-class VC-002 family excludes
+  `import-time:` hooks (`collectHooks`); npm's `module-load:` hooks are NOT
+  excluded, so VC-002j (OPU-31) is untouched.
 
-1. **Ecosystem wiring.** The pypi adapter does not enumerate a package's runtime
-   `.py` modules. That requires the sdist fetcher (`internal/ecosystem/pypi/sdist.go`)
-   to expose module files — itself a hostile-input surface (decompression,
-   containment, count/size bounds) — and the adapter to select the import surface
-   and call `AnalyzePythonLoadTime`. Until then the analyzer has no input in
-   production.
-2. **The check + its gate decision (§5).** This note originally said "no new
-   check logic is required — a `module-load:` hook fires VC-002d/e." That conflicts
-   with D-165's advisory-only ceiling: VC-002d/f/k are **block-class**, so letting
-   `module-load:` hooks flow into the family unchanged would gate on a brand-new,
-   broad, benign-heavy surface. The resolved design is a **dedicated `VC-002L`
-   check at an advisory ceiling** that reads `module-load:` hooks, plus an
-   exclusion of those hooks from the block/gate-eligible family members. That is a
-   check-layer change and lands with the wiring, not here.
+**The §5 gate decision, resolved.** This note originally said "no new check logic
+is required — a `module-load:` hook fires VC-002d/e." That conflicted with D-165's
+advisory-only ceiling (VC-002d/f/k are block-class), so the implemented design is
+a dedicated advisory check plus the family exclusion above, and Python import-time
+hooks were given a distinct `import-time:` name to keep them separable from npm's
+`module-load:`.
 
-**Threshold refinement vs §5.** The prototype's emit gate (`loadTimeEscalates`)
-requires a capability *combination* the family acts on — decode+exec,
-credential+network, a cradle, or a named-credential read — and deliberately does
-NOT fire on the bare `exec` or bare `network` that §5 lists as escalating, because
-both are common and benign at import. The bare-signal thresholds are left to the
-§7 corpus evaluation before any promotion.
+**Threshold refinement vs §5.** The emit gate (`loadTimeEscalates`) requires a
+capability *combination* the family acts on — decode+exec, credential+network, a
+cradle, or a named-credential read — and deliberately does NOT fire on bare `exec`
+or bare `network`, because both are common and benign at import. The bare-signal
+thresholds remain deferred to the §7 corpus evaluation before any promotion above
+advisory.
+
+**Still deferred:**
+
+- **Root-local import surface.** Only dependencies (sdist/wheel) are scanned; the
+  root project's own runtime modules are not walked yet (it needs a
+  containment-safe local `.py` walk, and the root is the developer's own code).
+- **Payload in wheel but not sdist.** For a package that ships both, `Fetch`
+  reads the sdist; a payload placed only in the wheel of such a package is unseen
+  until an always-read-the-wheel pass is added. Wheel-only packages are covered.
+- **Cross-module import resolution and split-string capabilities** — documented
+  lower bounds of the analyzer (§4).
 
 ---
 

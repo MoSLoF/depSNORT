@@ -6920,3 +6920,34 @@ Residual limitations: this entry covers Python only. npm's entry-module import-t
 by `AnalyzeLoadTime`; npm NON-entry runtime modules (a `lib/` file not reachable through `exports`) are the
 same class of gap and are noted here as a parallel, not closed. Other ecosystems' runtime-module surfaces
 are separate notes if and when a sample motivates them.
+
+## D-166 — VC-002L wired at advisory: the import-time surface is now examined, and it never gates
+
+**Trigger:** D-165 held the Python import-time module surface out of scope "until a spec is met."
+[VC-002L-python-import-time.md](VC-002L-python-import-time.md) is that spec, and the analyzer landed
+standalone (mirroring VC-013). This entry records meeting the rest of the spec: the surface is now
+enumerated, analyzed, and reported.
+
+**What landed.** Four layers, each independently tested. (1) The sdist fetcher retains a package's runtime
+`.py` modules from BOTH the sdist tar and the wheel zip, under new count/byte caps (`maxModuleFiles`,
+`maxModuleTotalBytes`) and an `isRuntimeModule` filter that excludes setup.py and test/docs/build trees;
+the cache semantics version bumped v3→v4 so a stale record carrying no modules cannot read as "the import
+surface was examined and found nothing." (2) `installsurface.AnalyzePythonLoadTime` scans each module's
+import-time-reachable code — module-level statements plus the bodies of functions called at module level —
+and emits `import-time:<rel>` hooks only on a capability COMBINATION (decode+exec, credential+network,
+cradle, named-credential read). (3) The pypi adapter runs it over every dependency and discloses the
+unexamined import surface (retention truncation, scan bounds) as coverage gaps. (4) A dedicated `VC-002L`
+check surfaces the hooks.
+
+**Advisory, and structurally so.** VC-002L is medium/advisory and never gates — the D-165 ceiling. That is
+not enforced by the check's gate constant alone: the block-class VC-002 family (`collectHooks`) EXCLUDES
+`import-time:` hooks, so a `credentials+network` import-time hook cannot reach VC-002d and block. The
+exclusion is scoped to the `import-time:` name; npm's `module-load:` hooks are deliberately untouched, so
+VC-002j (OPU-31) still gates entry-module native-exec as before. The distinct name is why a single
+prefix check cleanly separates the two.
+
+**Coverage, not truth.** A module tree past the retention cap, or a package whose sdist was read while a
+wheel-only payload sits elsewhere, is a disclosed gap or a documented deferral — never a clean result. The
+emit threshold stays deliberately tighter than the spec's §5 (no bare-exec / bare-network firing); raising
+it, and scanning the root project's own modules, and always reading the wheel, remain the §7 corpus-eval
+and follow-up work. Promotion above advisory is gated on that evaluation, not on this wiring.

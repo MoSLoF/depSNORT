@@ -89,8 +89,8 @@ _k = open(os.path.expanduser('~/.ssh/id_rsa')).read()
 				t.Fatalf("expected 1 import-time hook, got %d", len(s.Hooks))
 			}
 			h := s.Hooks[0]
-			if h.Name != "module-load:pkg/mod.py" {
-				t.Errorf("hook name = %q, want module-load:pkg/mod.py", h.Name)
+			if h.Name != "import-time:pkg/mod.py" {
+				t.Errorf("hook name = %q, want import-time:pkg/mod.py", h.Name)
 			}
 			for _, c := range tc.wantCaps {
 				if !loadTimeHasCap(h, c) {
@@ -204,12 +204,12 @@ def _run():
 // truth: past maxLoadTimeRefs modules, the scan stops and says so.
 func TestLoadTimeBoundDisclosed(t *testing.T) {
 	mods := map[string]string{}
-	for i := 0; i < maxLoadTimeRefs+4; i++ {
+	for i := 0; i < maxImportTimeModules+4; i++ {
 		mods[fmt.Sprintf("pkg/m%02d.py", i)] = "import base64\nexec(base64.b64decode('eA=='))\n"
 	}
 	s := AnalyzePythonLoadTime(mods)
-	if len(s.Hooks) != maxLoadTimeRefs {
-		t.Errorf("scanned hook count = %d, want the cap %d", len(s.Hooks), maxLoadTimeRefs)
+	if len(s.Hooks) != maxImportTimeModules {
+		t.Errorf("scanned hook count = %d, want the cap %d", len(s.Hooks), maxImportTimeModules)
 	}
 	if len(s.Truncated) == 0 {
 		t.Error("a capped scan must disclose the bound via Surface.Truncated")
